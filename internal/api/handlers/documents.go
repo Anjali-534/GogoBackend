@@ -1,12 +1,18 @@
 ﻿package handlers
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -103,6 +109,120 @@ func getVehicleCategory(vehicleType string) string {
 		return "ambulance"
 	}
 	return "two_wheeler"
+}
+
+// uploadToCloudinary uploads a file to Cloudinary using only stdlib HTTP.
+// Returns the permanent secure_url. Requires CLOUDINARY_CLOUD_NAME,
+// CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET environment variables.
+func uploadToCloudinary(ctx context.Context, reader io.Reader, origName, docType, driverID string) (string, error) {
+	cloudName := os.Getenv("CLOUDINARY_CLOUD_NAME")
+	apiKey := os.Getenv("CLOUDINARY_API_KEY")
+	apiSecret := os.Getenv("CLOUDINARY_API_SECRET")
+
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+	publicID := fmt.Sprintf("gogoo/drivers/%s/%s_%s", driverID, docType, uuid.New().String()[:8])
+
+	// Cloudinary signature: SHA-1("public_id=...&timestamp=...{api_secret}")
+	sigStr := fmt.Sprintf("public_id=%s&timestamp=%s%s", publicID, timestamp, apiSecret)
+	h := sha1.New()
+	h.Write([]byte(sigStr))
+	signature := hex.EncodeToString(h.Sum(nil))
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	_ = mw.WriteField("api_key", apiKey)
+	_ = mw.WriteField("timestamp", timestamp)
+	_ = mw.WriteField("public_id", publicID)
+	_ = mw.WriteField("signature", signature)
+	fw, err := mw.CreateFormFile("file", origName)
+	if err != nil {
+		return "", err
+	}
+	if _, err = io.Copy(fw, reader); err != nil {
+		return "", err
+	}
+	mw.Close()
+
+	uploadURL := fmt.Sprintf("https://api.cloudinary.com/v1_1/%s/auto/upload", cloudName)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadURL, &body)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		SecureURL string `json:"secure_url"`
+		Error     struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+	if result.Error.Message != "" {
+		return "", fmt.Errorf("cloudinary: %s", result.Error.Message)
+	}
+	return result.SecureURL, nil
+}
+
+// deleteFromCloudinary does a best-effort delete of a Cloudinary file.
+// Parses resource_type and public_id from the secure_url.
+func deleteFromCloudinary(fileURL string) {
+	cloudName := os.Getenv("CLOUDINARY_CLOUD_NAME")
+	apiKey := os.Getenv("CLOUDINARY_API_KEY")
+	apiSecret := os.Getenv("CLOUDINARY_API_SECRET")
+	if cloudName == "" {
+		return
+	}
+
+	// URL: https://res.cloudinary.com/{cloud}/{resource_type}/upload/v{ver}/{public_id}.{ext}
+	parts := strings.SplitN(fileURL, "/upload/", 2)
+	if len(parts) != 2 {
+		return
+	}
+	resourceType := "image"
+	if strings.Contains(parts[0], "/raw/") {
+		resourceType = "raw"
+	} else if strings.Contains(parts[0], "/video/") {
+		resourceType = "video"
+	}
+
+	// Strip version segment (e.g. "v1234567890/") then extension
+	afterUpload := parts[1]
+	slashIdx := strings.Index(afterUpload, "/")
+	if slashIdx < 0 {
+		return
+	}
+	publicIDWithExt := afterUpload[slashIdx+1:]
+	publicID := strings.TrimSuffix(publicIDWithExt, filepath.Ext(publicIDWithExt))
+
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+	sigStr := fmt.Sprintf("public_id=%s&timestamp=%s%s", publicID, timestamp, apiSecret)
+	hh := sha1.New()
+	hh.Write([]byte(sigStr))
+	signature := hex.EncodeToString(hh.Sum(nil))
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	_ = mw.WriteField("public_id", publicID)
+	_ = mw.WriteField("api_key", apiKey)
+	_ = mw.WriteField("timestamp", timestamp)
+	_ = mw.WriteField("signature", signature)
+	mw.Close()
+
+	destroyURL := fmt.Sprintf("https://api.cloudinary.com/v1_1/%s/%s/destroy", cloudName, resourceType)
+	req, err := http.NewRequest(http.MethodPost, destroyURL, &body)
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	http.DefaultClient.Do(req) //nolint:errcheck — best-effort
 }
 
 // GET /gogoo/driver/profile
@@ -290,31 +410,41 @@ func UploadDriverDocument(c *gin.Context) {
 		return
 	}
 
-	uploadDir := filepath.Join("uploads", "drivers", driverID)
-	if err := os.MkdirAll(uploadDir, 0755); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "storage error"})
-		return
-	}
+	var fileURL string
+	var written int64
 
-	fileName := fmt.Sprintf("%s_%s%s", docType, uuid.New().String()[:8], ext)
-	filePath := filepath.Join(uploadDir, fileName)
-
-	// Stream to disk. io.Copy guarantees the *whole* file is written —
-	// the previous file.Read(buf) could silently truncate larger uploads.
-	dst, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save file"})
-		return
+	if os.Getenv("CLOUDINARY_CLOUD_NAME") != "" {
+		// Production: stream directly to Cloudinary — survives Railway redeploys
+		secureURL, err := uploadToCloudinary(ctx, file, header.Filename, docType, driverID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "cloud storage error: " + err.Error()})
+			return
+		}
+		fileURL = secureURL
+		written = header.Size
+	} else {
+		// Local dev: save to disk
+		uploadDir := filepath.Join("uploads", "drivers", driverID)
+		if err := os.MkdirAll(uploadDir, 0755); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "storage error"})
+			return
+		}
+		localName := fmt.Sprintf("%s_%s%s", docType, uuid.New().String()[:8], ext)
+		filePath := filepath.Join(uploadDir, localName)
+		dst, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save file"})
+			return
+		}
+		written, err = io.Copy(dst, file)
+		dst.Close()
+		if err != nil {
+			os.Remove(filePath)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to write file"})
+			return
+		}
+		fileURL = fmt.Sprintf("/uploads/drivers/%s/%s", driverID, localName)
 	}
-	written, err := io.Copy(dst, file)
-	dst.Close()
-	if err != nil {
-		os.Remove(filePath)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to write file"})
-		return
-	}
-
-	fileURL := fmt.Sprintf("/uploads/drivers/%s/%s", driverID, fileName)
 
 	_, err = pool.Exec(ctx, `
 		INSERT INTO driver_documents
@@ -328,7 +458,6 @@ func UploadDriverDocument(c *gin.Context) {
 		nullIfEmpty(docNumber), nullIfEmpty(expiryDate))
 
 	if err != nil {
-		os.Remove(filePath)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
 	}
@@ -412,7 +541,11 @@ func DeleteDriverDocument(c *gin.Context) {
 		driverID, docType).Scan(&fileURL)
 
 	if fileURL != "" {
-		os.Remove("." + fileURL)
+		if strings.HasPrefix(fileURL, "https://res.cloudinary.com") {
+			deleteFromCloudinary(fileURL)
+		} else {
+			os.Remove("." + fileURL)
+		}
 	}
 	pool.Exec(ctx,
 		"DELETE FROM driver_documents WHERE driver_id=$1 AND doc_type=$2",
