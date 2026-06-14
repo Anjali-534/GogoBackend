@@ -1,0 +1,177 @@
+package api
+
+import (
+	"github.com/deploykit/backend/internal/api/handlers"
+	"github.com/deploykit/backend/internal/api/middleware"
+	"github.com/deploykit/backend/internal/config"
+	"github.com/gin-gonic/gin"
+)
+
+func SetupRouter(cfg *config.Config) *gin.Engine {
+	router := gin.Default()
+
+	// Add middlewares
+	router.Use(middleware.CORSMiddleware())
+	router.Use(func(c *gin.Context) {
+		c.Set("config", cfg)
+		c.Next()
+	})
+
+	// ============================================================
+	// PUBLIC ROUTES
+	// ============================================================
+	public := router.Group("")
+	{
+		// Health checks
+		public.GET("/health", handlers.Health)
+		public.GET("/ready", handlers.Ready)
+
+		// Auth
+		public.POST("/auth/signup", handlers.Signup)
+		public.POST("/auth/login", handlers.Login)
+		public.POST("/auth/refresh", handlers.Refresh)
+
+		// GitHub OAuth
+		public.GET("/auth/github", handlers.GitHubAuthURL)
+		public.GET("/auth/github/callback", handlers.GitHubCallback)
+	}
+
+	// ============================================================
+	// AUTHENTICATED ROUTES
+	// ============================================================
+	protected := router.Group("")
+	protected.Use(middleware.AuthMiddleware())
+	{
+		// User
+		protected.GET("/auth/me", handlers.Me)
+		protected.POST("/auth/logout", handlers.Logout)
+
+		// Projects
+		protected.GET("/projects", handlers.ListProjects)
+		protected.POST("/projects", handlers.CreateProject)
+		protected.GET("/projects/:id", handlers.GetProject)
+
+		// Clusters
+		protected.GET("/projects/:id/clusters", handlers.ListClusters)
+		protected.POST("/projects/:id/clusters", handlers.CreateCluster)
+		protected.GET("/clusters/:id", handlers.GetCluster)
+
+		// Apps
+		protected.GET("/clusters/:id/apps", handlers.ListApps)
+		protected.POST("/clusters/:id/apps", handlers.CreateApp)
+		protected.GET("/apps/:id", handlers.GetApp)
+
+		// Builds
+		protected.POST("/builds", handlers.TriggerBuild)
+		protected.GET("/builds/:id/logs", handlers.GetBuildLogs)
+		protected.GET("/apps/:id/builds", handlers.ListBuilds)
+
+		// Deployments
+		protected.POST("/deployments", handlers.TriggerDeployment)
+		protected.GET("/deployments/:id", handlers.GetDeploymentStatus)
+		protected.GET("/apps/:id/deployments", handlers.ListDeployments)
+		protected.POST("/apps/:id/rollback/:revision", handlers.RollbackDeployment)
+
+		// AWS Provisioning
+		protected.POST("/projects/:id/aws/link", handlers.LinkAWSAccount)
+		protected.POST("/projects/:id/provision/aws", handlers.ProvisionAWSCluster)
+
+	}
+
+	// Serve uploaded files
+	router.Static("/uploads", "./uploads")
+
+	// ============================================================
+	// GOGOO â€” PUBLIC ROUTES
+	// ============================================================
+	gogooPublic := router.Group("/gogoo")
+	{
+		gogooPublic.POST("/rider/signup", handlers.RiderSignup)
+		gogooPublic.POST("/driver/signup", handlers.DriverSignup)
+		gogooPublic.GET("/services", handlers.ListServiceTypes)
+
+	}
+
+	// ============================================================
+	// GOGOO â€” PROTECTED ROUTES
+	// ============================================================
+	gogoo := router.Group("/gogoo")
+	gogoo.Use(middleware.AuthMiddleware())
+	{
+		// Bookings
+		gogoo.POST("/bookings", handlers.CreateBooking)
+		gogoo.GET("/bookings", handlers.ListBookings)
+		gogoo.GET("/bookings-pending", handlers.ListPendingBookings)
+		gogoo.GET("/bookings/:id", handlers.GetBooking)
+        gogoo.POST("/bookings/:id/rate", handlers.RateBooking)
+        gogoo.POST("/bookings/:id/accept", handlers.AcceptBooking)
+		gogoo.PATCH("/bookings/:id/status", handlers.UpdateBookingStatus)
+
+		// Drivers
+		gogoo.GET("/drivers", handlers.ListDrivers)
+		gogoo.PATCH("/drivers/:id/verify", handlers.VerifyDriver)
+		gogoo.PATCH("/drivers/:id/online", handlers.ToggleDriverOnline)
+		gogoo.POST("/drivers/:id/location", handlers.UpdateDriverLocation)
+
+		// Riders (dashboard)
+		gogoo.GET("/riders", handlers.ListRiders)
+
+		// Driver profile & history
+		gogoo.GET("/driver/profile", handlers.GetDriverProfile)
+		gogoo.GET("/driver/bookings", handlers.ListDriverBookings)
+        gogoo.GET("/driver/reviews", handlers.GetDriverReviews)
+        gogoo.GET("/rider/profile", handlers.GetRiderProfile)
+		gogoo.GET("/rider/bookings", handlers.ListRiderBookings)
+		gogoo.GET("/rider/saved-places", handlers.GetSavedPlaces)
+		gogoo.POST("/rider/saved-places", handlers.SavePlace)
+		gogoo.DELETE("/rider/saved-places/:label", handlers.DeleteSavedPlace)
+		// Driver ride history + block management (admin)
+		gogoo.GET("/drivers/:id/bookings",  handlers.ListDriverBookingsByID)
+		gogoo.PATCH("/drivers/:id/block",   handlers.ManageDriverBlock)
+
+		// Documents
+		gogoo.GET("/drivers/:id/documents", handlers.GetDriverDocuments)
+		gogoo.POST("/drivers/:id/documents", handlers.UploadDriverDocument)
+		gogoo.PATCH("/drivers/:id/documents/:doc_type/review", handlers.ReviewDriverDocument)
+		gogoo.DELETE("/drivers/:id/documents/:doc_type", handlers.DeleteDriverDocument)
+
+		// Payments
+		gogoo.GET("/payments", handlers.ListPayments)
+
+		// Analytics
+		gogoo.GET("/analytics", handlers.GetAnalytics)
+
+		// Notifications (riders)
+		gogoo.GET("/notifications",                       handlers.ListNotifications)
+		gogoo.GET("/notifications/unread-count",          handlers.GetNotificationUnreadCount)
+		gogoo.POST("/notifications/:id/read",             handlers.MarkNotificationRead)
+
+		// Notifications (drivers)
+		gogoo.GET("/driver/notifications",                handlers.ListDriverNotifications)
+		gogoo.GET("/driver/notifications/unread-count",   handlers.GetDriverNotificationUnreadCount)
+		gogoo.POST("/driver/notifications/:id/read",      handlers.MarkNotificationRead)
+
+		// Push token registration (riders + drivers share same endpoint)
+		gogoo.POST("/push-token",                         handlers.RegisterPushToken)
+
+		// Broadcasts (admin)
+		gogoo.POST("/admin/notifications",                handlers.CreateNotification)
+		gogoo.GET("/admin/notifications",                 handlers.AdminListNotifications)
+		gogoo.DELETE("/admin/notifications/:id",          handlers.DeleteNotification)
+	}
+
+	// ============================================================
+	// GOGOO â€” EXCEL EXPORTS (token via header or ?token= query)
+	// ============================================================
+	gogooExport := router.Group("/gogoo/export")
+	gogooExport.Use(middleware.DownloadAuthMiddleware())
+	{
+		gogooExport.GET("/drivers.xlsx", handlers.ExportDriversXLSX)
+		gogooExport.GET("/users.xlsx", handlers.ExportUsersXLSX)
+	}
+
+	return router
+}
+
+
+

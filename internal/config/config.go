@@ -1,0 +1,111 @@
+package config
+
+import (
+	"os"
+	"strconv"
+	"time"
+)
+
+type Config struct {
+	// Server
+	Port              int
+	Environment       string
+	LogLevel          string
+	
+	// Database
+	DBHost            string
+	DBPort            int
+	DBUser            string
+	DBPassword        string
+	DBName            string
+	DBMaxConnections  int
+	
+	// JWT
+	JWTSecret         string
+	JWTExpiration     time.Duration
+	
+	// GitHub OAuth
+	GitHubClientID    string
+	GitHubClientSecret string
+	GitHubRedirectURL string
+	
+	// GitLab OAuth
+	GitLabClientID    string
+	GitLabClientSecret string
+	GitLabRedirectURL string
+	
+	// Frontend URLs
+	DashboardURL      string
+	APIBaseURL        string
+	
+	// Redis
+	RedisHost         string
+	RedisPort         int
+	
+	// Stripe
+	StripeKey         string
+	StripeWebhookSecret string
+	
+	// AWS
+	AWSRegion         string
+	
+	// Kubernetes
+	KubeConfig        string
+}
+
+func Load() *Config {
+	cfg := &Config{
+		Port:              getInt("PORT", 8080),
+		Environment:       getString("ENVIRONMENT", "development"),
+		LogLevel:          getString("LOG_LEVEL", "info"),
+		
+		DBHost:            getString("DB_HOST", "localhost"),
+		DBPort:            getInt("DB_PORT", 5432),
+		DBUser:            getString("DB_USER", "deploykit"),
+		DBPassword:        getString("DB_PASSWORD", "deploykit"),
+		DBName:            getString("DB_NAME", "deploykit"),
+		DBMaxConnections:  getInt("DB_MAX_CONNECTIONS", 25),
+		
+		JWTSecret:        getString("JWT_SECRET", ""),
+		JWTExpiration:    time.Hour * 24 * 7,
+		
+		GitHubClientID:   getString("GITHUB_CLIENT_ID", ""),
+		GitHubClientSecret: getString("GITHUB_CLIENT_SECRET", ""),
+		GitHubRedirectURL: getString("GITHUB_REDIRECT_URL", "http://localhost:3000/auth/github/callback"),
+		
+		GitLabClientID:   getString("GITLAB_CLIENT_ID", ""),
+		GitLabClientSecret: getString("GITLAB_CLIENT_SECRET", ""),
+		GitLabRedirectURL: getString("GITLAB_REDIRECT_URL", "http://localhost:3000/auth/gitlab/callback"),
+		
+		DashboardURL:     getString("DASHBOARD_URL", "http://localhost:3000"),
+		APIBaseURL:       getString("API_BASE_URL", "http://localhost:8080"),
+		
+		RedisHost:        getString("REDIS_HOST", "localhost"),
+		RedisPort:        getInt("REDIS_PORT", 6379),
+		
+		StripeKey:        getString("STRIPE_KEY", ""),
+		StripeWebhookSecret: getString("STRIPE_WEBHOOK_SECRET", ""),
+		
+		AWSRegion:        getString("AWS_REGION", "us-east-1"),
+		
+		KubeConfig:       getString("KUBECONFIG", ""),
+	}
+	
+	return cfg
+}
+
+func getString(key, defaultVal string) string {
+	if val := os.Getenv(key); val != "" {
+		return val
+	}
+	return defaultVal
+}
+
+func getInt(key string, defaultVal int) int {
+	if val := os.Getenv(key); val != "" {
+		if i, err := strconv.Atoi(val); err == nil {
+			return i
+		}
+	}
+	return defaultVal
+}
