@@ -1,4 +1,4 @@
-package db
+﻿package db
 
 import (
 	"context"
@@ -35,7 +35,7 @@ func Init(cfg *config.Config) error {
 
 func connect(cfg *config.Config) (*DB, error) {
 	connStr := fmt.Sprintf(
-		"postgres://%s:%s@%s:%d/%s?sslmode=disable",
+		"postgres://%s:%s@%s:%d/%s?sslmode=require",
 		cfg.DBUser,
 		cfg.DBPassword,
 		cfg.DBHost,
