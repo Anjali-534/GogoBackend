@@ -2,7 +2,9 @@
 
 import (
     "context"
+    "crypto/rand"
     "fmt"
+    "math/big"
     "net/http"
     "time"
 
@@ -162,8 +164,10 @@ func CreateBooking(c *gin.Context) {
     ctx := context.Background()
     pool := db.GetDB().GetPool()
     bookingID := uuid.New()
-    _, err := pool.Exec(ctx, `INSERT INTO bookings (id,rider_id,service_type_id,status,pickup_lat,pickup_lng,pickup_address,drop_lat,drop_lng,drop_address,estimated_fare,distance_km) VALUES ($1,$2,$3,'searching',$4,$5,$6,$7,$8,$9,$10,$11)`,
-        bookingID, req.RiderID, req.ServiceTypeID, req.PickupLat, req.PickupLng, req.PickupAddress, req.DropLat, req.DropLng, req.DropAddress, req.EstimatedFare, req.DistanceKm)
+    n, _ := rand.Int(rand.Reader, big.NewInt(10000))
+    otp := fmt.Sprintf("%04d", n.Int64())
+    _, err := pool.Exec(ctx, `INSERT INTO bookings (id,rider_id,service_type_id,status,pickup_lat,pickup_lng,pickup_address,drop_lat,drop_lng,drop_address,estimated_fare,distance_km,ride_otp) VALUES ($1,$2,$3,'searching',$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+        bookingID, req.RiderID, req.ServiceTypeID, req.PickupLat, req.PickupLng, req.PickupAddress, req.DropLat, req.DropLng, req.DropAddress, req.EstimatedFare, req.DistanceKm, otp)
     if err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create booking: " + err.Error()})
         return
@@ -335,23 +339,55 @@ func ToggleDriverOnline(c *gin.Context) {
     c.JSON(http.StatusOK, gin.H{"is_online": req.IsOnline})
 }
 
+// GET /gogoo/driver/active-booking
+// Returns the driver's current active booking (if any) and their driver_id.
+// Uses minimal JOINs so it never fails due to orphaned rider/service records.
+func GetDriverActiveBooking(c *gin.Context) {
+    userID := c.GetString("user_id")
+    ctx    := context.Background()
+    pool   := db.GetDB().GetPool()
+
+    var driverID string
+    if err := pool.QueryRow(ctx, `SELECT id FROM drivers WHERE user_id=$1`, userID).Scan(&driverID); err != nil {
+        c.JSON(http.StatusOK, gin.H{"driver_id": nil, "booking_id": nil})
+        return
+    }
+
+    var bookingID string
+    err := pool.QueryRow(ctx, `
+        SELECT id FROM bookings
+        WHERE driver_id = $1 AND status NOT IN ('completed','cancelled')
+        ORDER BY created_at DESC LIMIT 1
+    `, driverID).Scan(&bookingID)
+
+    if err != nil {
+        // No active booking — still return driver_id so app can save it
+        c.JSON(http.StatusOK, gin.H{"driver_id": driverID, "booking_id": nil})
+        return
+    }
+    c.JSON(http.StatusOK, gin.H{"driver_id": driverID, "booking_id": bookingID})
+}
+
 func AcceptBooking(c *gin.Context) {
     bookingID := c.Param("id")
-    var req struct {
-        DriverID string `json:"driver_id"`
-    }
-    c.ShouldBindJSON(&req)
+    userID    := c.GetString("user_id") // from JWT — never trust client-sent ID
     ctx  := context.Background()
     pool := db.GetDB().GetPool()
 
-    // Reject blocked drivers
+    // Resolve driver record from the authenticated user
+    var driverID string
     var isBlocked bool
     var blockedUntil *time.Time
-    pool.QueryRow(ctx,
-        `SELECT COALESCE(is_blocked,FALSE), blocked_until FROM drivers WHERE id=$1`,
-        req.DriverID,
-    ).Scan(&isBlocked, &blockedUntil)
+    err := pool.QueryRow(ctx,
+        `SELECT id, COALESCE(is_blocked,FALSE), blocked_until FROM drivers WHERE user_id=$1`,
+        userID,
+    ).Scan(&driverID, &isBlocked, &blockedUntil)
+    if err != nil || driverID == "" {
+        c.JSON(http.StatusNotFound, gin.H{"error": "Driver profile not found"})
+        return
+    }
 
+    // Reject blocked drivers
     if isBlocked && blockedUntil != nil && blockedUntil.After(time.Now()) {
         c.JSON(http.StatusForbidden, gin.H{
             "error":         "You are temporarily blocked due to excessive cancellations",
@@ -362,22 +398,22 @@ func AcceptBooking(c *gin.Context) {
 
     // Auto-lift expired blocks
     if isBlocked && (blockedUntil == nil || !blockedUntil.After(time.Now())) {
-        pool.Exec(ctx, `UPDATE drivers SET is_blocked=FALSE, blocked_until=NULL, block_reason=NULL WHERE id=$1`, req.DriverID)
+        pool.Exec(ctx, `UPDATE drivers SET is_blocked=FALSE, blocked_until=NULL, block_reason=NULL WHERE id=$1`, driverID)
     }
 
     // Reject if driver already has an active ride
     var activeCount int
     pool.QueryRow(ctx,
         `SELECT COUNT(*) FROM bookings WHERE driver_id=$1 AND status NOT IN ('completed','cancelled')`,
-        req.DriverID,
+        driverID,
     ).Scan(&activeCount)
     if activeCount > 0 {
         c.JSON(http.StatusConflict, gin.H{"error": "You already have an active ride. Complete it before accepting a new one."})
         return
     }
 
-    pool.Exec(ctx, `UPDATE bookings SET driver_id=$1,status='accepted',accepted_at=NOW() WHERE id=$2 AND status='searching'`, req.DriverID, bookingID)
-    c.JSON(http.StatusOK, gin.H{"status": "accepted"})
+    pool.Exec(ctx, `UPDATE bookings SET driver_id=$1,status='accepted',accepted_at=NOW() WHERE id=$2 AND status='searching'`, driverID, bookingID)
+    c.JSON(http.StatusOK, gin.H{"status": "accepted", "driver_id": driverID})
 }
 
 func UpdateBookingStatus(c *gin.Context) {
@@ -439,6 +475,41 @@ func UpdateBookingStatus(c *gin.Context) {
         }
     }
     c.JSON(http.StatusOK, gin.H{"status": req.Status})
+}
+
+// POST /gogoo/bookings/:id/verify-otp
+// Driver submits the 4-digit OTP shown on the rider's screen.
+// On success the booking transitions to in_progress (trip starts).
+func VerifyRideOTP(c *gin.Context) {
+    bookingID := c.Param("id")
+    var req struct {
+        OTP string `json:"otp" binding:"required"`
+    }
+    if err := c.ShouldBindJSON(&req); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "otp is required"})
+        return
+    }
+    ctx := context.Background()
+    pool := db.GetDB().GetPool()
+
+    var storedOTP *string
+    var status string
+    if err := pool.QueryRow(ctx,
+        `SELECT ride_otp, status FROM bookings WHERE id=$1`, bookingID,
+    ).Scan(&storedOTP, &status); err != nil {
+        c.JSON(http.StatusNotFound, gin.H{"error": "booking not found"})
+        return
+    }
+    if status != "arriving" {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "booking is not awaiting OTP verification"})
+        return
+    }
+    if storedOTP == nil || *storedOTP != req.OTP {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid OTP"})
+        return
+    }
+    pool.Exec(ctx, `UPDATE bookings SET status='in_progress', started_at=NOW() WHERE id=$1`, bookingID)
+    c.JSON(http.StatusOK, gin.H{"status": "in_progress"})
 }
 
 func RateBooking(c *gin.Context) {
@@ -653,6 +724,68 @@ func ManageDriverBlock(c *gin.Context) {
     }
 }
 
+// GET /gogoo/riders/:id/bookings  (admin — fetch any rider's ride history by rider UUID)
+func ListRiderBookingsByID(c *gin.Context) {
+    riderID      := c.Param("id")
+    statusFilter := c.Query("status")
+    ctx  := context.Background()
+    pool := db.GetDB().GetPool()
+
+    query := `
+        SELECT b.id, b.status, b.pickup_address, b.drop_address,
+               COALESCE(b.final_fare, b.estimated_fare, 0),
+               COALESCE(b.distance_km, 0),
+               b.created_at,
+               COALESCE(u_d.name, '') AS driver_name,
+               st.name               AS service_name,
+               COALESCE(b.cancelled_by, '')    AS cancelled_by,
+               COALESCE(b.cancel_reason, '')   AS cancel_reason
+        FROM bookings b
+        JOIN service_types st ON st.id  = b.service_type_id
+        LEFT JOIN drivers d   ON d.id   = b.driver_id
+        LEFT JOIN users u_d   ON u_d.id = d.user_id
+        WHERE b.rider_id = $1`
+
+    args := []interface{}{riderID}
+    if statusFilter != "" {
+        query += " AND b.status = $2"
+        args = append(args, statusFilter)
+    }
+    query += " ORDER BY b.created_at DESC LIMIT 100"
+
+    rows, err := pool.Query(ctx, query, args...)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+        return
+    }
+    defer rows.Close()
+
+    var bookings []map[string]interface{}
+    for rows.Next() {
+        var id, status, pickup, drop, driverName, serviceName, cancelledBy, cancelReason string
+        var fare, distanceKm float64
+        var createdAt time.Time
+        rows.Scan(&id, &status, &pickup, &drop, &fare, &distanceKm, &createdAt, &driverName, &serviceName, &cancelledBy, &cancelReason)
+        bookings = append(bookings, map[string]interface{}{
+            "id":             id,
+            "status":         status,
+            "pickup_address": pickup,
+            "drop_address":   drop,
+            "fare":           fare,
+            "distance_km":    distanceKm,
+            "created_at":     createdAt,
+            "driver_name":    driverName,
+            "service_name":   serviceName,
+            "cancelled_by":   cancelledBy,
+            "cancel_reason":  cancelReason,
+        })
+    }
+    if bookings == nil {
+        bookings = []map[string]interface{}{}
+    }
+    c.JSON(http.StatusOK, bookings)
+}
+
 // GET /gogoo/driver/reviews
 func GetDriverReviews(c *gin.Context) {
     userID := c.GetString("user_id")
@@ -709,7 +842,9 @@ func ListDriverBookingsByID(c *gin.Context) {
                COALESCE(b.distance_km, 0),
                b.created_at,
                COALESCE(u_r.name, '') AS rider_name,
-               st.name               AS service_name
+               st.name               AS service_name,
+               COALESCE(b.cancelled_by, '')   AS cancelled_by,
+               COALESCE(b.cancel_reason, '')  AS cancel_reason
         FROM bookings b
         JOIN riders       r   ON r.id   = b.rider_id
         JOIN users        u_r ON u_r.id = r.user_id
@@ -732,10 +867,10 @@ func ListDriverBookingsByID(c *gin.Context) {
 
     var bookings []map[string]interface{}
     for rows.Next() {
-        var id, status, pickup, drop, riderName, serviceName string
+        var id, status, pickup, drop, riderName, serviceName, cancelledBy, cancelReason string
         var fare, distanceKm float64
         var createdAt time.Time
-        rows.Scan(&id, &status, &pickup, &drop, &fare, &distanceKm, &createdAt, &riderName, &serviceName)
+        rows.Scan(&id, &status, &pickup, &drop, &fare, &distanceKm, &createdAt, &riderName, &serviceName, &cancelledBy, &cancelReason)
         bookings = append(bookings, map[string]interface{}{
             "id":             id,
             "status":         status,
@@ -746,6 +881,8 @@ func ListDriverBookingsByID(c *gin.Context) {
             "created_at":     createdAt,
             "rider_name":     riderName,
             "service_name":   serviceName,
+            "cancelled_by":   cancelledBy,
+            "cancel_reason":  cancelReason,
         })
     }
     if bookings == nil {

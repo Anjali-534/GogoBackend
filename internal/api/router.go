@@ -105,6 +105,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.GET("/bookings/:id", handlers.GetBooking)
         gogoo.POST("/bookings/:id/rate", handlers.RateBooking)
         gogoo.POST("/bookings/:id/accept", handlers.AcceptBooking)
+        gogoo.POST("/bookings/:id/verify-otp", handlers.VerifyRideOTP)
 		gogoo.PATCH("/bookings/:id/status", handlers.UpdateBookingStatus)
 
 		// Drivers
@@ -118,6 +119,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 
 		// Driver profile & history
 		gogoo.GET("/driver/profile", handlers.GetDriverProfile)
+		gogoo.GET("/driver/active-booking", handlers.GetDriverActiveBooking)
 		gogoo.GET("/driver/bookings", handlers.ListDriverBookings)
         gogoo.GET("/driver/reviews", handlers.GetDriverReviews)
         gogoo.GET("/rider/profile", handlers.GetRiderProfile)
@@ -128,6 +130,8 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		// Driver ride history + block management (admin)
 		gogoo.GET("/drivers/:id/bookings",  handlers.ListDriverBookingsByID)
 		gogoo.PATCH("/drivers/:id/block",   handlers.ManageDriverBlock)
+		// Rider ride history (admin)
+		gogoo.GET("/riders/:id/bookings",   handlers.ListRiderBookingsByID)
 
 		// Documents
 		gogoo.GET("/drivers/:id/documents", handlers.GetDriverDocuments)

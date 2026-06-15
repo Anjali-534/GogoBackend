@@ -122,6 +122,8 @@ func GetBooking(c *gin.Context) {
 		driverLat, driverLng, driverHeading              *float64
 		driverName, driverPhone, vehicleNumber, vehModel *string
 		driverRating                                     *float64
+		riderName, serviceName                           string
+		rideOTP                                          *string
 	)
 
 	err := pool.QueryRow(ctx, `
@@ -130,10 +132,16 @@ func GetBooking(c *gin.Context) {
 		       b.drop_lat, b.drop_lng, b.drop_address,
 		       COALESCE(b.estimated_fare,0), COALESCE(b.distance_km,0),
 		       b.driver_lat, b.driver_lng, b.driver_heading,
-		       du.name, d.phone, d.vehicle_number, d.vehicle_model, d.rating
+		       du.name, d.phone, d.vehicle_number, d.vehicle_model, d.rating,
+		       COALESCE(u_r.name,'') AS rider_name,
+		       COALESCE(st.name,'')  AS service_name,
+		       b.ride_otp
 		FROM bookings b
-		LEFT JOIN drivers d  ON d.id = b.driver_id
-		LEFT JOIN users   du ON du.id = d.user_id
+		LEFT JOIN drivers      d   ON d.id    = b.driver_id
+		LEFT JOIN users        du  ON du.id   = d.user_id
+		LEFT JOIN riders       r   ON r.id    = b.rider_id
+		LEFT JOIN users        u_r ON u_r.id  = r.user_id
+		LEFT JOIN service_types st ON st.id   = b.service_type_id
 		WHERE b.id = $1
 	`, bookingID).Scan(
 		&id, &riderID, &status, &driverID,
@@ -141,6 +149,8 @@ func GetBooking(c *gin.Context) {
 		&fare, &dist,
 		&driverLat, &driverLng, &driverHeading,
 		&driverName, &driverPhone, &vehicleNumber, &vehModel, &driverRating,
+		&riderName, &serviceName,
+		&rideOTP,
 	)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "booking not found"})
@@ -155,6 +165,12 @@ func GetBooking(c *gin.Context) {
 		"drop":           gin.H{"lat": dLat, "lng": dLng, "address": dAddr},
 		"estimated_fare": fare,
 		"distance_km":    dist,
+		"rider_name":     riderName,
+		"service_name":   serviceName,
+	}
+	// Expose OTP once driver has arrived so the rider can read it aloud.
+	if status == "arriving" && rideOTP != nil {
+		resp["ride_otp"] = *rideOTP
 	}
 
 	if driverID != nil {
