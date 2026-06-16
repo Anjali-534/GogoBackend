@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/deploykit/backend/internal/db"
 	"github.com/gin-gonic/gin"
@@ -124,6 +125,8 @@ func GetBooking(c *gin.Context) {
 		driverRating                                     *float64
 		riderName, serviceName                           string
 		rideOTP                                          *string
+		finalFare                                        *float64
+		startedAt, completedAt                           *time.Time
 	)
 
 	err := pool.QueryRow(ctx, `
@@ -135,7 +138,10 @@ func GetBooking(c *gin.Context) {
 		       du.name, d.phone, d.vehicle_number, d.vehicle_model, d.rating,
 		       COALESCE(u_r.name,'') AS rider_name,
 		       COALESCE(st.name,'')  AS service_name,
-		       b.ride_otp
+		       b.ride_otp,
+		       b.final_fare,
+		       b.started_at,
+		       b.completed_at
 		FROM bookings b
 		LEFT JOIN drivers      d   ON d.id    = b.driver_id
 		LEFT JOIN users        du  ON du.id   = d.user_id
@@ -151,6 +157,7 @@ func GetBooking(c *gin.Context) {
 		&driverName, &driverPhone, &vehicleNumber, &vehModel, &driverRating,
 		&riderName, &serviceName,
 		&rideOTP,
+		&finalFare, &startedAt, &completedAt,
 	)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "booking not found"})
@@ -167,6 +174,9 @@ func GetBooking(c *gin.Context) {
 		"distance_km":    dist,
 		"rider_name":     riderName,
 		"service_name":   serviceName,
+		"final_fare":     finalFare,
+		"started_at":     startedAt,
+		"completed_at":   completedAt,
 	}
 	// Expose OTP once driver has arrived so the rider can read it aloud.
 	if status == "arriving" && rideOTP != nil {

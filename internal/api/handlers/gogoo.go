@@ -434,7 +434,11 @@ func UpdateBookingStatus(c *gin.Context) {
     case "in_progress":
         pool.Exec(ctx, `UPDATE bookings SET status='in_progress',started_at=NOW() WHERE id=$1`, bookingID)
     case "completed":
-        pool.Exec(ctx, `UPDATE bookings SET status='completed',completed_at=NOW(),final_fare=$1 WHERE id=$2`, req.FinalFare, bookingID)
+        finalFare := req.FinalFare
+        if finalFare <= 0 {
+            pool.QueryRow(ctx, `SELECT COALESCE(estimated_fare,0) FROM bookings WHERE id=$1`, bookingID).Scan(&finalFare)
+        }
+        pool.Exec(ctx, `UPDATE bookings SET status='completed',completed_at=NOW(),final_fare=$1 WHERE id=$2`, finalFare, bookingID)
     case "cancelled":
         pool.Exec(ctx, `UPDATE bookings SET status='cancelled',cancelled_at=NOW(),cancelled_by=$1,cancel_reason=$2 WHERE id=$3`, req.CancelBy, req.CancelReason, bookingID)
 
