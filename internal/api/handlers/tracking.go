@@ -123,7 +123,7 @@ func GetBooking(c *gin.Context) {
 		driverLat, driverLng, driverHeading              *float64
 		driverName, driverPhone, vehicleNumber, vehModel *string
 		driverRating                                     *float64
-		riderName, serviceName                           string
+		riderName, riderPhone, serviceName               string
 		rideOTP                                          *string
 		finalFare                                        *float64
 		startedAt, completedAt                           *time.Time
@@ -137,6 +137,7 @@ func GetBooking(c *gin.Context) {
 		       b.driver_lat, b.driver_lng, b.driver_heading,
 		       du.name, d.phone, d.vehicle_number, d.vehicle_model, d.rating,
 		       COALESCE(u_r.name,'') AS rider_name,
+		       COALESCE(r.phone,'')  AS rider_phone,
 		       COALESCE(st.name,'')  AS service_name,
 		       b.ride_otp,
 		       b.final_fare,
@@ -155,7 +156,7 @@ func GetBooking(c *gin.Context) {
 		&fare, &dist,
 		&driverLat, &driverLng, &driverHeading,
 		&driverName, &driverPhone, &vehicleNumber, &vehModel, &driverRating,
-		&riderName, &serviceName,
+		&riderName, &riderPhone, &serviceName,
 		&rideOTP,
 		&finalFare, &startedAt, &completedAt,
 	)
@@ -173,6 +174,7 @@ func GetBooking(c *gin.Context) {
 		"estimated_fare": fare,
 		"distance_km":    dist,
 		"rider_name":     riderName,
+		"rider_phone":    riderPhone,
 		"service_name":   serviceName,
 		"final_fare":     finalFare,
 		"started_at":     startedAt,
