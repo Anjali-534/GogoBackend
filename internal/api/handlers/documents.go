@@ -232,17 +232,21 @@ func GetDriverProfile(c *gin.Context) {
 	pool := db.GetDB().GetPool()
 
 	var driverID, phone, vehicleType, vehicleNumber, vehicleModel string
-	var isVerified, isOnline bool
-	var rating float64
+	var isVerified, isOnline, isBlocked, isWalletBlocked bool
+	var rating, walletBalance float64
 	var totalRides int
+	var walletBlockedReason *string
 
 	err := pool.QueryRow(ctx, `
 		SELECT id, COALESCE(phone,''), COALESCE(vehicle_type,''),
 			COALESCE(vehicle_number,''), COALESCE(vehicle_model,''),
-			is_verified, is_online, COALESCE(rating,0), COALESCE(total_rides,0)
+			is_verified, is_online, COALESCE(rating,0), COALESCE(total_rides,0),
+			COALESCE(is_blocked, false), COALESCE(is_wallet_blocked, false),
+			COALESCE(wallet_balance, -700.00), wallet_blocked_reason
 		FROM drivers WHERE user_id=$1
 	`, userID).Scan(&driverID, &phone, &vehicleType, &vehicleNumber,
-		&vehicleModel, &isVerified, &isOnline, &rating, &totalRides)
+		&vehicleModel, &isVerified, &isOnline, &rating, &totalRides,
+		&isBlocked, &isWalletBlocked, &walletBalance, &walletBlockedReason)
 
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "driver profile not found"})
@@ -250,16 +254,20 @@ func GetDriverProfile(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"driver_id":      driverID,
-		"user_id":        userID,
-		"phone":          phone,
-		"vehicle_type":   vehicleType,
-		"vehicle_number": vehicleNumber,
-		"vehicle_model":  vehicleModel,
-		"is_verified":    isVerified,
-		"is_online":      isOnline,
-		"rating":         rating,
-		"total_rides":    totalRides,
+		"driver_id":             driverID,
+		"user_id":               userID,
+		"phone":                 phone,
+		"vehicle_type":          vehicleType,
+		"vehicle_number":        vehicleNumber,
+		"vehicle_model":         vehicleModel,
+		"is_verified":           isVerified,
+		"is_online":             isOnline,
+		"rating":                rating,
+		"total_rides":           totalRides,
+		"is_blocked":            isBlocked,
+		"is_wallet_blocked":     isWalletBlocked,
+		"wallet_balance":        walletBalance,
+		"wallet_blocked_reason": walletBlockedReason,
 	})
 }
 

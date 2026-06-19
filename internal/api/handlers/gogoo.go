@@ -116,6 +116,16 @@ func DriverSignup(c *gin.Context) {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit"})
         return
     }
+    // Charge one-time registration fee
+    _, _ = pool.Exec(ctx, `
+        INSERT INTO driver_earnings
+            (id, driver_id, amount, type, description, is_debit, debit_type)
+        VALUES
+            ($1, $2, 700.00, 'adjustment',
+             'One-time registration fee — gogoo onboarding',
+             true, 'registration_fee')
+    `, uuid.New(), driverID)
+    _, _ = pool.Exec(ctx, `UPDATE drivers SET wallet_balance = -700.00 WHERE id = $1`, driverID)
     c.JSON(http.StatusCreated, gin.H{"user_id": userID, "driver_id": driverID, "message": "Driver account created. Pending verification."})
 }
 
@@ -439,6 +449,37 @@ func UpdateBookingStatus(c *gin.Context) {
             pool.QueryRow(ctx, `SELECT COALESCE(estimated_fare,0) FROM bookings WHERE id=$1`, bookingID).Scan(&finalFare)
         }
         pool.Exec(ctx, `UPDATE bookings SET status='completed',completed_at=NOW(),final_fare=$1 WHERE id=$2`, finalFare, bookingID)
+        // Credit driver wallet: 80% earnings, 20% gogoo commission
+        if finalFare > 0 {
+            driverNet  := finalFare * 0.80
+            commission := finalFare * 0.20
+            pool.Exec(ctx, `
+                INSERT INTO driver_earnings (id, driver_id, booking_id, amount, type, description, is_debit, created_at)
+                SELECT $1, driver_id, $2, $3, 'ride', 'Trip earnings (80% of fare)', false, NOW()
+                FROM bookings WHERE id=$2
+            `, uuid.New(), bookingID, driverNet)
+            pool.Exec(ctx, `
+                INSERT INTO driver_earnings (id, driver_id, booking_id, amount, type, description, is_debit, debit_type, created_at)
+                SELECT $1, driver_id, $2, $3, 'adjustment', 'gogoo commission (20%)', true, 'commission', NOW()
+                FROM bookings WHERE id=$2
+            `, uuid.New(), bookingID, commission)
+            pool.Exec(ctx, `
+                UPDATE drivers
+                SET wallet_balance = COALESCE(wallet_balance, -700.00) + $1,
+                    total_earnings  = COALESCE(total_earnings, 0) + $2,
+                    total_rides     = COALESCE(total_rides, 0) + 1
+                WHERE id = (SELECT driver_id FROM bookings WHERE id=$3)
+            `, driverNet-commission, driverNet, bookingID)
+            pool.Exec(ctx, `
+                UPDATE drivers
+                SET is_wallet_blocked     = true,
+                    is_blocked            = true,
+                    wallet_blocked_at     = NOW(),
+                    wallet_blocked_reason = 'Wallet balance below -₹1000'
+                WHERE id = (SELECT driver_id FROM bookings WHERE id=$1)
+                AND COALESCE(wallet_balance, -700.00) < -1000
+            `, bookingID)
+        }
     case "cancelled":
         pool.Exec(ctx, `UPDATE bookings SET status='cancelled',cancelled_at=NOW(),cancelled_by=$1,cancel_reason=$2 WHERE id=$3`, req.CancelBy, req.CancelReason, bookingID)
 
@@ -625,6 +666,7 @@ func ListDriverBookings(c *gin.Context) {
                COALESCE(b.final_fare, b.estimated_fare, 0),
                COALESCE(b.distance_km, 0),
                b.created_at,
+               b.completed_at,
                COALESCE(u_r.name, '') AS rider_name,
                st.name AS service_name
         FROM bookings b
@@ -648,7 +690,8 @@ func ListDriverBookings(c *gin.Context) {
         var id, status, pickup, drop, riderName, serviceName string
         var fare, distanceKm float64
         var createdAt time.Time
-        rows.Scan(&id, &status, &pickup, &drop, &fare, &distanceKm, &createdAt, &riderName, &serviceName)
+        var completedAt *time.Time
+        rows.Scan(&id, &status, &pickup, &drop, &fare, &distanceKm, &createdAt, &completedAt, &riderName, &serviceName)
         bookings = append(bookings, map[string]interface{}{
             "id":             id,
             "status":         status,
@@ -657,6 +700,7 @@ func ListDriverBookings(c *gin.Context) {
             "fare":           fare,
             "distance_km":    distanceKm,
             "created_at":     createdAt,
+            "completed_at":   completedAt,
             "rider_name":     riderName,
             "service_name":   serviceName,
         })
@@ -665,6 +709,238 @@ func ListDriverBookings(c *gin.Context) {
         bookings = []map[string]interface{}{}
     }
     c.JSON(http.StatusOK, bookings)
+}
+
+// GET /gogoo/driver/wallet
+func GetDriverWallet(c *gin.Context) {
+    userID := c.GetString("user_id")
+    ctx    := context.Background()
+    pool   := db.GetDB().GetPool()
+
+    var (
+        balance       float64
+        totalEarnings float64
+        totalRides    int
+        isBlocked     bool
+        blockedReason *string
+        regFeePaid    bool
+    )
+    err := pool.QueryRow(ctx, `
+        SELECT
+            COALESCE(wallet_balance, -700.00),
+            COALESCE(total_earnings, 0),
+            COALESCE(total_rides, 0),
+            COALESCE(is_wallet_blocked, false),
+            wallet_blocked_reason,
+            COALESCE(registration_fee_paid, false)
+        FROM drivers WHERE user_id = $1
+    `, userID).Scan(&balance, &totalEarnings, &totalRides, &isBlocked, &blockedReason, &regFeePaid)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch wallet"})
+        return
+    }
+
+    canWithdraw     := balance > 500
+    withdrawableAmt := 0.0
+    if canWithdraw {
+        withdrawableAmt = balance - 500
+    }
+    c.JSON(http.StatusOK, gin.H{
+        "wallet_balance":        balance,
+        "total_earnings":        totalEarnings,
+        "total_rides":           totalRides,
+        "is_wallet_blocked":     isBlocked,
+        "wallet_blocked_reason": blockedReason,
+        "registration_fee_paid": regFeePaid,
+        "minimum_balance":       500.00,
+        "can_withdraw":          canWithdraw,
+        "withdrawable_amount":   withdrawableAmt,
+    })
+}
+
+// GET /gogoo/driver/ledger
+func GetDriverLedger(c *gin.Context) {
+    userID := c.GetString("user_id")
+    ctx    := context.Background()
+    pool   := db.GetDB().GetPool()
+
+    var driverID string
+    pool.QueryRow(ctx, `SELECT id FROM drivers WHERE user_id = $1`, userID).Scan(&driverID)
+
+    rows, err := pool.Query(ctx, `
+        SELECT
+            de.id,
+            de.amount,
+            COALESCE(de.type, ''),
+            COALESCE(de.description, ''),
+            COALESCE(de.is_debit, false),
+            COALESCE(de.debit_type, ''),
+            de.created_at,
+            de.booking_id
+        FROM driver_earnings de
+        WHERE de.driver_id = $1
+        ORDER BY de.created_at DESC
+        LIMIT 50
+    `, driverID)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch ledger"})
+        return
+    }
+    defer rows.Close()
+
+    type LedgerEntry struct {
+        ID          string    `json:"id"`
+        Amount      float64   `json:"amount"`
+        Type        string    `json:"type"`
+        Description string    `json:"description"`
+        IsDebit     bool      `json:"is_debit"`
+        DebitType   string    `json:"debit_type"`
+        CreatedAt   time.Time `json:"created_at"`
+        BookingID   *string   `json:"booking_id"`
+    }
+    var entries []LedgerEntry
+    for rows.Next() {
+        var e LedgerEntry
+        rows.Scan(&e.ID, &e.Amount, &e.Type, &e.Description,
+            &e.IsDebit, &e.DebitType, &e.CreatedAt, &e.BookingID)
+        entries = append(entries, e)
+    }
+    if entries == nil {
+        entries = []LedgerEntry{}
+    }
+    c.JSON(http.StatusOK, gin.H{"entries": entries})
+}
+
+// GET /gogoo/driver/earnings/summary
+func GetEarningsSummary(c *gin.Context) {
+    userID := c.GetString("user_id")
+    ctx    := context.Background()
+    pool   := db.GetDB().GetPool()
+
+    var driverID string
+    pool.QueryRow(ctx, `SELECT id FROM drivers WHERE user_id = $1`, userID).Scan(&driverID)
+
+    var todayEarnings float64
+    var todayTrips    int
+    pool.QueryRow(ctx, `
+        SELECT COALESCE(SUM(amount),0), COUNT(*)
+        FROM driver_earnings
+        WHERE driver_id = $1 AND is_debit = false AND type = 'ride'
+        AND created_at >= CURRENT_DATE
+    `, driverID).Scan(&todayEarnings, &todayTrips)
+
+    var weekEarnings float64
+    var weekTrips    int
+    pool.QueryRow(ctx, `
+        SELECT COALESCE(SUM(amount),0), COUNT(*)
+        FROM driver_earnings
+        WHERE driver_id = $1 AND is_debit = false AND type = 'ride'
+        AND created_at >= date_trunc('week', CURRENT_DATE)
+    `, driverID).Scan(&weekEarnings, &weekTrips)
+
+    var monthEarnings float64
+    pool.QueryRow(ctx, `
+        SELECT COALESCE(SUM(amount),0)
+        FROM driver_earnings
+        WHERE driver_id = $1 AND is_debit = false AND type = 'ride'
+        AND created_at >= date_trunc('month', CURRENT_DATE)
+    `, driverID).Scan(&monthEarnings)
+
+    dRows, _ := pool.Query(ctx, `
+        SELECT DATE(created_at) AS day, COALESCE(SUM(amount),0) AS earnings, COUNT(*) AS trips
+        FROM driver_earnings
+        WHERE driver_id = $1 AND is_debit = false AND type = 'ride'
+        AND created_at >= date_trunc('week', CURRENT_DATE)
+        GROUP BY DATE(created_at)
+        ORDER BY day
+    `, driverID)
+    defer func() {
+        if dRows != nil { dRows.Close() }
+    }()
+
+    type DayEarning struct {
+        Day      string  `json:"day"`
+        Earnings float64 `json:"earnings"`
+        Trips    int     `json:"trips"`
+    }
+    var daily []DayEarning
+    if dRows != nil {
+        for dRows.Next() {
+            var d DayEarning
+            dRows.Scan(&d.Day, &d.Earnings, &d.Trips)
+            daily = append(daily, d)
+        }
+    }
+    if daily == nil {
+        daily = []DayEarning{}
+    }
+    c.JSON(http.StatusOK, gin.H{
+        "today": gin.H{"earnings": todayEarnings, "trips": todayTrips},
+        "week":  gin.H{"earnings": weekEarnings,  "trips": weekTrips},
+        "month": gin.H{"earnings": monthEarnings},
+        "daily": daily,
+    })
+}
+
+// GET /gogoo/admin/driver-payments
+func AdminDriverPayments(c *gin.Context) {
+    ctx  := context.Background()
+    pool := db.GetDB().GetPool()
+
+    rows, err := pool.Query(ctx, `
+        SELECT
+            d.id,
+            u.name,
+            u.email,
+            COALESCE(d.phone, ''),
+            COALESCE(d.vehicle_type, ''),
+            COALESCE(d.wallet_balance, -700.00)     AS wallet_balance,
+            COALESCE(d.total_earnings, 0)           AS total_earnings,
+            COALESCE(d.total_rides, 0)              AS total_rides,
+            COALESCE(d.is_wallet_blocked, false)    AS is_blocked,
+            COALESCE(d.registration_fee_paid, false) AS reg_paid,
+            (SELECT COALESCE(SUM(amount),0) FROM driver_earnings
+             WHERE driver_id = d.id AND is_debit = false AND type = 'ride') AS gross_earnings,
+            (SELECT COALESCE(SUM(amount),0) FROM driver_earnings
+             WHERE driver_id = d.id AND is_debit = true AND debit_type = 'commission') AS total_commission
+        FROM drivers d
+        JOIN users u ON u.id = d.user_id
+        ORDER BY d.created_at DESC
+    `)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+        return
+    }
+    defer rows.Close()
+
+    var result []map[string]interface{}
+    for rows.Next() {
+        var id, name, email, phone, vehicleType string
+        var walletBalance, totalEarnings, grossEarnings, totalCommission float64
+        var totalRides    int
+        var isBlocked, regPaid bool
+        rows.Scan(&id, &name, &email, &phone, &vehicleType,
+            &walletBalance, &totalEarnings, &totalRides,
+            &isBlocked, &regPaid, &grossEarnings, &totalCommission)
+        result = append(result, map[string]interface{}{
+            "id":               id,
+            "name":             name,
+            "email":            email,
+            "phone":            phone,
+            "vehicle_type":     vehicleType,
+            "wallet_balance":   walletBalance,
+            "total_earnings":   totalEarnings,
+            "total_rides":      totalRides,
+            "is_blocked":       isBlocked,
+            "reg_paid":         regPaid,
+            "gross_earnings":   grossEarnings,
+            "total_commission": totalCommission,
+        })
+    }
+    if result == nil {
+        result = []map[string]interface{}{}
+    }
+    c.JSON(http.StatusOK, gin.H{"drivers": result})
 }
 
 // PATCH /gogoo/drivers/:id/block  (admin — manually block or unblock a driver)

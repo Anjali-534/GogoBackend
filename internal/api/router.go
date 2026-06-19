@@ -142,6 +142,14 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		// Payments
 		gogoo.GET("/payments", handlers.ListPayments)
 
+		// Driver wallet / ledger / earnings
+		gogoo.GET("/driver/wallet",           handlers.GetDriverWallet)
+		gogoo.GET("/driver/ledger",           handlers.GetDriverLedger)
+		gogoo.GET("/driver/earnings/summary", handlers.GetEarningsSummary)
+
+		// Admin driver payments
+		gogoo.GET("/admin/driver-payments", handlers.AdminDriverPayments)
+
 		// Analytics
 		gogoo.GET("/analytics", handlers.GetAnalytics)
 
