@@ -67,7 +67,7 @@ func Load() *Config {
 		DBMaxConnections:  getInt("DB_MAX_CONNECTIONS", 25),
 		
 		JWTSecret:        getString("JWT_SECRET", ""),
-		JWTExpiration:    time.Hour * 24 * 7,
+		JWTExpiration:    time.Hour * 24 * 30,
 		
 		GitHubClientID:   getString("GITHUB_CLIENT_ID", ""),
 		GitHubClientSecret: getString("GITHUB_CLIENT_SECRET", ""),
