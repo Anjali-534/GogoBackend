@@ -289,36 +289,50 @@ func ListRiderBookings(c *gin.Context) {
     c.JSON(http.StatusOK, bookings)
 }
 
+func vehicleCategoryFromType(vType string) string {
+    switch {
+    case len(vType) >= 5 && vType[:5] == "truck":
+        return "truck"
+    case len(vType) >= 9 && vType[:9] == "ambulance":
+        return "ambulance"
+    case vType == "cab_2w" || vType == "cab_3w" || vType == "cab_4w" || vType == "cab_4w_suv":
+        return "cab"
+    default:
+        return "cab"
+    }
+}
+
 func ListDrivers(c *gin.Context) {
     ctx := context.Background()
     pool := db.GetDB().GetPool()
+    // Only select columns guaranteed to exist in the base 002 schema + 009 blocking migration.
+    // wallet_balance / is_wallet_blocked / registration_fee_paid (011) and vehicle_category
+    // are omitted here because they may not exist in the production DB yet.
+    // Defaults are supplied below in Go so the JSON response shape stays consistent.
     rows, err := pool.Query(ctx, `
         SELECT
             d.id,
-            COALESCE(u.name,'')             AS name,
-            COALESCE(u.email,'')            AS email,
-            COALESCE(d.phone,'')            AS phone,
-            COALESCE(d.vehicle_type,'')     AS vehicle_type,
-            COALESCE(d.vehicle_category,'') AS vehicle_category,
-            COALESCE(d.vehicle_number,'')   AS vehicle_number,
-            COALESCE(d.vehicle_model,'')    AS vehicle_model,
-            COALESCE(d.is_verified,  FALSE) AS is_verified,
-            COALESCE(d.is_online,    FALSE) AS is_online,
-            COALESCE(d.is_blocked,   FALSE) AS is_blocked,
+            COALESCE(u.name,'')          AS name,
+            COALESCE(u.email,'')         AS email,
+            COALESCE(d.phone,'')         AS phone,
+            COALESCE(d.vehicle_type,'')  AS vehicle_type,
+            COALESCE(d.vehicle_number,'') AS vehicle_number,
+            COALESCE(d.vehicle_model,'') AS vehicle_model,
+            COALESCE(d.is_verified, FALSE)  AS is_verified,
+            COALESCE(d.is_online,   FALSE)  AS is_online,
+            COALESCE(d.is_active,   TRUE)   AS is_active,
+            COALESCE(d.is_blocked,  FALSE)  AS is_blocked,
             d.blocked_until,
-            COALESCE(d.block_reason, '')    AS block_reason,
-            COALESCE(d.rating,        0)    AS rating,
-            COALESCE(d.total_rides,   0)    AS total_rides,
-            COALESCE(d.total_earnings,0)    AS total_earnings,
-            COALESCE(d.wallet_balance,-700.00) AS wallet_balance,
-            COALESCE(d.is_wallet_blocked,FALSE) AS is_wallet_blocked,
-            COALESCE(d.registration_fee_paid,FALSE) AS registration_fee_paid,
+            COALESCE(d.block_reason,'')  AS block_reason,
+            COALESCE(d.rating,        0) AS rating,
+            COALESCE(d.total_rides,   0) AS total_rides,
+            COALESCE(d.total_earnings,0) AS total_earnings,
             d.created_at,
             (SELECT CASE
-               WHEN COUNT(*) = 0                                            THEN 'incomplete'
-               WHEN COUNT(*) FILTER (WHERE dd.status = 'rejected') > 0     THEN 'rejected'
-               WHEN COUNT(*) FILTER (WHERE dd.status = 'pending')  > 0     THEN 'pending'
-               WHEN COUNT(*) FILTER (WHERE dd.status = 'approved') >= 4    THEN 'verified'
+               WHEN COUNT(*) = 0                                          THEN 'incomplete'
+               WHEN COUNT(*) FILTER (WHERE dd.status = 'rejected') > 0   THEN 'rejected'
+               WHEN COUNT(*) FILTER (WHERE dd.status = 'pending')  > 0   THEN 'pending'
+               WHEN COUNT(*) FILTER (WHERE dd.status = 'approved') >= 4  THEN 'verified'
                ELSE 'incomplete'
              END
              FROM driver_documents dd WHERE dd.driver_id = d.id
@@ -334,18 +348,17 @@ func ListDrivers(c *gin.Context) {
     defer rows.Close()
     var drivers []map[string]interface{}
     for rows.Next() {
-        var id, name, email, phone, vType, vCategory, vNum, vModel, blockReason string
-        var isVerified, isOnline, isBlocked, isWalletBlocked, regFeePaid bool
-        var rating, earnings, walletBalance float64
+        var id, name, email, phone, vType, vNum, vModel, blockReason string
+        var isVerified, isOnline, isActive, isBlocked bool
+        var rating, earnings float64
         var totalRides int
         var createdAt time.Time
         var blockedUntil *time.Time
         var documentsStatus *string
         if err := rows.Scan(
-            &id, &name, &email, &phone, &vType, &vCategory, &vNum, &vModel,
-            &isVerified, &isOnline, &isBlocked, &blockedUntil, &blockReason,
-            &rating, &totalRides, &earnings, &walletBalance,
-            &isWalletBlocked, &regFeePaid, &createdAt, &documentsStatus,
+            &id, &name, &email, &phone, &vType, &vNum, &vModel,
+            &isVerified, &isOnline, &isActive, &isBlocked, &blockedUntil, &blockReason,
+            &rating, &totalRides, &earnings, &createdAt, &documentsStatus,
         ); err != nil {
             log.Printf("ListDrivers scan error: %v", err)
             continue
@@ -360,20 +373,22 @@ func ListDrivers(c *gin.Context) {
             "email":                 email,
             "phone":                 phone,
             "vehicle_type":          vType,
-            "vehicle_category":      vCategory,
+            "vehicle_category":      vehicleCategoryFromType(vType),
             "vehicle_number":        vNum,
             "vehicle_model":         vModel,
             "is_verified":           isVerified,
             "is_online":             isOnline,
+            "is_active":             isActive,
             "is_blocked":            isBlocked,
             "blocked_until":         blockedUntil,
             "block_reason":          blockReason,
             "rating":                rating,
             "total_rides":           totalRides,
             "total_earnings":        earnings,
-            "wallet_balance":        walletBalance,
-            "is_wallet_blocked":     isWalletBlocked,
-            "registration_fee_paid": regFeePaid,
+            // 011-migration columns — default until migration runs in production
+            "wallet_balance":        -700.00,
+            "is_wallet_blocked":     false,
+            "registration_fee_paid": false,
             "created_at":            createdAt,
             "documents_status":      docStatus,
         })
@@ -390,32 +405,45 @@ func GetDriverByID(c *gin.Context) {
     ctx := context.Background()
     pool := db.GetDB().GetPool()
 
+    // 011-migration columns (wallet_balance, is_wallet_blocked, wallet_blocked_reason,
+    // registration_fee_paid) are NOT selected here — they may not exist in production yet.
+    // Defaults are returned in the JSON response below.
     var id, name, email, phone, vType, vCategory, vNum, vModel, blockReason string
-    var isVerified, isOnline, isBlocked, isWalletBlocked bool
-    var isActive bool
-    var rating, earnings, walletBalance float64
+    var isVerified, isOnline, isActive, isBlocked bool
+    var rating, earnings float64
     var totalRides int
     var createdAt time.Time
     var blockedUntil *time.Time
-    var walletBlockedReason, licenseNumber, vehicleColor, bankHolder, bankNum, bankIFSC, upiID *string
-    var registrationFeePaid bool
+    var licenseNumber, vehicleColor, bankHolder, bankNum, bankIFSC, upiID *string
 
     err := pool.QueryRow(ctx, `
-        SELECT d.id, u.name, u.email, d.phone,
-               COALESCE(d.vehicle_type,''), COALESCE(d.vehicle_category,''),
-               COALESCE(d.vehicle_number,''), COALESCE(d.vehicle_model,''),
-               d.is_verified, d.is_online, COALESCE(d.is_active, true),
-               COALESCE(d.rating, 0), COALESCE(d.total_rides, 0),
-               COALESCE(d.total_earnings, 0), d.created_at,
-               COALESCE(d.is_blocked, false), d.blocked_until,
-               COALESCE(d.block_reason, ''),
-               COALESCE(d.wallet_balance, -700.00),
-               COALESCE(d.is_wallet_blocked, false), d.wallet_blocked_reason,
-               COALESCE(d.registration_fee_paid, false),
-               d.license_number, d.vehicle_color,
-               d.bank_account_holder, d.bank_account_number, d.bank_ifsc, d.upi_id
+        SELECT
+            d.id,
+            COALESCE(u.name,''),
+            COALESCE(u.email,''),
+            COALESCE(d.phone,''),
+            COALESCE(d.vehicle_type,''),
+            COALESCE(d.vehicle_category,''),
+            COALESCE(d.vehicle_number,''),
+            COALESCE(d.vehicle_model,''),
+            COALESCE(d.is_verified, false),
+            COALESCE(d.is_online,   false),
+            COALESCE(d.is_active,   true),
+            COALESCE(d.rating,        0),
+            COALESCE(d.total_rides,   0),
+            COALESCE(d.total_earnings,0),
+            d.created_at,
+            COALESCE(d.is_blocked, false),
+            d.blocked_until,
+            COALESCE(d.block_reason,''),
+            d.license_number,
+            d.vehicle_color,
+            d.bank_account_holder,
+            d.bank_account_number,
+            d.bank_ifsc,
+            d.upi_id
         FROM drivers d
-        JOIN users u ON u.id = d.user_id
+        LEFT JOIN users u ON u.id = d.user_id
         WHERE d.id = $1
     `, driverID).Scan(
         &id, &name, &email, &phone,
@@ -423,13 +451,11 @@ func GetDriverByID(c *gin.Context) {
         &isVerified, &isOnline, &isActive,
         &rating, &totalRides, &earnings, &createdAt,
         &isBlocked, &blockedUntil, &blockReason,
-        &walletBalance, &isWalletBlocked, &walletBlockedReason,
-        &registrationFeePaid,
         &licenseNumber, &vehicleColor,
         &bankHolder, &bankNum, &bankIFSC, &upiID,
     )
     if err != nil {
-        c.JSON(http.StatusNotFound, gin.H{"error": "driver not found"})
+        c.JSON(http.StatusNotFound, gin.H{"error": "driver not found: " + err.Error()})
         return
     }
 
@@ -439,14 +465,16 @@ func GetDriverByID(c *gin.Context) {
         "vehicle_number": vNum, "vehicle_model": vModel,
         "is_verified": isVerified, "is_online": isOnline, "is_active": isActive,
         "rating": rating, "total_rides": totalRides, "total_earnings": earnings,
-        "wallet_balance": walletBalance, "is_wallet_blocked": isWalletBlocked,
-        "wallet_blocked_reason": walletBlockedReason,
-        "registration_fee_paid": registrationFeePaid,
         "created_at": createdAt,
         "is_blocked": isBlocked, "blocked_until": blockedUntil, "block_reason": blockReason,
         "license_number": licenseNumber, "vehicle_color": vehicleColor,
         "bank_account_holder": bankHolder, "bank_account_number": bankNum,
         "bank_ifsc": bankIFSC, "upi_id": upiID,
+        // 011-migration columns — defaults until migration runs in production
+        "wallet_balance":        -700.00,
+        "is_wallet_blocked":     false,
+        "wallet_blocked_reason": nil,
+        "registration_fee_paid": false,
     })
 }
 
