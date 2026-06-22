@@ -193,7 +193,19 @@ func ListBookings(c *gin.Context) {
     pool := db.GetDB().GetPool()
     status := c.Query("status")
     limit := 50
-    query := `SELECT b.id, b.status, b.pickup_address, b.drop_address, b.estimated_fare, b.final_fare, b.created_at, u_r.name as rider_name, COALESCE(u_d.name,'') as driver_name, st.name as service_name FROM bookings b JOIN riders r ON r.id=b.rider_id JOIN users u_r ON u_r.id=r.user_id LEFT JOIN drivers d ON d.id=b.driver_id LEFT JOIN users u_d ON u_d.id=d.user_id JOIN service_types st ON st.id=b.service_type_id`
+    query := `SELECT b.id, b.status, b.pickup_address, b.drop_address, b.estimated_fare, b.final_fare, b.created_at,
+        u_r.name as rider_name, COALESCE(r.phone,'') as rider_phone,
+        COALESCE(u_d.name,'') as driver_name, COALESCE(d.phone,'') as driver_phone,
+        COALESCE(d.vehicle_number,'') as vehicle_number,
+        st.name as service_name, COALESCE(st.category,'') as service_category,
+        COALESCE(st.slug,'') as service_slug, COALESCE(st.vehicle_type,'') as vehicle_type,
+        COALESCE(b.distance_km,0) as distance_km, COALESCE(b.ride_otp,'') as ride_otp
+        FROM bookings b
+        JOIN riders r ON r.id=b.rider_id
+        JOIN users u_r ON u_r.id=r.user_id
+        LEFT JOIN drivers d ON d.id=b.driver_id
+        LEFT JOIN users u_d ON u_d.id=d.user_id
+        JOIN service_types st ON st.id=b.service_type_id`
     args := []interface{}{}
     if status != "" {
         query += " WHERE b.status=$1"
@@ -209,12 +221,23 @@ func ListBookings(c *gin.Context) {
     defer rows.Close()
     var bookings []map[string]interface{}
     for rows.Next() {
-        var id, status, pickup, drop, riderName, driverName, serviceName string
+        var id, status, pickup, drop, riderName, riderPhone, driverName, driverPhone, vehicleNumber, serviceName, serviceCategory, serviceSlug, vehicleType, rideOTP string
         var estFare, finalFare *float64
+        var distanceKm float64
         var createdAt time.Time
-        rows.Scan(&id, &status, &pickup, &drop, &estFare, &finalFare, &createdAt, &riderName, &driverName, &serviceName)
-        bookings = append(bookings, map[string]interface{}{"id": id, "status": status, "pickup_address": pickup, "drop_address": drop, "estimated_fare": estFare, "final_fare": finalFare, "created_at": createdAt, "rider_name": riderName, "driver_name": driverName, "service_name": serviceName})
+        rows.Scan(&id, &status, &pickup, &drop, &estFare, &finalFare, &createdAt,
+            &riderName, &riderPhone, &driverName, &driverPhone, &vehicleNumber,
+            &serviceName, &serviceCategory, &serviceSlug, &vehicleType, &distanceKm, &rideOTP)
+        bookings = append(bookings, map[string]interface{}{
+            "id": id, "status": status, "pickup_address": pickup, "drop_address": drop,
+            "estimated_fare": estFare, "final_fare": finalFare, "created_at": createdAt,
+            "rider_name": riderName, "rider_phone": riderPhone,
+            "driver_name": driverName, "driver_phone": driverPhone, "vehicle_number": vehicleNumber,
+            "service_name": serviceName, "service_category": serviceCategory, "service_slug": serviceSlug,
+            "vehicle_type": vehicleType, "distance_km": distanceKm, "ride_otp": rideOTP,
+        })
     }
+    if bookings == nil { bookings = []map[string]interface{}{} }
     c.JSON(http.StatusOK, bookings)
 }
 
@@ -250,7 +273,8 @@ func ListDrivers(c *gin.Context) {
                d.rating, d.total_rides, d.total_earnings, d.created_at,
                COALESCE(d.is_blocked, FALSE),
                d.blocked_until,
-               COALESCE(d.block_reason, '')
+               COALESCE(d.block_reason, ''),
+               COALESCE(d.wallet_balance, -700.00)
         FROM drivers d
         JOIN users u ON u.id = d.user_id
         ORDER BY d.created_at DESC
@@ -264,19 +288,20 @@ func ListDrivers(c *gin.Context) {
     for rows.Next() {
         var id, name, email, phone, vType, vCategory, vNum, vModel, blockReason string
         var isVerified, isOnline, isActive, isBlocked bool
-        var rating, earnings float64
+        var rating, earnings, walletBalance float64
         var totalRides int
         var createdAt time.Time
         var blockedUntil *time.Time
         rows.Scan(&id, &name, &email, &phone, &vType, &vCategory, &vNum, &vModel,
             &isVerified, &isOnline, &isActive, &rating, &totalRides, &earnings, &createdAt,
-            &isBlocked, &blockedUntil, &blockReason)
+            &isBlocked, &blockedUntil, &blockReason, &walletBalance)
         drivers = append(drivers, map[string]interface{}{
             "id": id, "name": name, "email": email, "phone": phone,
             "vehicle_type": vType, "vehicle_category": vCategory,
             "vehicle_number": vNum, "vehicle_model": vModel,
             "is_verified": isVerified, "is_online": isOnline, "is_active": isActive,
             "rating": rating, "total_rides": totalRides, "total_earnings": earnings,
+            "wallet_balance": walletBalance,
             "created_at": createdAt,
             "is_blocked": isBlocked, "blocked_until": blockedUntil, "block_reason": blockReason,
         })
@@ -301,21 +326,53 @@ func GetAnalytics(c *gin.Context) {
     pool := db.GetDB().GetPool()
     var totalBookings, activeDrivers, onlineDrivers, totalRiders int
     var totalRevenue float64
+    var todayBookings, todayCompleted, todayCancelled int
+    var todayRevenue float64
     pool.QueryRow(ctx, "SELECT COUNT(*) FROM bookings").Scan(&totalBookings)
     pool.QueryRow(ctx, "SELECT COUNT(*) FROM drivers WHERE is_verified=true").Scan(&activeDrivers)
     pool.QueryRow(ctx, "SELECT COUNT(*) FROM drivers WHERE is_online=true").Scan(&onlineDrivers)
     pool.QueryRow(ctx, "SELECT COUNT(*) FROM riders").Scan(&totalRiders)
     pool.QueryRow(ctx, "SELECT COALESCE(SUM(amount),0) FROM payments WHERE status='completed'").Scan(&totalRevenue)
+    pool.QueryRow(ctx, "SELECT COUNT(*) FROM bookings WHERE DATE(created_at)=CURRENT_DATE").Scan(&todayBookings)
+    pool.QueryRow(ctx, "SELECT COUNT(*) FROM bookings WHERE DATE(created_at)=CURRENT_DATE AND status='completed'").Scan(&todayCompleted)
+    pool.QueryRow(ctx, "SELECT COUNT(*) FROM bookings WHERE DATE(created_at)=CURRENT_DATE AND status='cancelled'").Scan(&todayCancelled)
+    pool.QueryRow(ctx, "SELECT COALESCE(SUM(amount),0) FROM payments WHERE status='completed' AND DATE(created_at)=CURRENT_DATE").Scan(&todayRevenue)
     rows, _ := pool.Query(ctx, `SELECT DATE(created_at) as day, COUNT(*) as count FROM bookings WHERE created_at > NOW() - INTERVAL '7 days' GROUP BY day ORDER BY day`)
-    defer rows.Close()
     var dailyBookings []map[string]interface{}
-    for rows.Next() {
-        var day time.Time
-        var count int
-        rows.Scan(&day, &count)
-        dailyBookings = append(dailyBookings, map[string]interface{}{"day": day.Format("Mon"), "count": count})
+    if rows != nil {
+        for rows.Next() {
+            var day time.Time
+            var count int
+            rows.Scan(&day, &count)
+            dailyBookings = append(dailyBookings, map[string]interface{}{"day": day.Format("Mon"), "count": count})
+        }
+        rows.Close()
     }
-    c.JSON(http.StatusOK, gin.H{"total_bookings": totalBookings, "active_drivers": activeDrivers, "online_drivers": onlineDrivers, "total_riders": totalRiders, "total_revenue": totalRevenue, "daily_bookings": dailyBookings})
+    byCategory := map[string]interface{}{}
+    catRows, _ := pool.Query(ctx, `SELECT COALESCE(st.category,'other'), COUNT(*), COALESCE(SUM(b.final_fare),0) FROM bookings b JOIN service_types st ON st.id=b.service_type_id WHERE DATE(b.created_at)=CURRENT_DATE GROUP BY st.category`)
+    if catRows != nil {
+        for catRows.Next() {
+            var cat string
+            var count int
+            var rev float64
+            catRows.Scan(&cat, &count, &rev)
+            byCategory[cat] = map[string]interface{}{"bookings": count, "revenue": rev}
+        }
+        catRows.Close()
+    }
+    c.JSON(http.StatusOK, gin.H{
+        "total_bookings":  totalBookings,
+        "active_drivers":  activeDrivers,
+        "online_drivers":  onlineDrivers,
+        "total_riders":    totalRiders,
+        "total_revenue":   totalRevenue,
+        "today_bookings":  todayBookings,
+        "today_completed": todayCompleted,
+        "today_cancelled": todayCancelled,
+        "today_revenue":   todayRevenue,
+        "by_category":     byCategory,
+        "daily_bookings":  dailyBookings,
+    })
 }
 
 func ListPayments(c *gin.Context) {
