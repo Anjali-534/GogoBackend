@@ -4,6 +4,7 @@ import (
     "context"
     "crypto/rand"
     "fmt"
+    "log"
     "math/big"
     "net/http"
     "os"
@@ -169,22 +170,47 @@ func CreateBooking(c *gin.Context) {
         DropAddress   string  `json:"drop_address" binding:"required"`
         EstimatedFare float64 `json:"estimated_fare"`
         DistanceKm    float64 `json:"distance_km"`
+        PromoCode     *string `json:"promo_code"`
+        DiscountAmt   float64 `json:"discount_amount"`
     }
     if err := c.ShouldBindJSON(&req); err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+        log.Printf("CreateBooking bind error: %v", err)
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body: " + err.Error()})
         return
     }
+    log.Printf("CreateBooking: rider=%s service=%s pickup=(%v,%v) drop=(%v,%v) fare=%v",
+        req.RiderID, req.ServiceTypeID, req.PickupLat, req.PickupLng, req.DropLat, req.DropLng, req.EstimatedFare)
+
     ctx := context.Background()
     pool := db.GetDB().GetPool()
+
+    // Validate rider exists
+    var riderExists bool
+    if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM riders WHERE id=$1)`, req.RiderID).Scan(&riderExists); err != nil || !riderExists {
+        log.Printf("CreateBooking: rider not found: %s (err=%v)", req.RiderID, err)
+        c.JSON(http.StatusBadRequest, gin.H{"error": "rider not found: " + req.RiderID})
+        return
+    }
+
+    // Validate service_type exists
+    var svcExists bool
+    if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM service_types WHERE id=$1)`, req.ServiceTypeID).Scan(&svcExists); err != nil || !svcExists {
+        log.Printf("CreateBooking: service_type not found: %s (err=%v)", req.ServiceTypeID, err)
+        c.JSON(http.StatusBadRequest, gin.H{"error": "service_type not found: " + req.ServiceTypeID})
+        return
+    }
+
     bookingID := uuid.New()
     n, _ := rand.Int(rand.Reader, big.NewInt(10000))
     otp := fmt.Sprintf("%04d", n.Int64())
     _, err := pool.Exec(ctx, `INSERT INTO bookings (id,rider_id,service_type_id,status,pickup_lat,pickup_lng,pickup_address,drop_lat,drop_lng,drop_address,estimated_fare,distance_km,ride_otp) VALUES ($1,$2,$3,'searching',$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
         bookingID, req.RiderID, req.ServiceTypeID, req.PickupLat, req.PickupLng, req.PickupAddress, req.DropLat, req.DropLng, req.DropAddress, req.EstimatedFare, req.DistanceKm, otp)
     if err != nil {
+        log.Printf("CreateBooking insert error: %v", err)
         c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create booking: " + err.Error()})
         return
     }
+    log.Printf("CreateBooking success: %s", bookingID)
     c.JSON(http.StatusCreated, gin.H{"booking_id": bookingID, "status": "searching"})
 }
 
