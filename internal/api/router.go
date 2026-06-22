@@ -89,7 +89,8 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogooPublic.POST("/rider/signup", handlers.RiderSignup)
 		gogooPublic.POST("/driver/signup", handlers.DriverSignup)
 		gogooPublic.GET("/services", handlers.ListServiceTypes)
-		gogooPublic.POST("/panel-login", handlers.PanelLogin)
+		gogooPublic.POST("/panel-login",    handlers.PanelLogin)
+		gogooPublic.POST("/hospital-login", handlers.HospitalLogin)
 	}
 
 	// ============================================================
@@ -174,6 +175,26 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		// Panel access management (admin)
 		gogoo.GET("/admin/panel-access",                  handlers.GetPanelAccess)
 		gogoo.PATCH("/admin/panel-access/:id/password",   handlers.UpdatePanelPassword)
+
+		// Ambulance — NGO management
+		gogoo.GET("/ambulance/ngos",                      handlers.GetNGOs)
+		gogoo.POST("/ambulance/ngos",                     handlers.CreateNGO)
+		gogoo.PATCH("/ambulance/ngos/:id",                handlers.UpdateNGO)
+		gogoo.DELETE("/ambulance/ngos/:id",               handlers.DeleteNGO)
+
+		// Ambulance — Hospital management
+		gogoo.GET("/ambulance/hospitals",                 handlers.GetHospitals)
+		gogoo.GET("/ambulance/hospitals/:id",             handlers.GetHospitalByID)
+		gogoo.POST("/ambulance/hospitals",                handlers.CreateHospital)
+		gogoo.PATCH("/ambulance/hospitals/:id",           handlers.UpdateHospital)
+		gogoo.DELETE("/ambulance/hospitals/:id",          handlers.DeleteHospital)
+		gogoo.PATCH("/ambulance/hospitals/:id/password",  handlers.ResetHospitalPassword)
+
+		// Ambulance — Bookings
+		gogoo.GET("/ambulance/bookings/hospital",         handlers.GetHospitalBookings)
+		gogoo.POST("/ambulance/bookings/hospital",        handlers.CreateHospitalBooking)
+		gogoo.PATCH("/ambulance/bookings/hospital/:id/status", handlers.UpdateHospitalBookingStatus)
+		gogoo.GET("/ambulance/all-bookings",              handlers.GetAmbulanceAllBookings)
 	}
 
 	// ============================================================
