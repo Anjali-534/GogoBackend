@@ -111,6 +111,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 
 		// Drivers
 		gogoo.GET("/drivers", handlers.ListDrivers)
+		gogoo.GET("/drivers/:id", handlers.GetDriverByID)
 		gogoo.PATCH("/drivers/:id/verify", handlers.VerifyDriver)
 		gogoo.PATCH("/drivers/:id/online", handlers.ToggleDriverOnline)
 		gogoo.POST("/drivers/:id/location", handlers.UpdateDriverLocation)
