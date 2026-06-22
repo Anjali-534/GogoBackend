@@ -1,4 +1,4 @@
-package api
+﻿package api
 
 import (
 	"github.com/deploykit/backend/internal/api/handlers"
@@ -82,18 +82,18 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	router.Static("/uploads", "./uploads")
 
 	// ============================================================
-	// GOGOO â€” PUBLIC ROUTES
+	// GOGOO â€" PUBLIC ROUTES
 	// ============================================================
 	gogooPublic := router.Group("/gogoo")
 	{
 		gogooPublic.POST("/rider/signup", handlers.RiderSignup)
 		gogooPublic.POST("/driver/signup", handlers.DriverSignup)
 		gogooPublic.GET("/services", handlers.ListServiceTypes)
-
+		gogooPublic.POST("/panel-login", handlers.PanelLogin)
 	}
 
 	// ============================================================
-	// GOGOO â€” PROTECTED ROUTES
+	// GOGOO â€" PROTECTED ROUTES
 	// ============================================================
 	gogoo := router.Group("/gogoo")
 	gogoo.Use(middleware.AuthMiddleware())
@@ -170,10 +170,14 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.POST("/admin/notifications",                handlers.CreateNotification)
 		gogoo.GET("/admin/notifications",                 handlers.AdminListNotifications)
 		gogoo.DELETE("/admin/notifications/:id",          handlers.DeleteNotification)
+
+		// Panel access management (admin)
+		gogoo.GET("/admin/panel-access",                  handlers.GetPanelAccess)
+		gogoo.PATCH("/admin/panel-access/:id/password",   handlers.UpdatePanelPassword)
 	}
 
 	// ============================================================
-	// GOGOO â€” EXCEL EXPORTS (token via header or ?token= query)
+	// GOGOO â€" EXCEL EXPORTS (token via header or ?token= query)
 	// ============================================================
 	gogooExport := router.Group("/gogoo/export")
 	gogooExport.Use(middleware.DownloadAuthMiddleware())

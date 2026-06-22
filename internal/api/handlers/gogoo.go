@@ -6,10 +6,13 @@ import (
     "fmt"
     "math/big"
     "net/http"
+    "os"
     "time"
 
+    "github.com/deploykit/backend/internal/config"
     "github.com/deploykit/backend/internal/db"
     "github.com/gin-gonic/gin"
+    "github.com/golang-jwt/jwt/v5"
     "github.com/google/uuid"
     "golang.org/x/crypto/bcrypt"
 )
@@ -1169,4 +1172,153 @@ func ListDriverBookingsByID(c *gin.Context) {
         bookings = []map[string]interface{}{}
     }
     c.JSON(http.StatusOK, bookings)
+}
+
+// POST /gogoo/panel-login
+// Accepts panel-specific credentials or master admin fallback.
+func PanelLogin(c *gin.Context) {
+    ctx := context.Background()
+    pool := db.GetDB().GetPool()
+
+    var req struct {
+        Panel    string `json:"panel"`
+        Email    string `json:"email"`
+        Password string `json:"password"`
+    }
+    if err := c.ShouldBindJSON(&req); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+        return
+    }
+
+    cfg := c.MustGet("config").(*config.Config)
+    jwtSecret := cfg.JWTSecret
+
+    // 1. Check panel_access table for this panel + email
+    var panelID, storedHash, role string
+    var isActive bool
+    err := pool.QueryRow(ctx, `
+        SELECT id, password_hash, role, is_active
+        FROM panel_access
+        WHERE email = $1 AND panel_name = $2
+    `, req.Email, req.Panel).Scan(&panelID, &storedHash, &role, &isActive)
+
+    if err == nil && isActive {
+        if bcrypt.CompareHashAndPassword([]byte(storedHash), []byte(req.Password)) != nil {
+            c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
+            return
+        }
+        pool.Exec(ctx, `UPDATE panel_access SET last_login = NOW() WHERE id = $1`, panelID)
+        tokenStr := signPanelToken(panelID, req.Email, role, req.Panel, jwtSecret)
+        c.JSON(http.StatusOK, gin.H{"token": tokenStr, "role": role, "panel": req.Panel, "email": req.Email})
+        return
+    }
+
+    // 2. Master admin fallback — only ADMIN_EMAIL can log into any panel
+    adminEmail := os.Getenv("ADMIN_EMAIL")
+    if adminEmail == "" {
+        adminEmail = "admin@gogoo.in"
+    }
+    if req.Email != adminEmail {
+        c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
+        return
+    }
+
+    var adminID uuid.UUID
+    var adminHash string
+    err = pool.QueryRow(ctx, `
+        SELECT id, password_hash FROM users WHERE email = $1
+    `, req.Email).Scan(&adminID, &adminHash)
+    if err != nil {
+        c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
+        return
+    }
+    if bcrypt.CompareHashAndPassword([]byte(adminHash), []byte(req.Password)) != nil {
+        c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
+        return
+    }
+
+    tokenStr := signPanelToken(adminID.String(), req.Email, "master_admin", req.Panel, jwtSecret)
+    c.JSON(http.StatusOK, gin.H{"token": tokenStr, "role": "master_admin", "panel": req.Panel, "email": req.Email})
+}
+
+func signPanelToken(userID, email, role, panel, secret string) string {
+    token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+        "user_id": userID,
+        "email":   email,
+        "role":    role,
+        "panel":   panel,
+        "exp":     time.Now().Add(24 * time.Hour).Unix(),
+    })
+    tokenStr, _ := token.SignedString([]byte(secret))
+    return tokenStr
+}
+
+// GET /gogoo/admin/panel-access
+func GetPanelAccess(c *gin.Context) {
+    ctx := context.Background()
+    pool := db.GetDB().GetPool()
+
+    rows, err := pool.Query(ctx, `
+        SELECT id, panel_name, email, role, is_active, created_at, last_login
+        FROM panel_access
+        ORDER BY panel_name, email
+    `)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch panel users"})
+        return
+    }
+    defer rows.Close()
+
+    type PanelUser struct {
+        ID        string     `json:"id"`
+        Panel     string     `json:"panel_name"`
+        Email     string     `json:"email"`
+        Role      string     `json:"role"`
+        IsActive  bool       `json:"is_active"`
+        CreatedAt time.Time  `json:"created_at"`
+        LastLogin *time.Time `json:"last_login"`
+    }
+
+    var users []PanelUser
+    for rows.Next() {
+        var u PanelUser
+        rows.Scan(&u.ID, &u.Panel, &u.Email, &u.Role, &u.IsActive, &u.CreatedAt, &u.LastLogin)
+        users = append(users, u)
+    }
+    if users == nil {
+        users = []PanelUser{}
+    }
+    c.JSON(http.StatusOK, gin.H{"users": users})
+}
+
+// PATCH /gogoo/admin/panel-access/:id/password
+func UpdatePanelPassword(c *gin.Context) {
+    ctx := context.Background()
+    pool := db.GetDB().GetPool()
+    id := c.Param("id")
+
+    var req struct {
+        Password string `json:"password"`
+    }
+    if err := c.ShouldBindJSON(&req); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+        return
+    }
+    if len(req.Password) < 8 {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "password must be at least 8 characters"})
+        return
+    }
+
+    hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "hash failed"})
+        return
+    }
+
+    _, err = pool.Exec(ctx, `UPDATE panel_access SET password_hash = $1 WHERE id = $2`, string(hash), id)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "update failed"})
+        return
+    }
+    c.JSON(http.StatusOK, gin.H{"message": "password updated"})
 }
