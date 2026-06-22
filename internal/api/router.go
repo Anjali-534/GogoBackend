@@ -195,6 +195,17 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.POST("/ambulance/bookings/hospital",        handlers.CreateHospitalBooking)
 		gogoo.PATCH("/ambulance/bookings/hospital/:id/status", handlers.UpdateHospitalBookingStatus)
 		gogoo.GET("/ambulance/all-bookings",              handlers.GetAmbulanceAllBookings)
+
+		// Support panel
+		gogoo.GET("/support/tickets",                     handlers.GetSupportTickets)
+		gogoo.POST("/support/tickets",                    handlers.CreateSupportTicket)
+		gogoo.PATCH("/support/tickets/:id",               handlers.UpdateSupportTicket)
+		gogoo.POST("/support/tickets/:id/refund",         handlers.ProcessRefund)
+		gogoo.GET("/support/tickets/:id/messages",        handlers.GetTicketMessages)
+		gogoo.POST("/support/tickets/:id/messages",       handlers.SendTicketMessage)
+		gogoo.GET("/support/stats",                       handlers.GetSupportStats)
+		gogoo.POST("/support/cancel-booking/:id",         handlers.SupportCancelBooking)
+		gogoo.POST("/support/block-rider/:id",            handlers.SupportBlockRider)
 	}
 
 	// ============================================================
