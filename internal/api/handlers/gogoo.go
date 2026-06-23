@@ -536,11 +536,11 @@ func GetAnalytics(c *gin.Context) {
     pool.QueryRow(ctx, "SELECT COUNT(*) FROM drivers WHERE is_verified=true").Scan(&activeDrivers)
     pool.QueryRow(ctx, "SELECT COUNT(*) FROM drivers WHERE is_online=true").Scan(&onlineDrivers)
     pool.QueryRow(ctx, "SELECT COUNT(*) FROM riders").Scan(&totalRiders)
-    pool.QueryRow(ctx, "SELECT COALESCE(SUM(amount),0) FROM payments WHERE status='completed'").Scan(&totalRevenue)
+    pool.QueryRow(ctx, `SELECT COALESCE(SUM(COALESCE(final_fare, estimated_fare, 0)),0) FROM bookings WHERE status='completed'`).Scan(&totalRevenue)
     pool.QueryRow(ctx, "SELECT COUNT(*) FROM bookings WHERE DATE(created_at)=CURRENT_DATE").Scan(&todayBookings)
     pool.QueryRow(ctx, "SELECT COUNT(*) FROM bookings WHERE DATE(created_at)=CURRENT_DATE AND status='completed'").Scan(&todayCompleted)
     pool.QueryRow(ctx, "SELECT COUNT(*) FROM bookings WHERE DATE(created_at)=CURRENT_DATE AND status='cancelled'").Scan(&todayCancelled)
-    pool.QueryRow(ctx, "SELECT COALESCE(SUM(amount),0) FROM payments WHERE status='completed' AND DATE(created_at)=CURRENT_DATE").Scan(&todayRevenue)
+    pool.QueryRow(ctx, `SELECT COALESCE(SUM(COALESCE(final_fare, estimated_fare, 0)),0) FROM bookings WHERE status='completed' AND DATE(created_at)=CURRENT_DATE`).Scan(&todayRevenue)
     rows, _ := pool.Query(ctx, `SELECT DATE(created_at) as day, COUNT(*) as count FROM bookings WHERE created_at > NOW() - INTERVAL '7 days' GROUP BY day ORDER BY day`)
     var dailyBookings []map[string]interface{}
     if rows != nil {
