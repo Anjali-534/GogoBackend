@@ -127,6 +127,9 @@ func GetBooking(c *gin.Context) {
 		rideOTP                                          *string
 		finalFare                                        *float64
 		startedAt, completedAt                           *time.Time
+		// Ambulance fields
+		hospitalID, hospitalName, ambulanceSubType, purposeType, patientName *string
+		isFreeAmbulance                                                       bool
 	)
 
 	err := pool.QueryRow(ctx, `
@@ -142,7 +145,13 @@ func GetBooking(c *gin.Context) {
 		       b.ride_otp,
 		       b.final_fare,
 		       b.started_at,
-		       b.completed_at
+		       b.completed_at,
+		       b.hospital_id::TEXT,
+		       b.hospital_name,
+		       b.ambulance_sub_type,
+		       COALESCE(b.is_free_ambulance, FALSE),
+		       b.purpose_type,
+		       b.patient_name
 		FROM bookings b
 		LEFT JOIN drivers      d   ON d.id    = b.driver_id
 		LEFT JOIN users        du  ON du.id   = d.user_id
@@ -159,6 +168,8 @@ func GetBooking(c *gin.Context) {
 		&riderName, &riderPhone, &serviceName,
 		&rideOTP,
 		&finalFare, &startedAt, &completedAt,
+		&hospitalID, &hospitalName, &ambulanceSubType,
+		&isFreeAmbulance, &purposeType, &patientName,
 	)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "booking not found"})
@@ -166,19 +177,25 @@ func GetBooking(c *gin.Context) {
 	}
 
 	resp := gin.H{
-		"id":             id,
-		"rider_id":       riderID,
-		"status":         status,
-		"pickup":         gin.H{"lat": pLat, "lng": pLng, "address": pAddr},
-		"drop":           gin.H{"lat": dLat, "lng": dLng, "address": dAddr},
-		"estimated_fare": fare,
-		"distance_km":    dist,
-		"rider_name":     riderName,
-		"rider_phone":    riderPhone,
-		"service_name":   serviceName,
-		"final_fare":     finalFare,
-		"started_at":     startedAt,
-		"completed_at":   completedAt,
+		"id":                 id,
+		"rider_id":           riderID,
+		"status":             status,
+		"pickup":             gin.H{"lat": pLat, "lng": pLng, "address": pAddr},
+		"drop":               gin.H{"lat": dLat, "lng": dLng, "address": dAddr},
+		"estimated_fare":     fare,
+		"distance_km":        dist,
+		"rider_name":         riderName,
+		"rider_phone":        riderPhone,
+		"service_name":       serviceName,
+		"final_fare":         finalFare,
+		"started_at":         startedAt,
+		"completed_at":       completedAt,
+		"hospital_id":        hospitalID,
+		"hospital_name":      hospitalName,
+		"ambulance_sub_type": ambulanceSubType,
+		"is_free_ambulance":  isFreeAmbulance,
+		"purpose_type":       purposeType,
+		"patient_name":       patientName,
 	}
 	// Expose OTP once driver has arrived so the rider can read it aloud.
 	if status == "arriving" && rideOTP != nil {

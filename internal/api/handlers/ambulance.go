@@ -652,6 +652,77 @@ func UpdateHospitalBookingStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Status updated"})
 }
 
+// GET /gogoo/ambulance/hospitals/nearby?lat=X&lng=X
+func GetNearbyHospitals(c *gin.Context) {
+	lat := c.Query("lat")
+	lng := c.Query("lng")
+	if lat == "" || lng == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "lat and lng required"})
+		return
+	}
+
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+
+	rows, err := pool.Query(ctx, `
+		SELECT
+			id, name, COALESCE(type,'hospital'), phone,
+			COALESCE(address,''), COALESCE(area,''),
+			COALESCE(ambulance_types, ARRAY[]::TEXT[]),
+			vehicle_count, base_fare, per_km_rate,
+			COALESCE(latitude,0), COALESCE(longitude,0),
+			COALESCE(rating,0), is_verified,
+			ROUND(
+				6371 * acos(
+					LEAST(1.0, cos(radians($1::float)) * cos(radians(latitude)) *
+					cos(radians(longitude) - radians($2::float)) +
+					sin(radians($1::float)) * sin(radians(latitude)))
+				)::numeric, 2
+			) AS distance_km
+		FROM ambulance_hospitals
+		WHERE is_active = TRUE
+		ORDER BY distance_km
+		LIMIT 10
+	`, lat, lng)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error: " + err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	type NearbyHospital struct {
+		ID             string   `json:"id"`
+		Name           string   `json:"name"`
+		Type           string   `json:"type"`
+		Phone          string   `json:"phone"`
+		Address        string   `json:"address"`
+		Area           string   `json:"area"`
+		AmbulanceTypes []string `json:"ambulance_types"`
+		VehicleCount   int      `json:"vehicle_count"`
+		BaseFare       float64  `json:"base_fare"`
+		PerKmRate      float64  `json:"per_km_rate"`
+		Latitude       float64  `json:"latitude"`
+		Longitude      float64  `json:"longitude"`
+		Rating         float64  `json:"rating"`
+		IsVerified     bool     `json:"is_verified"`
+		DistanceKm     float64  `json:"distance_km"`
+	}
+
+	var hospitals []NearbyHospital
+	for rows.Next() {
+		var h NearbyHospital
+		rows.Scan(&h.ID, &h.Name, &h.Type, &h.Phone,
+			&h.Address, &h.Area, &h.AmbulanceTypes,
+			&h.VehicleCount, &h.BaseFare, &h.PerKmRate,
+			&h.Latitude, &h.Longitude, &h.Rating, &h.IsVerified, &h.DistanceKm)
+		hospitals = append(hospitals, h)
+	}
+	if hospitals == nil {
+		hospitals = []NearbyHospital{}
+	}
+	c.JSON(http.StatusOK, gin.H{"hospitals": hospitals})
+}
+
 // ─── Ambulance All-Bookings ───────────────────────────────────────────────────
 
 // GET /gogoo/ambulance/all-bookings — bookings where service is ambulance category
@@ -666,7 +737,11 @@ func GetAmbulanceAllBookings(c *gin.Context) {
 		       COALESCE(u_r.name,'') AS rider_name,
 		       COALESCE(r.phone,'') AS rider_phone,
 		       st.name AS service_name,
-		       COALESCE(st.vehicle_type,'')
+		       COALESCE(st.vehicle_type,''),
+		       b.hospital_name,
+		       b.ambulance_sub_type,
+		       COALESCE(b.is_free_ambulance, FALSE),
+		       b.purpose_type
 		FROM bookings b
 		JOIN riders r ON r.id = b.rider_id
 		JOIN users u_r ON u_r.id = r.user_id
@@ -683,23 +758,28 @@ func GetAmbulanceAllBookings(c *gin.Context) {
 	defer rows.Close()
 
 	type AmbBooking struct {
-		ID          string    `json:"id"`
-		Status      string    `json:"status"`
-		Pickup      string    `json:"pickup_address"`
-		Drop        string    `json:"drop_address"`
-		Fare        float64   `json:"fare"`
-		CreatedAt   time.Time `json:"created_at"`
-		RiderName   string    `json:"rider_name"`
-		RiderPhone  string    `json:"rider_phone"`
-		ServiceName string    `json:"service_name"`
-		VehicleType string    `json:"vehicle_type"`
+		ID               string    `json:"id"`
+		Status           string    `json:"status"`
+		Pickup           string    `json:"pickup_address"`
+		Drop             string    `json:"drop_address"`
+		Fare             float64   `json:"fare"`
+		CreatedAt        time.Time `json:"created_at"`
+		RiderName        string    `json:"rider_name"`
+		RiderPhone       string    `json:"rider_phone"`
+		ServiceName      string    `json:"service_name"`
+		VehicleType      string    `json:"vehicle_type"`
+		HospitalName     *string   `json:"hospital_name"`
+		AmbulanceSubType *string   `json:"ambulance_sub_type"`
+		IsFreeAmbulance  bool      `json:"is_free_ambulance"`
+		PurposeType      *string   `json:"purpose_type"`
 	}
 
 	var bookings []AmbBooking
 	for rows.Next() {
 		var b AmbBooking
 		rows.Scan(&b.ID, &b.Status, &b.Pickup, &b.Drop, &b.Fare,
-			&b.CreatedAt, &b.RiderName, &b.RiderPhone, &b.ServiceName, &b.VehicleType)
+			&b.CreatedAt, &b.RiderName, &b.RiderPhone, &b.ServiceName, &b.VehicleType,
+			&b.HospitalName, &b.AmbulanceSubType, &b.IsFreeAmbulance, &b.PurposeType)
 		bookings = append(bookings, b)
 	}
 	if bookings == nil {

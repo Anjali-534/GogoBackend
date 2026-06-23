@@ -172,14 +172,23 @@ func CreateBooking(c *gin.Context) {
         DistanceKm    float64 `json:"distance_km"`
         PromoCode     *string `json:"promo_code"`
         DiscountAmt   float64 `json:"discount_amount"`
+        // Ambulance-specific fields
+        HospitalID       *string `json:"hospital_id"`
+        HospitalName     *string `json:"hospital_name"`
+        AmbulanceSubType *string `json:"ambulance_sub_type"`
+        IsFreeAmbulance  bool    `json:"is_free_ambulance"`
+        PurposeType      *string `json:"purpose_type"`
+        PatientName      *string `json:"patient_name"`
+        ContactPhone     *string `json:"contact_phone"`
+        MedicalNotes     *string `json:"medical_notes"`
     }
     if err := c.ShouldBindJSON(&req); err != nil {
         log.Printf("CreateBooking bind error: %v", err)
         c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body: " + err.Error()})
         return
     }
-    log.Printf("CreateBooking: rider=%s service=%s pickup=(%v,%v) drop=(%v,%v) fare=%v",
-        req.RiderID, req.ServiceTypeID, req.PickupLat, req.PickupLng, req.DropLat, req.DropLng, req.EstimatedFare)
+    log.Printf("CreateBooking: rider=%s service=%s pickup=(%v,%v) drop=(%v,%v) fare=%v isFree=%v",
+        req.RiderID, req.ServiceTypeID, req.PickupLat, req.PickupLng, req.DropLat, req.DropLng, req.EstimatedFare, req.IsFreeAmbulance)
 
     ctx := context.Background()
     pool := db.GetDB().GetPool()
@@ -210,6 +219,24 @@ func CreateBooking(c *gin.Context) {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create booking: " + err.Error()})
         return
     }
+
+    // Update ambulance-specific fields if present (uses IF EXISTS safe pattern)
+    _, _ = pool.Exec(ctx, `
+        UPDATE bookings
+        SET hospital_id        = $1,
+            hospital_name      = $2,
+            ambulance_sub_type = $3,
+            is_free_ambulance  = $4,
+            purpose_type       = $5,
+            patient_name       = $6,
+            contact_phone      = $7,
+            medical_notes      = $8
+        WHERE id = $9
+    `, req.HospitalID, req.HospitalName, req.AmbulanceSubType,
+        req.IsFreeAmbulance, req.PurposeType,
+        req.PatientName, req.ContactPhone, req.MedicalNotes,
+        bookingID)
+
     log.Printf("CreateBooking success: %s", bookingID)
     c.JSON(http.StatusCreated, gin.H{"booking_id": bookingID, "status": "searching"})
 }
@@ -225,7 +252,10 @@ func ListBookings(c *gin.Context) {
         COALESCE(d.vehicle_number,'') as vehicle_number,
         st.name as service_name, COALESCE(st.category,'') as service_category,
         COALESCE(st.slug,'') as service_slug, COALESCE(st.vehicle_type,'') as vehicle_type,
-        COALESCE(b.distance_km,0) as distance_km, COALESCE(b.ride_otp,'') as ride_otp
+        COALESCE(b.distance_km,0) as distance_km, COALESCE(b.ride_otp,'') as ride_otp,
+        b.hospital_name, b.ambulance_sub_type,
+        COALESCE(b.is_free_ambulance,FALSE) as is_free_ambulance,
+        b.patient_name, b.purpose_type
         FROM bookings b
         JOIN riders r ON r.id=b.rider_id
         JOIN users u_r ON u_r.id=r.user_id
@@ -251,9 +281,12 @@ func ListBookings(c *gin.Context) {
         var estFare, finalFare *float64
         var distanceKm float64
         var createdAt time.Time
+        var hospitalName, ambulanceSubType, patientName, purposeType *string
+        var isFreeAmbulance bool
         rows.Scan(&id, &status, &pickup, &drop, &estFare, &finalFare, &createdAt,
             &riderName, &riderPhone, &driverName, &driverPhone, &vehicleNumber,
-            &serviceName, &serviceCategory, &serviceSlug, &vehicleType, &distanceKm, &rideOTP)
+            &serviceName, &serviceCategory, &serviceSlug, &vehicleType, &distanceKm, &rideOTP,
+            &hospitalName, &ambulanceSubType, &isFreeAmbulance, &patientName, &purposeType)
         bookings = append(bookings, map[string]interface{}{
             "id": id, "status": status, "pickup_address": pickup, "drop_address": drop,
             "estimated_fare": estFare, "final_fare": finalFare, "created_at": createdAt,
@@ -261,6 +294,8 @@ func ListBookings(c *gin.Context) {
             "driver_name": driverName, "driver_phone": driverPhone, "vehicle_number": vehicleNumber,
             "service_name": serviceName, "service_category": serviceCategory, "service_slug": serviceSlug,
             "vehicle_type": vehicleType, "distance_km": distanceKm, "ride_otp": rideOTP,
+            "hospital_name": hospitalName, "ambulance_sub_type": ambulanceSubType,
+            "is_free_ambulance": isFreeAmbulance, "patient_name": patientName, "purpose_type": purposeType,
         })
     }
     if bookings == nil { bookings = []map[string]interface{}{} }

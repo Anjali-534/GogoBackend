@@ -91,6 +91,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogooPublic.GET("/services", handlers.ListServiceTypes)
 		gogooPublic.POST("/panel-login",    handlers.PanelLogin)
 		gogooPublic.POST("/hospital-login", handlers.HospitalLogin)
+		gogooPublic.GET("/ambulance/hospitals/nearby", handlers.GetNearbyHospitals)
 	}
 
 	// ============================================================
