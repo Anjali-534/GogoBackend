@@ -386,10 +386,11 @@ func SupportCancelBooking(c *gin.Context) {
 }
 
 // POST /gogoo/support/block-rider/:id
+// :id is the ticket_id — we look up the rider_id from the ticket
 func SupportBlockRider(c *gin.Context) {
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
-	id := c.Param("id")
+	ticketID := c.Param("id")
 
 	var req struct {
 		Reason   string `json:"reason"`
@@ -397,9 +398,17 @@ func SupportBlockRider(c *gin.Context) {
 	}
 	c.ShouldBindJSON(&req)
 
+	// Look up the rider's id from the ticket
+	var riderID *string
+	pool.QueryRow(ctx, `SELECT rider_id FROM support_tickets WHERE id=$1`, ticketID).Scan(&riderID)
+	if riderID == nil || *riderID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no rider associated with this ticket"})
+		return
+	}
+
 	pool.Exec(ctx, `
 		UPDATE riders SET is_blocked=TRUE, block_reason=$1 WHERE id=$2
-	`, req.Reason, id)
+	`, req.Reason, *riderID)
 
 	c.JSON(http.StatusOK, gin.H{"message": "rider blocked"})
 }
