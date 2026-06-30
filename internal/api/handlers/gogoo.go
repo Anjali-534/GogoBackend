@@ -564,18 +564,51 @@ func GetAnalytics(c *gin.Context) {
         }
         catRows.Close()
     }
+
+    // App analytics from analytics_events table (safe — checks existence first)
+    var appBookingsStarted, appBookingsCompleted, appBookingsCancelled, appUsersToday, appCrashesToday int
+    var tableExists bool
+    pool.QueryRow(ctx, `
+        SELECT EXISTS (
+            SELECT FROM information_schema.tables
+            WHERE table_name = 'analytics_events'
+        )
+    `).Scan(&tableExists)
+    if tableExists {
+        pool.QueryRow(ctx, `
+            SELECT
+                COUNT(*) FILTER (WHERE event_name='booking_started'   AND DATE(created_at)=CURRENT_DATE),
+                COUNT(*) FILTER (WHERE event_name='booking_completed' AND DATE(created_at)=CURRENT_DATE),
+                COUNT(*) FILTER (WHERE event_name='booking_cancelled' AND DATE(created_at)=CURRENT_DATE),
+                COUNT(DISTINCT user_id) FILTER (WHERE DATE(created_at)=CURRENT_DATE),
+                COUNT(*) FILTER (WHERE event_name='app_error'         AND DATE(created_at)=CURRENT_DATE)
+            FROM analytics_events
+            WHERE DATE(created_at)=CURRENT_DATE
+        `).Scan(&appBookingsStarted, &appBookingsCompleted, &appBookingsCancelled, &appUsersToday, &appCrashesToday)
+    }
+    var appCompletionRate float64
+    if appBookingsStarted > 0 {
+        appCompletionRate = float64(appBookingsCompleted) / float64(appBookingsStarted) * 100
+    }
+
     c.JSON(http.StatusOK, gin.H{
-        "total_bookings":  totalBookings,
-        "active_drivers":  activeDrivers,
-        "online_drivers":  onlineDrivers,
-        "total_riders":    totalRiders,
-        "total_revenue":   totalRevenue,
-        "today_bookings":  todayBookings,
-        "today_completed": todayCompleted,
-        "today_cancelled": todayCancelled,
-        "today_revenue":   todayRevenue,
-        "by_category":     byCategory,
-        "daily_bookings":  dailyBookings,
+        "total_bookings":          totalBookings,
+        "active_drivers":          activeDrivers,
+        "online_drivers":          onlineDrivers,
+        "total_riders":            totalRiders,
+        "total_revenue":           totalRevenue,
+        "today_bookings":          todayBookings,
+        "today_completed":         todayCompleted,
+        "today_cancelled":         todayCancelled,
+        "today_revenue":           todayRevenue,
+        "by_category":             byCategory,
+        "daily_bookings":          dailyBookings,
+        "app_bookings_started":    appBookingsStarted,
+        "app_bookings_completed":  appBookingsCompleted,
+        "app_bookings_cancelled":  appBookingsCancelled,
+        "app_users_today":         appUsersToday,
+        "app_crashes_today":       appCrashesToday,
+        "app_completion_rate":     appCompletionRate,
     })
 }
 

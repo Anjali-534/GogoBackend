@@ -208,6 +208,13 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.GET("/support/stats",                       handlers.GetSupportStats)
 		gogoo.POST("/support/cancel-booking/:id",         handlers.SupportCancelBooking)
 		gogoo.POST("/support/block-rider/:id",            handlers.SupportBlockRider)
+
+		// In-app chat (rider + driver apps)
+		gogoo.POST("/support/chat/start",                 handlers.StartSupportChat)
+		gogoo.GET("/support/chat/my-tickets",             handlers.GetMyTickets)
+		gogoo.GET("/support/chat/:ticket_id/messages",    handlers.GetChatMessages)
+		gogoo.POST("/support/chat/:ticket_id/messages",   handlers.SendChatMessage)
+		gogoo.GET("/support/unread-count",                handlers.GetUnreadCount)
 	}
 
 	// ============================================================
