@@ -3,6 +3,7 @@
 import (
     "context"
     "crypto/rand"
+    "encoding/json"
     "fmt"
     "log"
     "math/big"
@@ -1615,4 +1616,413 @@ func UpdatePanelPassword(c *gin.Context) {
         return
     }
     c.JSON(http.StatusOK, gin.H{"message": "password updated"})
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// POST /gogoo/analytics/event — store a mobile analytics event
+// ═══════════════════════════════════════════════════════════════════════
+func RecordAnalyticsEvent(c *gin.Context) {
+    ctx  := context.Background()
+    pool := db.GetDB().GetPool()
+
+    var req struct {
+        EventName       string                 `json:"event_name"`
+        UserID          string                 `json:"user_id"`
+        UserType        string                 `json:"user_type"`
+        ScreenName      string                 `json:"screen_name"`
+        TimeSpentSecs   int                    `json:"time_spent_seconds"`
+        City            string                 `json:"city"`
+        Area            string                 `json:"area"`
+        DeviceModel     string                 `json:"device_model"`
+        OSVersion       string                 `json:"os_version"`
+        AppVersion      string                 `json:"app_version"`
+        NetworkType     string                 `json:"network_type"`
+        SessionID       string                 `json:"session_id"`
+        RetentionBucket string                 `json:"retention_bucket"`
+        Properties      map[string]interface{} `json:"properties"`
+    }
+    if err := c.ShouldBindJSON(&req); err != nil || req.EventName == "" {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "event_name required"})
+        return
+    }
+
+    var tableExists bool
+    pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='analytics_events')`).Scan(&tableExists)
+    if !tableExists {
+        c.JSON(http.StatusOK, gin.H{"status": "table_not_ready"})
+        return
+    }
+
+    propsJSON, _ := json.Marshal(req.Properties)
+    pool.Exec(ctx, `
+        INSERT INTO analytics_events
+            (event_name, user_id, user_type,
+             screen_name, time_spent_seconds,
+             city, area, device_model, os_version,
+             app_version, network_type, session_id,
+             retention_bucket, properties, platform)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+    `,
+        req.EventName, req.UserID, req.UserType,
+        req.ScreenName, req.TimeSpentSecs,
+        req.City, req.Area, req.DeviceModel, req.OSVersion,
+        req.AppVersion, req.NetworkType, req.SessionID,
+        req.RetentionBucket, propsJSON, "mobile",
+    )
+    c.JSON(http.StatusOK, gin.H{"status": "recorded"})
+}
+
+// ─── helper: check analytics_events table ──────────────────────────────
+func analyticsTableExists(ctx context.Context, pool interface{ QueryRow(context.Context, string, ...interface{}) interface{ Scan(...interface{}) error } }) bool {
+    var exists bool
+    pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='analytics_events')`).Scan(&exists)
+    return exists
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// GET /gogoo/analytics/screen-times
+// ═══════════════════════════════════════════════════════════════════════
+func GetScreenTimes(c *gin.Context) {
+    ctx  := context.Background()
+    pool := db.GetDB().GetPool()
+
+    var tableExists bool
+    pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='analytics_events')`).Scan(&tableExists)
+    if !tableExists {
+        c.JSON(http.StatusOK, []interface{}{})
+        return
+    }
+
+    rows, err := pool.Query(ctx, `
+        SELECT
+            screen_name,
+            ROUND(AVG(time_spent_seconds))::int         AS avg_time,
+            COUNT(*)                                     AS views,
+            COUNT(*) FILTER (WHERE time_spent_seconds < 2) AS bounces
+        FROM analytics_events
+        WHERE event_name = 'screen_time_spent'
+            AND screen_name != ''
+            AND created_at > NOW() - INTERVAL '7 days'
+        GROUP BY screen_name
+        ORDER BY views DESC
+        LIMIT 20
+    `)
+    if err != nil {
+        c.JSON(http.StatusOK, []interface{}{})
+        return
+    }
+    defer rows.Close()
+
+    var result []map[string]interface{}
+    for rows.Next() {
+        var screen string
+        var avgTime, views, bounces int
+        rows.Scan(&screen, &avgTime, &views, &bounces)
+        bounceRate := 0
+        if views > 0 {
+            bounceRate = bounces * 100 / views
+        }
+        result = append(result, map[string]interface{}{
+            "screen":      screen,
+            "avg_time":    avgTime,
+            "views":       views,
+            "bounce_rate": bounceRate,
+        })
+    }
+    if result == nil {
+        result = []map[string]interface{}{}
+    }
+    c.JSON(http.StatusOK, result)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// GET /gogoo/analytics/geo-distribution
+// ═══════════════════════════════════════════════════════════════════════
+func GetGeoDistribution(c *gin.Context) {
+    ctx  := context.Background()
+    pool := db.GetDB().GetPool()
+
+    var tableExists bool
+    pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='analytics_events')`).Scan(&tableExists)
+    if !tableExists {
+        c.JSON(http.StatusOK, []interface{}{})
+        return
+    }
+
+    rows, err := pool.Query(ctx, `
+        SELECT
+            COALESCE(city,'Unknown')            AS city,
+            COALESCE(area,'Unknown')            AS area,
+            COUNT(DISTINCT user_id)             AS users,
+            COUNT(*) FILTER (WHERE event_name='booking_started') AS bookings
+        FROM analytics_events
+        WHERE created_at > NOW() - INTERVAL '30 days'
+            AND city IS NOT NULL AND city != ''
+        GROUP BY city, area
+        ORDER BY users DESC
+        LIMIT 25
+    `)
+    if err != nil {
+        c.JSON(http.StatusOK, []interface{}{})
+        return
+    }
+    defer rows.Close()
+
+    var result []map[string]interface{}
+    for rows.Next() {
+        var city, area string
+        var users, bookings int
+        rows.Scan(&city, &area, &users, &bookings)
+        result = append(result, map[string]interface{}{
+            "city": city, "area": area, "users": users, "bookings": bookings,
+        })
+    }
+    if result == nil {
+        result = []map[string]interface{}{}
+    }
+    c.JSON(http.StatusOK, result)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// GET /gogoo/analytics/device-breakdown
+// ═══════════════════════════════════════════════════════════════════════
+func GetDeviceBreakdown(c *gin.Context) {
+    ctx  := context.Background()
+    pool := db.GetDB().GetPool()
+
+    var tableExists bool
+    pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='analytics_events')`).Scan(&tableExists)
+    if !tableExists {
+        c.JSON(http.StatusOK, gin.H{"os": []interface{}{}, "models": []interface{}{}, "versions": []interface{}{}})
+        return
+    }
+
+    osRows, _ := pool.Query(ctx, `
+        SELECT COALESCE(os_name,'unknown') AS os, COUNT(DISTINCT user_id) AS users
+        FROM analytics_events
+        WHERE event_name='device_info' AND created_at > NOW() - INTERVAL '30 days'
+        GROUP BY os ORDER BY users DESC
+    `)
+    var osList []map[string]interface{}
+    if osRows != nil {
+        for osRows.Next() {
+            var os string; var users int
+            osRows.Scan(&os, &users)
+            osList = append(osList, map[string]interface{}{"os": os, "users": users})
+        }
+        osRows.Close()
+    }
+
+    verRows, _ := pool.Query(ctx, `
+        SELECT COALESCE(os_version,'unknown') AS version, COUNT(DISTINCT user_id) AS users
+        FROM analytics_events
+        WHERE event_name='device_info' AND created_at > NOW() - INTERVAL '30 days'
+        GROUP BY version ORDER BY users DESC LIMIT 10
+    `)
+    var verList []map[string]interface{}
+    if verRows != nil {
+        for verRows.Next() {
+            var ver string; var users int
+            verRows.Scan(&ver, &users)
+            verList = append(verList, map[string]interface{}{"version": ver, "users": users})
+        }
+        verRows.Close()
+    }
+
+    modelRows, _ := pool.Query(ctx, `
+        SELECT COALESCE(device_model,'unknown') AS model, COUNT(DISTINCT user_id) AS users
+        FROM analytics_events
+        WHERE event_name='device_info' AND created_at > NOW() - INTERVAL '30 days'
+        GROUP BY model ORDER BY users DESC LIMIT 10
+    `)
+    var modelList []map[string]interface{}
+    if modelRows != nil {
+        for modelRows.Next() {
+            var model string; var users int
+            modelRows.Scan(&model, &users)
+            modelList = append(modelList, map[string]interface{}{"model": model, "users": users})
+        }
+        modelRows.Close()
+    }
+
+    netRows, _ := pool.Query(ctx, `
+        SELECT COALESCE(network_type,'unknown') AS network, COUNT(DISTINCT user_id) AS users
+        FROM analytics_events
+        WHERE event_name='device_info' AND created_at > NOW() - INTERVAL '30 days'
+        GROUP BY network ORDER BY users DESC
+    `)
+    var netList []map[string]interface{}
+    if netRows != nil {
+        for netRows.Next() {
+            var net string; var users int
+            netRows.Scan(&net, &users)
+            netList = append(netList, map[string]interface{}{"network": net, "users": users})
+        }
+        netRows.Close()
+    }
+
+    if osList    == nil { osList    = []map[string]interface{}{} }
+    if verList   == nil { verList   = []map[string]interface{}{} }
+    if modelList == nil { modelList = []map[string]interface{}{} }
+    if netList   == nil { netList   = []map[string]interface{}{} }
+
+    c.JSON(http.StatusOK, gin.H{
+        "os": osList, "versions": verList, "models": modelList, "networks": netList,
+    })
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// GET /gogoo/analytics/retention
+// ═══════════════════════════════════════════════════════════════════════
+func GetRetentionStats(c *gin.Context) {
+    ctx  := context.Background()
+    pool := db.GetDB().GetPool()
+
+    var tableExists bool
+    pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='analytics_events')`).Scan(&tableExists)
+    if !tableExists {
+        c.JSON(http.StatusOK, gin.H{"buckets": []interface{}{}, "new_users_today": 0})
+        return
+    }
+
+    var newToday int
+    pool.QueryRow(ctx, `SELECT COUNT(*) FROM analytics_events WHERE event_name='new_user' AND DATE(created_at)=CURRENT_DATE`).Scan(&newToday)
+
+    rows, err := pool.Query(ctx, `
+        SELECT
+            COALESCE(retention_bucket,'unknown') AS bucket,
+            COUNT(DISTINCT user_id) AS users
+        FROM analytics_events
+        WHERE event_name='user_retention'
+            AND created_at > NOW() - INTERVAL '30 days'
+        GROUP BY bucket
+        ORDER BY users DESC
+    `)
+    var buckets []map[string]interface{}
+    if err == nil && rows != nil {
+        for rows.Next() {
+            var bucket string; var users int
+            rows.Scan(&bucket, &users)
+            buckets = append(buckets, map[string]interface{}{"bucket": bucket, "users": users})
+        }
+        rows.Close()
+    }
+    if buckets == nil { buckets = []map[string]interface{}{} }
+
+    c.JSON(http.StatusOK, gin.H{"buckets": buckets, "new_users_today": newToday})
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// GET /gogoo/analytics/sessions
+// ═══════════════════════════════════════════════════════════════════════
+func GetSessionStats(c *gin.Context) {
+    ctx  := context.Background()
+    pool := db.GetDB().GetPool()
+
+    var tableExists bool
+    pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='analytics_events')`).Scan(&tableExists)
+    if !tableExists {
+        c.JSON(http.StatusOK, gin.H{"sessions_today": 0, "avg_duration_secs": 0, "avg_screens": 0})
+        return
+    }
+
+    var sessionsToday, avgDuration, avgScreens int
+    pool.QueryRow(ctx, `SELECT COUNT(*) FROM analytics_events WHERE event_name='session_start' AND DATE(created_at)=CURRENT_DATE`).Scan(&sessionsToday)
+    pool.QueryRow(ctx, `
+        SELECT COALESCE(ROUND(AVG((properties->>'duration_seconds')::numeric)),0)
+        FROM analytics_events
+        WHERE event_name='session_end'
+            AND created_at > NOW() - INTERVAL '7 days'
+            AND properties->>'duration_seconds' IS NOT NULL
+    `).Scan(&avgDuration)
+    pool.QueryRow(ctx, `
+        SELECT COALESCE(ROUND(AVG((properties->>'screens_visited')::numeric)),0)
+        FROM analytics_events
+        WHERE event_name='session_end'
+            AND created_at > NOW() - INTERVAL '7 days'
+            AND properties->>'screens_visited' IS NOT NULL
+    `).Scan(&avgScreens)
+
+    c.JSON(http.StatusOK, gin.H{
+        "sessions_today":    sessionsToday,
+        "avg_duration_secs": avgDuration,
+        "avg_screens":       avgScreens,
+    })
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// GET /gogoo/analytics/usage-heatmap
+// Returns a 24h × 7d grid of event counts (hour 0-23, day 0-6 Sun=0)
+// ═══════════════════════════════════════════════════════════════════════
+func GetUsageHeatmap(c *gin.Context) {
+    ctx  := context.Background()
+    pool := db.GetDB().GetPool()
+
+    var tableExists bool
+    pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='analytics_events')`).Scan(&tableExists)
+    if !tableExists {
+        c.JSON(http.StatusOK, []interface{}{})
+        return
+    }
+
+    rows, err := pool.Query(ctx, `
+        SELECT
+            EXTRACT(HOUR FROM created_at)::int        AS hour,
+            EXTRACT(DOW  FROM created_at)::int        AS day,
+            COUNT(*)                                   AS events
+        FROM analytics_events
+        WHERE created_at > NOW() - INTERVAL '30 days'
+        GROUP BY hour, day
+        ORDER BY day, hour
+    `)
+    if err != nil {
+        c.JSON(http.StatusOK, []interface{}{})
+        return
+    }
+    defer rows.Close()
+
+    var result []map[string]interface{}
+    for rows.Next() {
+        var hour, day, events int
+        rows.Scan(&hour, &day, &events)
+        result = append(result, map[string]interface{}{"hour": hour, "day": day, "events": events})
+    }
+    if result == nil {
+        result = []map[string]interface{}{}
+    }
+    c.JSON(http.StatusOK, result)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// GET /gogoo/analytics/funnel
+// Counts each funnel step event for the last 30 days
+// ═══════════════════════════════════════════════════════════════════════
+func GetFunnelData(c *gin.Context) {
+    ctx  := context.Background()
+    pool := db.GetDB().GetPool()
+
+    var tableExists bool
+    pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='analytics_events')`).Scan(&tableExists)
+    if !tableExists {
+        c.JSON(http.StatusOK, gin.H{})
+        return
+    }
+
+    steps := []string{
+        "app_opened", "home_viewed", "service_selected",
+        "location_set", "vehicle_selected", "review_viewed",
+        "booking_confirmed", "tracking_viewed", "ride_completed",
+    }
+    result := map[string]int{}
+    for _, step := range steps {
+        var count int
+        pool.QueryRow(ctx, `
+            SELECT COUNT(*) FROM analytics_events
+            WHERE event_name='funnel_step'
+              AND properties->>'step_name' = $1
+              AND created_at > NOW() - INTERVAL '30 days'
+        `, step).Scan(&count)
+        result[step] = count
+    }
+    c.JSON(http.StatusOK, result)
 }

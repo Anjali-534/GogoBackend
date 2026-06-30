@@ -154,7 +154,15 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.GET("/admin/driver-payments", handlers.AdminDriverPayments)
 
 		// Analytics
-		gogoo.GET("/analytics", handlers.GetAnalytics)
+		gogoo.GET("/analytics",                  handlers.GetAnalytics)
+		gogoo.POST("/analytics/event",           handlers.RecordAnalyticsEvent)
+		gogoo.GET("/analytics/screen-times",     handlers.GetScreenTimes)
+		gogoo.GET("/analytics/geo-distribution", handlers.GetGeoDistribution)
+		gogoo.GET("/analytics/device-breakdown", handlers.GetDeviceBreakdown)
+		gogoo.GET("/analytics/retention",        handlers.GetRetentionStats)
+		gogoo.GET("/analytics/sessions",         handlers.GetSessionStats)
+		gogoo.GET("/analytics/usage-heatmap",    handlers.GetUsageHeatmap)
+		gogoo.GET("/analytics/funnel",           handlers.GetFunnelData)
 
 		// Notifications (riders)
 		gogoo.GET("/notifications",                       handlers.ListNotifications)
