@@ -92,6 +92,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogooPublic.POST("/panel-login",    handlers.PanelLogin)
 		gogooPublic.POST("/hospital-login", handlers.HospitalLogin)
 		gogooPublic.GET("/ambulance/hospitals/nearby", handlers.GetNearbyHospitals)
+		gogooPublic.POST("/referral/validate",         handlers.ValidateReferralCode)
 	}
 
 	// ============================================================
@@ -177,6 +178,11 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		// Push token registration (riders + drivers share same endpoint)
 		gogoo.POST("/push-token",                         handlers.RegisterPushToken)
 
+		// Referrals (riders + drivers share same endpoints)
+		gogoo.GET("/referral/my-code",                    handlers.GetMyReferralCode)
+		gogoo.GET("/referral/my-referrals",                handlers.GetMyReferrals)
+		gogoo.GET("/referral/all",                        handlers.AdminListReferrals)
+
 		// Broadcasts (admin)
 		gogoo.POST("/admin/notifications",                handlers.CreateNotification)
 		gogoo.GET("/admin/notifications",                 handlers.AdminListNotifications)
@@ -233,6 +239,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	{
 		gogooExport.GET("/drivers.xlsx", handlers.ExportDriversXLSX)
 		gogooExport.GET("/users.xlsx", handlers.ExportUsersXLSX)
+		gogooExport.GET("/referrals.xlsx", handlers.ExportReferralsXLSX)
 	}
 
 	return router

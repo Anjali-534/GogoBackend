@@ -42,6 +42,11 @@ func main() {
 	} else {
 		log.Println("✓ Notifications tables ready")
 	}
+	if err := handlers.MigrateReferrals(); err != nil {
+		log.Printf("⚠ Referrals migration warning: %v", err)
+	} else {
+		log.Println("✓ Referral tables ready")
+	}
 
 	// Setup API router
 	router := api.SetupRouter(cfg)

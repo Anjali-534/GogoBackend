@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -163,6 +164,70 @@ func sendPushNotifications(audience, title, body, notifType string) {
 		}
 		defer resp.Body.Close()
 		log.Printf("Push sent to %d device(s), Expo status: %s", len(msgs), resp.Status)
+	}()
+}
+
+// notifyDriversOfNewRide fires a high-priority push (with the ride_request
+// ringtone) to every online driver whose vehicle_category matches the
+// booking's service category, so their notification actually rings even
+// when the app is backgrounded or closed.
+func notifyDriversOfNewRide(bookingID, category, pickupAddress string, fare float64) {
+	go func() {
+		ctx := context.Background()
+		pool := db.GetDB().GetPool()
+
+		rows, err := pool.Query(ctx, `
+			SELECT pt.token FROM push_tokens pt
+			JOIN drivers d ON d.user_id = pt.user_id::uuid
+			WHERE d.is_online = true AND pt.token <> ''
+			  AND ($1 = '' OR d.vehicle_category = $1)
+		`, category)
+		if err != nil {
+			log.Printf("notifyDriversOfNewRide query error: %v", err)
+			return
+		}
+		defer rows.Close()
+
+		type pushMsg struct {
+			To        string            `json:"to"`
+			Title     string            `json:"title"`
+			Body      string            `json:"body"`
+			Data      map[string]string `json:"data"`
+			Sound     string            `json:"sound"`
+			Priority  string            `json:"priority"`
+			ChannelID string            `json:"channelId"`
+		}
+		var msgs []pushMsg
+		for rows.Next() {
+			var token string
+			if rows.Scan(&token) == nil && token != "" {
+				msgs = append(msgs, pushMsg{
+					To:        token,
+					Title:     "New Ride Request!",
+					Body:      fmt.Sprintf("Pickup: %s • ₹%.0f", pickupAddress, fare),
+					Data:      map[string]string{"type": "ride_request", "booking_id": bookingID},
+					Sound:     "ride_request.wav",
+					Priority:  "high",
+					ChannelID: "ride-requests",
+				})
+			}
+		}
+		if len(msgs) == 0 {
+			return
+		}
+
+		payload, _ := json.Marshal(msgs)
+		resp, err := http.Post(
+			"https://exp.host/api/v2/push/send",
+			"application/json",
+			bytes.NewBuffer(payload),
+		)
+		if err != nil {
+			log.Printf("notifyDriversOfNewRide HTTP error: %v", err)
+			return
+		}
+		defer resp.Body.Close()
+		log.Printf("Ride-request push sent to %d driver(s), Expo status: %s", len(msgs), resp.Status)
 	}()
 }
 

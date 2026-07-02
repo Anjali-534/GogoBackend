@@ -21,10 +21,11 @@ import (
 
 func RiderSignup(c *gin.Context) {
     var req struct {
-        Email    string `json:"email" binding:"required,email"`
-        Name     string `json:"name" binding:"required"`
-        Password string `json:"password" binding:"required,min=8"`
-        Phone    string `json:"phone" binding:"required"`
+        Email          string `json:"email" binding:"required,email"`
+        Name           string `json:"name" binding:"required"`
+        Password       string `json:"password" binding:"required,min=8"`
+        Phone          string `json:"phone" binding:"required"`
+        ReferredByCode string `json:"referred_by_code"`
     }
     if err := c.ShouldBindJSON(&req); err != nil {
         c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -40,12 +41,14 @@ func RiderSignup(c *gin.Context) {
     }
     userID := uuid.New()
     riderID := uuid.New()
+    referralCode := generateReferralCode(ctx, "riders", "GU")
     tx, _ := pool.Begin(ctx)
     defer tx.Rollback(ctx)
     hashedPassword, _ := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
     tx.Exec(ctx, "INSERT INTO users (id,email,name,password_hash,is_verified) VALUES ($1,$2,$3,$4,true)", userID, req.Email, req.Name, string(hashedPassword))
-    tx.Exec(ctx, "INSERT INTO riders (id,user_id,phone) VALUES ($1,$2,$3)", riderID, userID, req.Phone)
+    tx.Exec(ctx, "INSERT INTO riders (id,user_id,phone,referral_code) VALUES ($1,$2,$3,$4)", riderID, userID, req.Phone, referralCode)
     tx.Commit(ctx)
+    applyReferral("rider", riderID, req.ReferredByCode)
     c.JSON(http.StatusCreated, gin.H{"user_id": userID, "rider_id": riderID, "message": "Rider account created"})
 }
 
@@ -67,6 +70,7 @@ func DriverSignup(c *gin.Context) {
         BankName          string `json:"bank_name"`
         UPIID             string `json:"upi_id"`
         GSTNumber         string `json:"gst_number"`
+        ReferredByCode    string `json:"referred_by_code"`
     }
     if err := c.ShouldBindJSON(&req); err != nil {
         c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -104,15 +108,16 @@ func DriverSignup(c *gin.Context) {
         return
     }
     defer tx.Rollback(ctx)
+    referralCode := generateReferralCode(ctx, "drivers", "GD")
     hashedPassword, _ := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
     if _, err := tx.Exec(ctx, "INSERT INTO users (id,email,name,password_hash,is_verified) VALUES ($1,$2,$3,$4,false)", userID, req.Email, req.Name, string(hashedPassword)); err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create user"})
         return
     }
     if _, err := tx.Exec(ctx,
-        `INSERT INTO drivers (id,user_id,phone,license_number,vehicle_type,vehicle_category,vehicle_number,vehicle_model,vehicle_color,bank_account_holder,bank_account_number,bank_ifsc,bank_name,upi_id,gst_number) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+        `INSERT INTO drivers (id,user_id,phone,license_number,vehicle_type,vehicle_category,vehicle_number,vehicle_model,vehicle_color,bank_account_holder,bank_account_number,bank_ifsc,bank_name,upi_id,gst_number,referral_code) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
         driverID, userID, req.Phone, req.LicenseNum, req.VehicleType, req.VehicleCategory, req.VehicleNum, req.VehicleModel, req.VehicleColor,
-        nullIfEmpty(req.BankAccountHolder), nullIfEmpty(req.BankAccountNumber), nullIfEmpty(req.BankIFSC), nullIfEmpty(req.BankName), nullIfEmpty(req.UPIID), nullIfEmpty(req.GSTNumber),
+        nullIfEmpty(req.BankAccountHolder), nullIfEmpty(req.BankAccountNumber), nullIfEmpty(req.BankIFSC), nullIfEmpty(req.BankName), nullIfEmpty(req.UPIID), nullIfEmpty(req.GSTNumber), referralCode,
     ); err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create driver: " + err.Error()})
         return
@@ -121,6 +126,7 @@ func DriverSignup(c *gin.Context) {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit"})
         return
     }
+    applyReferral("driver", driverID, req.ReferredByCode)
     // Charge one-time registration fee
     _, _ = pool.Exec(ctx, `
         INSERT INTO driver_earnings
@@ -239,6 +245,11 @@ func CreateBooking(c *gin.Context) {
         bookingID)
 
     log.Printf("CreateBooking success: %s", bookingID)
+
+    var svcCategory string
+    pool.QueryRow(ctx, `SELECT COALESCE(category,'') FROM service_types WHERE id=$1`, req.ServiceTypeID).Scan(&svcCategory)
+    notifyDriversOfNewRide(bookingID.String(), svcCategory, req.PickupAddress, req.EstimatedFare)
+
     c.JSON(http.StatusCreated, gin.H{"booking_id": bookingID, "status": "searching"})
 }
 
@@ -778,6 +789,11 @@ func UpdateBookingStatus(c *gin.Context) {
                 AND COALESCE(wallet_balance, -700.00) < -1000
             `, bookingID)
         }
+
+        var riderID, completedDriverID string
+        pool.QueryRow(ctx, `SELECT rider_id, driver_id FROM bookings WHERE id=$1`, bookingID).Scan(&riderID, &completedDriverID)
+        creditReferralRewards("rider", riderID)
+        creditReferralRewards("driver", completedDriverID)
     case "cancelled":
         pool.Exec(ctx, `UPDATE bookings SET status='cancelled',cancelled_at=NOW(),cancelled_by=$1,cancel_reason=$2 WHERE id=$3`, req.CancelBy, req.CancelReason, bookingID)
 
@@ -880,14 +896,14 @@ func GetRiderProfile(c *gin.Context) {
     ctx := context.Background()
     pool := db.GetDB().GetPool()
     var riderID, phone string
-    var rating float64
+    var rating, walletBalance float64
     var totalRides int
-    err := pool.QueryRow(ctx, `SELECT r.id, COALESCE(r.phone,''), COALESCE(r.rating,0), COALESCE(r.total_rides,0) FROM riders r WHERE r.user_id=$1`, userID).Scan(&riderID, &phone, &rating, &totalRides)
+    err := pool.QueryRow(ctx, `SELECT r.id, COALESCE(r.phone,''), COALESCE(r.rating,0), COALESCE(r.total_rides,0), COALESCE(r.wallet_balance,0) FROM riders r WHERE r.user_id=$1`, userID).Scan(&riderID, &phone, &rating, &totalRides, &walletBalance)
     if err != nil {
         c.JSON(http.StatusNotFound, gin.H{"error": "rider profile not found"})
         return
     }
-    c.JSON(http.StatusOK, gin.H{"rider_id": riderID, "phone": phone, "rating": rating, "total_rides": totalRides})
+    c.JSON(http.StatusOK, gin.H{"rider_id": riderID, "phone": phone, "rating": rating, "total_rides": totalRides, "wallet_balance": walletBalance})
 }
 
 func GetSavedPlaces(c *gin.Context) {
