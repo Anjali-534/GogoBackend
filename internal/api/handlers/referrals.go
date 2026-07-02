@@ -13,6 +13,7 @@ import (
     "github.com/deploykit/backend/internal/db"
     "github.com/gin-gonic/gin"
     "github.com/google/uuid"
+    "github.com/jackc/pgx/v5"
     "github.com/xuri/excelize/v2"
 )
 
@@ -366,15 +367,17 @@ func ValidateReferralCode(c *gin.Context) {
 }
 
 // referralAdminQuery is shared between the JSON admin endpoint and the xlsx export.
-// Level-1 rows are the referral graph's edges (referrer_code -> referee_code);
+// Level-1 rows are the referral graph's edges (referrer -> referred);
 // level-2 rows are just the derived grand-referrer bonus for the same signup,
-// so the panel's chain view is built from level-1 rows only.
+// so the panel's chain view is built from level-1 rows, with level-2 rows
+// looked up separately to annotate the chain bonus.
 const referralAdminQuery = `
     SELECT rr.id, rr.user_type, rr.level, rr.amount, rr.status, rr.created_at, rr.credited_at,
+           rr.beneficiary_id, rr.new_user_id,
            COALESCE(ub.name,'') AS beneficiary_name, COALESCE(rb.phone, db.phone, '') AS beneficiary_phone,
            COALESCE(rb.referral_code, db.referral_code, '') AS beneficiary_code,
-           COALESCE(un.name,'') AS referee_name,      COALESCE(rn.phone, dn.phone, '') AS referee_phone,
-           COALESCE(rn.referral_code, dn.referral_code, '') AS referee_code
+           COALESCE(un.name,'') AS referred_name,     COALESCE(rn.phone, dn.phone, '') AS referred_phone,
+           COALESCE(rn.referral_code, dn.referral_code, '') AS referred_code
     FROM referral_rewards rr
     LEFT JOIN riders  rb ON rr.user_type='rider'  AND rb.id = rr.beneficiary_id
     LEFT JOIN drivers db ON rr.user_type='driver' AND db.id = rr.beneficiary_id
@@ -386,7 +389,32 @@ const referralAdminQuery = `
     LIMIT 1000
 `
 
-// GET /gogoo/referral/all — full referral tree for the master panel.
+type referralRow struct {
+    ID, UserType, Status                                  string
+    Level                                                 int
+    Amount                                                float64
+    CreatedAt                                             time.Time
+    CreditedAt                                            *time.Time
+    ReferrerID, ReferrerName, ReferrerPhone, ReferrerCode string
+    ReferredID, ReferredName, ReferredPhone, ReferredCode string
+}
+
+func scanReferralRows(rows pgx.Rows) []referralRow {
+    var out []referralRow
+    for rows.Next() {
+        var r referralRow
+        if rows.Scan(&r.ID, &r.UserType, &r.Level, &r.Amount, &r.Status, &r.CreatedAt, &r.CreditedAt,
+            &r.ReferrerID, &r.ReferredID,
+            &r.ReferrerName, &r.ReferrerPhone, &r.ReferrerCode,
+            &r.ReferredName, &r.ReferredPhone, &r.ReferredCode) != nil {
+            continue
+        }
+        out = append(out, r)
+    }
+    return out
+}
+
+// GET /gogoo/referral/all — full referral tree + summary stats for the master panel.
 func AdminListReferrals(c *gin.Context) {
     ctx := context.Background()
     pool := db.GetDB().GetPool()
@@ -396,26 +424,41 @@ func AdminListReferrals(c *gin.Context) {
         return
     }
     defer rows.Close()
+    parsed := scanReferralRows(rows)
 
     out := []gin.H{}
-    for rows.Next() {
-        var id, userType, status, benefName, benefPhone, benefCode, refereeName, refereePhone, refereeCode string
-        var level int
-        var amount float64
-        var createdAt time.Time
-        var creditedAt *time.Time
-        if rows.Scan(&id, &userType, &level, &amount, &status, &createdAt, &creditedAt,
-            &benefName, &benefPhone, &benefCode, &refereeName, &refereePhone, &refereeCode) != nil {
-            continue
-        }
+    totalReferrals, riderReferrals, driverReferrals := 0, 0, 0
+    var totalPaid, totalPending float64
+    for _, r := range parsed {
         out = append(out, gin.H{
-            "id": id, "user_type": userType, "level": level, "amount": amount, "status": status,
-            "created_at": createdAt, "credited_at": creditedAt,
-            "referrer_name": benefName, "referrer_phone": benefPhone, "referrer_code": benefCode,
-            "referee_name": refereeName, "referee_phone": refereePhone, "referee_code": refereeCode,
+            "id": r.ID, "user_type": r.UserType, "level": r.Level, "amount": r.Amount, "status": r.Status,
+            "created_at": r.CreatedAt, "credited_at": r.CreditedAt,
+            "referrer_id": r.ReferrerID, "referrer_name": r.ReferrerName, "referrer_phone": r.ReferrerPhone, "referrer_code": r.ReferrerCode,
+            "referred_id": r.ReferredID, "referred_name": r.ReferredName, "referred_phone": r.ReferredPhone, "referred_code": r.ReferredCode,
         })
+        if r.Level == 1 {
+            totalReferrals++
+            if r.UserType == "rider" {
+                riderReferrals++
+            } else if r.UserType == "driver" {
+                driverReferrals++
+            }
+        }
+        if r.Status == "credited" {
+            totalPaid += r.Amount
+        } else if r.Status == "pending" {
+            totalPending += r.Amount
+        }
     }
-    c.JSON(http.StatusOK, out)
+
+    c.JSON(http.StatusOK, gin.H{
+        "referrals":        out,
+        "total_referrals":  totalReferrals,
+        "rider_referrals":  riderReferrals,
+        "driver_referrals": driverReferrals,
+        "total_paid":       totalPaid,
+        "total_pending":    totalPending,
+    })
 }
 
 // GET /gogoo/export/referrals.xlsx
@@ -428,12 +471,13 @@ func ExportReferralsXLSX(c *gin.Context) {
         return
     }
     defer rows.Close()
+    parsed := scanReferralRows(rows)
 
     f := excelize.NewFile()
     sheet := "Referrals"
     f.SetSheetName("Sheet1", sheet)
     headers := []string{
-        "Referrer", "Referrer Phone", "Referrer Code", "Referee", "Referee Phone", "Referee Code",
+        "Referrer", "Referrer Phone", "Referrer Code", "Referred", "Referred Phone", "Referred Code",
         "Type", "Level", "Amount (₹)", "Status", "Created On", "Credited On",
     }
     hs := headerStyle(f)
@@ -444,23 +488,14 @@ func ExportReferralsXLSX(c *gin.Context) {
     }
 
     rowIdx := 2
-    for rows.Next() {
-        var id, userType, status, benefName, benefPhone, benefCode, refereeName, refereePhone, refereeCode string
-        var level int
-        var amount float64
-        var createdAt time.Time
-        var creditedAt *time.Time
-        if rows.Scan(&id, &userType, &level, &amount, &status, &createdAt, &creditedAt,
-            &benefName, &benefPhone, &benefCode, &refereeName, &refereePhone, &refereeCode) != nil {
-            continue
-        }
+    for _, r := range parsed {
         creditedStr := ""
-        if creditedAt != nil {
-            creditedStr = creditedAt.Format("2006-01-02 15:04")
+        if r.CreditedAt != nil {
+            creditedStr = r.CreditedAt.Format("2006-01-02 15:04")
         }
         vals := []interface{}{
-            benefName, benefPhone, benefCode, refereeName, refereePhone, refereeCode,
-            userType, level, amount, status, createdAt.Format("2006-01-02 15:04"), creditedStr,
+            r.ReferrerName, r.ReferrerPhone, r.ReferrerCode, r.ReferredName, r.ReferredPhone, r.ReferredCode,
+            r.UserType, r.Level, r.Amount, r.Status, r.CreatedAt.Format("2006-01-02 15:04"), creditedStr,
         }
         for i, v := range vals {
             cell, _ := excelize.CoordinatesToCellName(i+1, rowIdx)
