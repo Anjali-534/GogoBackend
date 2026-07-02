@@ -235,6 +235,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.GET("/support/chat/:ticket_id/messages",    handlers.GetChatMessages)
 		gogoo.POST("/support/chat/:ticket_id/messages",   handlers.SendChatMessage)
 		gogoo.GET("/support/unread-count",                handlers.GetUnreadCount)
+
+		// SOS emergency alert (riders + drivers share the same endpoint)
+		gogoo.POST("/sos",                                handlers.TriggerSOS)
 	}
 
 	// ============================================================

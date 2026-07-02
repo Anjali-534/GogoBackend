@@ -47,6 +47,11 @@ func main() {
 	} else {
 		log.Println("✓ Referral tables ready")
 	}
+	if err := handlers.MigrateSOS(); err != nil {
+		log.Printf("⚠ SOS migration warning: %v", err)
+	} else {
+		log.Println("✓ SOS ticket type ready")
+	}
 
 	// Setup API router
 	router := api.SetupRouter(cfg)
