@@ -366,10 +366,15 @@ func ValidateReferralCode(c *gin.Context) {
 }
 
 // referralAdminQuery is shared between the JSON admin endpoint and the xlsx export.
+// Level-1 rows are the referral graph's edges (referrer_code -> referee_code);
+// level-2 rows are just the derived grand-referrer bonus for the same signup,
+// so the panel's chain view is built from level-1 rows only.
 const referralAdminQuery = `
     SELECT rr.id, rr.user_type, rr.level, rr.amount, rr.status, rr.created_at, rr.credited_at,
            COALESCE(ub.name,'') AS beneficiary_name, COALESCE(rb.phone, db.phone, '') AS beneficiary_phone,
-           COALESCE(un.name,'') AS referee_name,      COALESCE(rn.phone, dn.phone, '') AS referee_phone
+           COALESCE(rb.referral_code, db.referral_code, '') AS beneficiary_code,
+           COALESCE(un.name,'') AS referee_name,      COALESCE(rn.phone, dn.phone, '') AS referee_phone,
+           COALESCE(rn.referral_code, dn.referral_code, '') AS referee_code
     FROM referral_rewards rr
     LEFT JOIN riders  rb ON rr.user_type='rider'  AND rb.id = rr.beneficiary_id
     LEFT JOIN drivers db ON rr.user_type='driver' AND db.id = rr.beneficiary_id
@@ -394,20 +399,20 @@ func AdminListReferrals(c *gin.Context) {
 
     out := []gin.H{}
     for rows.Next() {
-        var id, userType, status, benefName, benefPhone, refereeName, refereePhone string
+        var id, userType, status, benefName, benefPhone, benefCode, refereeName, refereePhone, refereeCode string
         var level int
         var amount float64
         var createdAt time.Time
         var creditedAt *time.Time
         if rows.Scan(&id, &userType, &level, &amount, &status, &createdAt, &creditedAt,
-            &benefName, &benefPhone, &refereeName, &refereePhone) != nil {
+            &benefName, &benefPhone, &benefCode, &refereeName, &refereePhone, &refereeCode) != nil {
             continue
         }
         out = append(out, gin.H{
             "id": id, "user_type": userType, "level": level, "amount": amount, "status": status,
             "created_at": createdAt, "credited_at": creditedAt,
-            "referrer_name": benefName, "referrer_phone": benefPhone,
-            "referee_name": refereeName, "referee_phone": refereePhone,
+            "referrer_name": benefName, "referrer_phone": benefPhone, "referrer_code": benefCode,
+            "referee_name": refereeName, "referee_phone": refereePhone, "referee_code": refereeCode,
         })
     }
     c.JSON(http.StatusOK, out)
@@ -428,7 +433,7 @@ func ExportReferralsXLSX(c *gin.Context) {
     sheet := "Referrals"
     f.SetSheetName("Sheet1", sheet)
     headers := []string{
-        "Referrer", "Referrer Phone", "Referee", "Referee Phone",
+        "Referrer", "Referrer Phone", "Referrer Code", "Referee", "Referee Phone", "Referee Code",
         "Type", "Level", "Amount (₹)", "Status", "Created On", "Credited On",
     }
     hs := headerStyle(f)
@@ -440,13 +445,13 @@ func ExportReferralsXLSX(c *gin.Context) {
 
     rowIdx := 2
     for rows.Next() {
-        var id, userType, status, benefName, benefPhone, refereeName, refereePhone string
+        var id, userType, status, benefName, benefPhone, benefCode, refereeName, refereePhone, refereeCode string
         var level int
         var amount float64
         var createdAt time.Time
         var creditedAt *time.Time
         if rows.Scan(&id, &userType, &level, &amount, &status, &createdAt, &creditedAt,
-            &benefName, &benefPhone, &refereeName, &refereePhone) != nil {
+            &benefName, &benefPhone, &benefCode, &refereeName, &refereePhone, &refereeCode) != nil {
             continue
         }
         creditedStr := ""
@@ -454,7 +459,7 @@ func ExportReferralsXLSX(c *gin.Context) {
             creditedStr = creditedAt.Format("2006-01-02 15:04")
         }
         vals := []interface{}{
-            benefName, benefPhone, refereeName, refereePhone,
+            benefName, benefPhone, benefCode, refereeName, refereePhone, refereeCode,
             userType, level, amount, status, createdAt.Format("2006-01-02 15:04"), creditedStr,
         }
         for i, v := range vals {
@@ -463,8 +468,8 @@ func ExportReferralsXLSX(c *gin.Context) {
         }
         rowIdx++
     }
-    f.SetColWidth(sheet, "A", "D", 22)
-    f.SetColWidth(sheet, "E", "J", 16)
+    f.SetColWidth(sheet, "A", "F", 22)
+    f.SetColWidth(sheet, "G", "L", 16)
 
     writeXLSX(c, f, fmt.Sprintf("gogoo-referrals-%s.xlsx", time.Now().Format("2006-01-02")))
 }
