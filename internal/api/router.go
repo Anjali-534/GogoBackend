@@ -39,6 +39,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		// no gogoo.app domain yet, so the backend itself serves these.
 		public.GET("/r/:code", handlers.ReferralLandingUser)
 		public.GET("/dr/:code", handlers.ReferralLandingDriver)
+		public.GET("/driver-app", handlers.DriverAppLanding)
 	}
 
 	// ============================================================
