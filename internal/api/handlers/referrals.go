@@ -280,7 +280,7 @@ func GetMyReferralCode(c *gin.Context) {
     }
     c.JSON(http.StatusOK, gin.H{
         "referral_code":   code,
-        "share_link":      fmt.Sprintf("https://gogoo.app/%s/%s", pathSeg, code),
+        "share_link":      fmt.Sprintf("%s/%s/%s", backendPublicURL(), pathSeg, code),
         "total_referred":  totalReferred,
         "total_earned":    totalEarned,
         "pending_rewards": pendingRewards,
