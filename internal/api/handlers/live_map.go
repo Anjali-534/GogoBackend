@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/deploykit/backend/internal/db"
@@ -101,7 +103,7 @@ func ListLiveBookings(c *gin.Context) {
         SELECT b.id, b.status,
                b.pickup_lat, b.pickup_lng, b.pickup_address,
                b.drop_lat, b.drop_lng, b.drop_address,
-               b.driver_lat, b.driver_lng,
+               b.driver_lat, b.driver_lng, b.driver_updated_at,
                COALESCE(u_r.name,'') AS rider_name,
                COALESCE(du.name,'')  AS driver_name,
                COALESCE(st.name,'')  AS service_name,
@@ -127,8 +129,9 @@ func ListLiveBookings(c *gin.Context) {
 		var id, status, pAddr, dAddr, riderName, driverName, serviceName, cat string
 		var pLat, pLng, dLat, dLng float64
 		var driverLat, driverLng *float64
+		var driverUpdatedAt *time.Time
 		if err := rows.Scan(&id, &status, &pLat, &pLng, &pAddr, &dLat, &dLng, &dAddr,
-			&driverLat, &driverLng, &riderName, &driverName, &serviceName, &cat); err != nil {
+			&driverLat, &driverLng, &driverUpdatedAt, &riderName, &driverName, &serviceName, &cat); err != nil {
 			continue
 		}
 		item := gin.H{
@@ -142,7 +145,11 @@ func ListLiveBookings(c *gin.Context) {
 			"category":     cat,
 		}
 		if driverLat != nil && driverLng != nil {
-			item["driver"] = gin.H{"lat": *driverLat, "lng": *driverLng}
+			driverInfo := gin.H{"lat": *driverLat, "lng": *driverLng}
+			if driverUpdatedAt != nil {
+				driverInfo["updated_at"] = *driverUpdatedAt
+			}
+			item["driver"] = driverInfo
 		}
 		out = append(out, item)
 	}
@@ -214,6 +221,87 @@ func ProxyOlaRoute(c *gin.Context) {
 		"distance_km":   distanceKm,
 		"duration_mins": durationMins,
 	})
+}
+
+// ── Reverse geocode cache ────────────────────────────────────────────────
+// Keyed by lat/lng rounded to 3 decimals (~100m), so a driver drifting
+// slightly within the same block reuses one Ola lookup instead of firing a
+// new one per popup open. Reset wholesale once it hits the cap — panel
+// traffic is low enough that a simple reset beats tracking LRU order.
+var (
+	geocodeCacheMu sync.Mutex
+	geocodeCache   = map[string]string{}
+)
+
+const geocodeCacheMax = 5000
+
+// GET /gogoo/geocode/reverse?lat=..&lng=..
+// Server-side proxy to Ola Maps reverse geocoding so the Ola key never
+// reaches panel frontends, and so per-marker-click traffic across every
+// panel doesn't turn into direct, unbounded Ola API spend.
+// Always returns 200 — degrades to an empty address on any failure so
+// callers can show "Location unavailable" without treating this as an error.
+func ReverseGeocodeProxy(c *gin.Context) {
+	empty := gin.H{"address": ""}
+
+	lat, errLat := strconv.ParseFloat(c.Query("lat"), 64)
+	lng, errLng := strconv.ParseFloat(c.Query("lng"), 64)
+	if errLat != nil || errLng != nil {
+		c.JSON(http.StatusOK, empty)
+		return
+	}
+
+	cacheKey := fmt.Sprintf("%.3f,%.3f", lat, lng)
+
+	geocodeCacheMu.Lock()
+	cached, ok := geocodeCache[cacheKey]
+	geocodeCacheMu.Unlock()
+	if ok {
+		c.JSON(http.StatusOK, gin.H{"address": cached})
+		return
+	}
+
+	apiKey := os.Getenv("OLA_MAPS_KEY")
+	if apiKey == "" {
+		c.JSON(http.StatusOK, empty)
+		return
+	}
+
+	url := fmt.Sprintf("https://api.olamaps.io/places/v1/reverse-geocode?latlng=%f,%f&api_key=%s", lat, lng, apiKey)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		c.JSON(http.StatusOK, empty)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		c.JSON(http.StatusOK, empty)
+		return
+	}
+
+	var result struct {
+		Results []struct {
+			FormattedAddress string `json:"formatted_address"`
+		} `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || len(result.Results) == 0 {
+		c.JSON(http.StatusOK, empty)
+		return
+	}
+
+	address := result.Results[0].FormattedAddress
+
+	geocodeCacheMu.Lock()
+	if len(geocodeCache) >= geocodeCacheMax {
+		geocodeCache = map[string]string{}
+	}
+	geocodeCache[cacheKey] = address
+	geocodeCacheMu.Unlock()
+
+	c.JSON(http.StatusOK, gin.H{"address": address})
 }
 
 // isLatLng validates a "lat,lng" query param before it's interpolated into an outbound URL.

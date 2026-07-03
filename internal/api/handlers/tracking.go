@@ -121,6 +121,7 @@ func GetBooking(c *gin.Context) {
 		pAddr, dAddr                                     string
 		fare, dist                                       float64
 		driverLat, driverLng, driverHeading              *float64
+		driverUpdatedAt                                  *time.Time
 		driverName, driverPhone, vehicleNumber, vehModel *string
 		driverRating                                     *float64
 		riderName, riderPhone, serviceName               string
@@ -137,7 +138,7 @@ func GetBooking(c *gin.Context) {
 		       b.pickup_lat, b.pickup_lng, b.pickup_address,
 		       b.drop_lat, b.drop_lng, b.drop_address,
 		       COALESCE(b.estimated_fare,0), COALESCE(b.distance_km,0),
-		       b.driver_lat, b.driver_lng, b.driver_heading,
+		       b.driver_lat, b.driver_lng, b.driver_heading, b.driver_updated_at,
 		       du.name, d.phone, d.vehicle_number, d.vehicle_model, d.rating,
 		       COALESCE(u_r.name,'') AS rider_name,
 		       COALESCE(r.phone,'')  AS rider_phone,
@@ -163,7 +164,7 @@ func GetBooking(c *gin.Context) {
 		&id, &riderID, &status, &driverID,
 		&pLat, &pLng, &pAddr, &dLat, &dLng, &dAddr,
 		&fare, &dist,
-		&driverLat, &driverLng, &driverHeading,
+		&driverLat, &driverLng, &driverHeading, &driverUpdatedAt,
 		&driverName, &driverPhone, &vehicleNumber, &vehModel, &driverRating,
 		&riderName, &riderPhone, &serviceName,
 		&rideOTP,
@@ -224,6 +225,9 @@ func GetBooking(c *gin.Context) {
 			driver["lng"] = *driverLng
 			if driverHeading != nil {
 				driver["heading"] = *driverHeading
+			}
+			if driverUpdatedAt != nil {
+				driver["updated_at"] = *driverUpdatedAt
 			}
 		}
 		resp["driver"] = driver

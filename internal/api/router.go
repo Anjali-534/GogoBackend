@@ -128,6 +128,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.GET("/live/drivers", handlers.ListLiveDrivers)
 		gogoo.GET("/live/bookings", handlers.ListLiveBookings)
 		gogoo.GET("/route", handlers.ProxyOlaRoute)
+		gogoo.GET("/geocode/reverse", handlers.ReverseGeocodeProxy)
 
 		// Riders (dashboard)
 		gogoo.GET("/riders", handlers.ListRiders)
