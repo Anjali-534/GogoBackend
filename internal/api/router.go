@@ -124,6 +124,11 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.PATCH("/drivers/:id/online", handlers.ToggleDriverOnline)
 		gogoo.POST("/drivers/:id/location", handlers.UpdateDriverLocation)
 
+		// Live map (admin panels)
+		gogoo.GET("/live/drivers", handlers.ListLiveDrivers)
+		gogoo.GET("/live/bookings", handlers.ListLiveBookings)
+		gogoo.GET("/route", handlers.ProxyOlaRoute)
+
 		// Riders (dashboard)
 		gogoo.GET("/riders", handlers.ListRiders)
 
