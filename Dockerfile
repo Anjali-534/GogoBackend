@@ -19,6 +19,7 @@ WORKDIR /app
 RUN apk --no-cache add ca-certificates postgresql-client
 
 COPY --from=builder /app/server .
+COPY --from=builder /app/static ./static
 
 EXPOSE 8080
 
