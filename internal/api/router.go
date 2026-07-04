@@ -87,6 +87,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	// Serve uploaded files
 	router.Static("/uploads", "./uploads")
 
+	// Serve legal/policy PDFs (Terms & Conditions, Privacy Policy, TDS Declaration)
+	router.Static("/policies", "./static/policies")
+
 	// ============================================================
 	// GOGOO â€" PUBLIC ROUTES
 	// ============================================================
