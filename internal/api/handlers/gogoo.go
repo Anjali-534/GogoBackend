@@ -179,6 +179,7 @@ func CreateBooking(c *gin.Context) {
         DistanceKm    float64 `json:"distance_km"`
         PromoCode     *string `json:"promo_code"`
         DiscountAmt   float64 `json:"discount_amount"`
+        Source        string  `json:"source" binding:"omitempty,oneof=app website"`
         // Ambulance-specific fields
         HospitalID       *string `json:"hospital_id"`
         HospitalName     *string `json:"hospital_name"`
@@ -193,6 +194,9 @@ func CreateBooking(c *gin.Context) {
         log.Printf("CreateBooking bind error: %v", err)
         c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body: " + err.Error()})
         return
+    }
+    if req.Source == "" {
+        req.Source = "app"
     }
     log.Printf("CreateBooking: rider=%s service=%s pickup=(%v,%v) drop=(%v,%v) fare=%v isFree=%v",
         req.RiderID, req.ServiceTypeID, req.PickupLat, req.PickupLng, req.DropLat, req.DropLng, req.EstimatedFare, req.IsFreeAmbulance)
@@ -219,8 +223,8 @@ func CreateBooking(c *gin.Context) {
     bookingID := uuid.New()
     n, _ := rand.Int(rand.Reader, big.NewInt(10000))
     otp := fmt.Sprintf("%04d", n.Int64())
-    _, err := pool.Exec(ctx, `INSERT INTO bookings (id,rider_id,service_type_id,status,pickup_lat,pickup_lng,pickup_address,drop_lat,drop_lng,drop_address,estimated_fare,distance_km,ride_otp) VALUES ($1,$2,$3,'searching',$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-        bookingID, req.RiderID, req.ServiceTypeID, req.PickupLat, req.PickupLng, req.PickupAddress, req.DropLat, req.DropLng, req.DropAddress, req.EstimatedFare, req.DistanceKm, otp)
+    _, err := pool.Exec(ctx, `INSERT INTO bookings (id,rider_id,service_type_id,status,pickup_lat,pickup_lng,pickup_address,drop_lat,drop_lng,drop_address,estimated_fare,distance_km,ride_otp,source) VALUES ($1,$2,$3,'searching',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+        bookingID, req.RiderID, req.ServiceTypeID, req.PickupLat, req.PickupLng, req.PickupAddress, req.DropLat, req.DropLng, req.DropAddress, req.EstimatedFare, req.DistanceKm, otp, req.Source)
     if err != nil {
         log.Printf("CreateBooking insert error: %v", err)
         c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create booking: " + err.Error()})
@@ -267,7 +271,7 @@ func ListBookings(c *gin.Context) {
         COALESCE(b.distance_km,0) as distance_km, COALESCE(b.ride_otp,'') as ride_otp,
         b.hospital_name, b.ambulance_sub_type,
         COALESCE(b.is_free_ambulance,FALSE) as is_free_ambulance,
-        b.patient_name, b.purpose_type
+        b.patient_name, b.purpose_type, b.source
         FROM bookings b
         JOIN riders r ON r.id=b.rider_id
         JOIN users u_r ON u_r.id=r.user_id
@@ -295,10 +299,11 @@ func ListBookings(c *gin.Context) {
         var createdAt time.Time
         var hospitalName, ambulanceSubType, patientName, purposeType *string
         var isFreeAmbulance bool
+        var source string
         rows.Scan(&id, &status, &pickup, &drop, &estFare, &finalFare, &createdAt,
             &riderName, &riderPhone, &driverName, &driverPhone, &vehicleNumber,
             &serviceName, &serviceCategory, &serviceSlug, &vehicleType, &distanceKm, &rideOTP,
-            &hospitalName, &ambulanceSubType, &isFreeAmbulance, &patientName, &purposeType)
+            &hospitalName, &ambulanceSubType, &isFreeAmbulance, &patientName, &purposeType, &source)
         bookings = append(bookings, map[string]interface{}{
             "id": id, "status": status, "pickup_address": pickup, "drop_address": drop,
             "estimated_fare": estFare, "final_fare": finalFare, "created_at": createdAt,
@@ -308,6 +313,7 @@ func ListBookings(c *gin.Context) {
             "vehicle_type": vehicleType, "distance_km": distanceKm, "ride_otp": rideOTP,
             "hospital_name": hospitalName, "ambulance_sub_type": ambulanceSubType,
             "is_free_ambulance": isFreeAmbulance, "patient_name": patientName, "purpose_type": purposeType,
+            "source": source,
         })
     }
     if bookings == nil { bookings = []map[string]interface{}{} }
@@ -318,7 +324,7 @@ func ListRiderBookings(c *gin.Context) {
     userID := c.GetString("user_id")
     ctx := context.Background()
     pool := db.GetDB().GetPool()
-    rows, err := pool.Query(ctx, `SELECT b.id, b.status, b.pickup_address, b.drop_address, COALESCE(b.estimated_fare,0), COALESCE(b.final_fare,0), COALESCE(b.distance_km,0), b.created_at, COALESCE(u_d.name,'') as driver_name, st.name as service_name FROM bookings b JOIN riders r ON r.id = b.rider_id JOIN users u_r ON u_r.id = r.user_id LEFT JOIN drivers d ON d.id = b.driver_id LEFT JOIN users u_d ON u_d.id = d.user_id JOIN service_types st ON st.id = b.service_type_id WHERE u_r.id = $1 ORDER BY b.created_at DESC LIMIT 100`, userID)
+    rows, err := pool.Query(ctx, `SELECT b.id, b.status, b.pickup_address, b.drop_address, COALESCE(b.estimated_fare,0), COALESCE(b.final_fare,0), COALESCE(b.distance_km,0), b.created_at, COALESCE(u_d.name,'') as driver_name, st.name as service_name, b.source FROM bookings b JOIN riders r ON r.id = b.rider_id JOIN users u_r ON u_r.id = r.user_id LEFT JOIN drivers d ON d.id = b.driver_id LEFT JOIN users u_d ON u_d.id = d.user_id JOIN service_types st ON st.id = b.service_type_id WHERE u_r.id = $1 ORDER BY b.created_at DESC LIMIT 100`, userID)
     if err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
         return
@@ -326,11 +332,11 @@ func ListRiderBookings(c *gin.Context) {
     defer rows.Close()
     var bookings []map[string]interface{}
     for rows.Next() {
-        var id, status, pickup, drop, driverName, serviceName string
+        var id, status, pickup, drop, driverName, serviceName, source string
         var estimatedFare, finalFare, distanceKm float64
         var createdAt time.Time
-        rows.Scan(&id, &status, &pickup, &drop, &estimatedFare, &finalFare, &distanceKm, &createdAt, &driverName, &serviceName)
-        bookings = append(bookings, map[string]interface{}{"id": id, "status": status, "pickup_address": pickup, "drop_address": drop, "estimated_fare": estimatedFare, "final_fare": finalFare, "distance_km": distanceKm, "created_at": createdAt, "driver_name": driverName, "service_name": serviceName})
+        rows.Scan(&id, &status, &pickup, &drop, &estimatedFare, &finalFare, &distanceKm, &createdAt, &driverName, &serviceName, &source)
+        bookings = append(bookings, map[string]interface{}{"id": id, "status": status, "pickup_address": pickup, "drop_address": drop, "estimated_fare": estimatedFare, "final_fare": finalFare, "distance_km": distanceKm, "created_at": createdAt, "driver_name": driverName, "service_name": serviceName, "source": source})
     }
     if bookings == nil { bookings = []map[string]interface{}{} }
     c.JSON(http.StatusOK, bookings)
