@@ -369,10 +369,13 @@ func SupportCancelBooking(c *gin.Context) {
 	}
 	c.ShouldBindJSON(&req)
 
+	// Support-initiated cancellations are always free for the rider —
+	// cancellation_fee stays at its default 0.
 	_, err := pool.Exec(ctx, `
 		UPDATE bookings
 		SET status='cancelled',
-			cancellation_reason=$1,
+			cancel_reason=$1,
+			cancelled_by='support',
 			cancelled_at=NOW()
 		WHERE id=$2
 		AND status NOT IN ('completed','cancelled')

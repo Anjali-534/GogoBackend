@@ -195,6 +195,9 @@ func CreateBooking(c *gin.Context) {
         PatientName      *string `json:"patient_name"`
         ContactPhone     *string `json:"contact_phone"`
         MedicalNotes     *string `json:"medical_notes"`
+        // Scheduled rides
+        IsScheduled bool   `json:"is_scheduled"`
+        ScheduledAt string `json:"scheduled_at"` // ISO 8601
     }
     if err := c.ShouldBindJSON(&req); err != nil {
         log.Printf("CreateBooking bind error: %v", err)
@@ -204,8 +207,8 @@ func CreateBooking(c *gin.Context) {
     if req.Source == "" {
         req.Source = "app"
     }
-    log.Printf("CreateBooking: rider=%s service=%s pickup=(%v,%v) drop=(%v,%v) fare=%v isFree=%v",
-        req.RiderID, req.ServiceTypeID, req.PickupLat, req.PickupLng, req.DropLat, req.DropLng, req.EstimatedFare, req.IsFreeAmbulance)
+    log.Printf("CreateBooking: rider=%s service=%s pickup=(%v,%v) drop=(%v,%v) fare=%v isFree=%v scheduled=%v",
+        req.RiderID, req.ServiceTypeID, req.PickupLat, req.PickupLng, req.DropLat, req.DropLng, req.EstimatedFare, req.IsFreeAmbulance, req.IsScheduled)
 
     ctx := context.Background()
     pool := db.GetDB().GetPool()
@@ -219,18 +222,52 @@ func CreateBooking(c *gin.Context) {
     }
 
     // Validate service_type exists
-    var svcExists bool
-    if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM service_types WHERE id=$1)`, req.ServiceTypeID).Scan(&svcExists); err != nil || !svcExists {
+    var svcCategory string
+    if err := pool.QueryRow(ctx, `SELECT COALESCE(category,'') FROM service_types WHERE id=$1`, req.ServiceTypeID).Scan(&svcCategory); err != nil {
         log.Printf("CreateBooking: service_type not found: %s (err=%v)", req.ServiceTypeID, err)
         c.JSON(http.StatusBadRequest, gin.H{"error": "service_type not found: " + req.ServiceTypeID})
         return
     }
 
+    // Scheduled rides: validate the pickup window. Ambulance is emergency-only
+    // and must never be scheduled, regardless of what the client sends.
+    status := "searching"
+    var scheduledAt *time.Time
+    if req.IsScheduled && svcCategory != "ambulance" {
+        parsed, err := time.Parse(time.RFC3339, req.ScheduledAt)
+        if err != nil {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "scheduled_at must be a valid ISO 8601 timestamp"})
+            return
+        }
+        now := time.Now()
+        if parsed.Before(now.Add(30*time.Minute)) || parsed.After(now.Add(7*24*time.Hour)) {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "scheduled_at must be between 30 minutes and 7 days from now"})
+            return
+        }
+        status = "scheduled"
+        scheduledAt = &parsed
+    }
+
+    // Fold in any outstanding cancellation fee from a previous ride — folded
+    // into THIS booking's fare, never silently dropped. Only reset once a
+    // booking actually completes (see UpdateBookingStatus).
+    var outstandingFee float64
+    pool.QueryRow(ctx, `SELECT COALESCE(outstanding_cancellation_fee,0) FROM riders WHERE id=$1`, req.RiderID).Scan(&outstandingFee)
+    finalFareEstimate := req.EstimatedFare + outstandingFee
+
     bookingID := uuid.New()
     n, _ := rand.Int(rand.Reader, big.NewInt(10000))
     otp := fmt.Sprintf("%04d", n.Int64())
-    _, err := pool.Exec(ctx, `INSERT INTO bookings (id,rider_id,service_type_id,status,pickup_lat,pickup_lng,pickup_address,drop_lat,drop_lng,drop_address,estimated_fare,distance_km,ride_otp,source) VALUES ($1,$2,$3,'searching',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-        bookingID, req.RiderID, req.ServiceTypeID, req.PickupLat, req.PickupLng, req.PickupAddress, req.DropLat, req.DropLng, req.DropAddress, req.EstimatedFare, req.DistanceKm, otp, req.Source)
+    _, err := pool.Exec(ctx, `
+        INSERT INTO bookings
+            (id,rider_id,service_type_id,status,pickup_lat,pickup_lng,pickup_address,
+             drop_lat,drop_lng,drop_address,estimated_fare,distance_km,ride_otp,source,
+             is_scheduled,scheduled_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+    `,
+        bookingID, req.RiderID, req.ServiceTypeID, status, req.PickupLat, req.PickupLng, req.PickupAddress,
+        req.DropLat, req.DropLng, req.DropAddress, finalFareEstimate, req.DistanceKm, otp, req.Source,
+        req.IsScheduled && svcCategory != "ambulance", scheduledAt)
     if err != nil {
         log.Printf("CreateBooking insert error: %v", err)
         c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create booking: " + err.Error()})
@@ -254,13 +291,23 @@ func CreateBooking(c *gin.Context) {
         req.PatientName, req.ContactPhone, req.MedicalNotes,
         bookingID)
 
-    log.Printf("CreateBooking success: %s", bookingID)
+    log.Printf("CreateBooking success: %s (status=%s)", bookingID, status)
 
-    var svcCategory string
-    pool.QueryRow(ctx, `SELECT COALESCE(category,'') FROM service_types WHERE id=$1`, req.ServiceTypeID).Scan(&svcCategory)
-    notifyDriversOfNewRide(bookingID.String(), svcCategory, req.PickupAddress, req.EstimatedFare)
+    // Scheduled bookings are NOT dispatched now — the scheduler ticks them
+    // into 'searching' 15 minutes before pickup, and the normal matching
+    // flow (this same notify call, from the dispatcher) takes over then.
+    if status == "searching" {
+        notifyDriversOfNewRide(bookingID.String(), svcCategory, req.PickupAddress, finalFareEstimate)
+    }
 
-    c.JSON(http.StatusCreated, gin.H{"booking_id": bookingID, "status": "searching"})
+    resp := gin.H{"booking_id": bookingID, "status": status, "is_scheduled": status == "scheduled"}
+    if scheduledAt != nil {
+        resp["scheduled_at"] = scheduledAt
+    }
+    if outstandingFee > 0 {
+        resp["outstanding_fee_applied"] = outstandingFee
+    }
+    c.JSON(http.StatusCreated, resp)
 }
 
 func ListBookings(c *gin.Context) {
@@ -277,7 +324,10 @@ func ListBookings(c *gin.Context) {
         COALESCE(b.distance_km,0) as distance_km, COALESCE(b.ride_otp,'') as ride_otp,
         b.hospital_name, b.ambulance_sub_type,
         COALESCE(b.is_free_ambulance,FALSE) as is_free_ambulance,
-        b.patient_name, b.purpose_type, b.source
+        b.patient_name, b.purpose_type, b.source,
+        b.accepted_at, b.cancelled_at, COALESCE(b.cancelled_by,'') as cancelled_by,
+        COALESCE(b.cancel_reason,'') as cancel_reason, COALESCE(b.cancellation_fee,0) as cancellation_fee,
+        COALESCE(b.is_scheduled,false) as is_scheduled, b.scheduled_at
         FROM bookings b
         JOIN riders r ON r.id=b.rider_id
         JOIN users u_r ON u_r.id=r.user_id
@@ -306,10 +356,16 @@ func ListBookings(c *gin.Context) {
         var hospitalName, ambulanceSubType, patientName, purposeType *string
         var isFreeAmbulance bool
         var source string
+        var acceptedAt, cancelledAt, scheduledAt *time.Time
+        var cancelledBy, cancelReason string
+        var cancellationFee float64
+        var isScheduled bool
         rows.Scan(&id, &status, &pickup, &drop, &estFare, &finalFare, &createdAt,
             &riderName, &riderPhone, &driverName, &driverPhone, &vehicleNumber,
             &serviceName, &serviceCategory, &serviceSlug, &vehicleType, &distanceKm, &rideOTP,
-            &hospitalName, &ambulanceSubType, &isFreeAmbulance, &patientName, &purposeType, &source)
+            &hospitalName, &ambulanceSubType, &isFreeAmbulance, &patientName, &purposeType, &source,
+            &acceptedAt, &cancelledAt, &cancelledBy, &cancelReason, &cancellationFee,
+            &isScheduled, &scheduledAt)
         bookings = append(bookings, map[string]interface{}{
             "id": id, "status": status, "pickup_address": pickup, "drop_address": drop,
             "estimated_fare": estFare, "final_fare": finalFare, "created_at": createdAt,
@@ -320,6 +376,9 @@ func ListBookings(c *gin.Context) {
             "hospital_name": hospitalName, "ambulance_sub_type": ambulanceSubType,
             "is_free_ambulance": isFreeAmbulance, "patient_name": patientName, "purpose_type": purposeType,
             "source": source,
+            "accepted_at": acceptedAt, "cancelled_at": cancelledAt, "cancelled_by": cancelledBy,
+            "cancel_reason": cancelReason, "cancellation_fee": cancellationFee,
+            "is_scheduled": isScheduled, "scheduled_at": scheduledAt,
         })
     }
     if bookings == nil { bookings = []map[string]interface{}{} }
@@ -330,7 +389,7 @@ func ListRiderBookings(c *gin.Context) {
     userID := c.GetString("user_id")
     ctx := context.Background()
     pool := db.GetDB().GetPool()
-    rows, err := pool.Query(ctx, `SELECT b.id, b.status, b.pickup_address, b.drop_address, COALESCE(b.estimated_fare,0), COALESCE(b.final_fare,0), COALESCE(b.distance_km,0), b.created_at, COALESCE(u_d.name,'') as driver_name, st.name as service_name, b.source FROM bookings b JOIN riders r ON r.id = b.rider_id JOIN users u_r ON u_r.id = r.user_id LEFT JOIN drivers d ON d.id = b.driver_id LEFT JOIN users u_d ON u_d.id = d.user_id JOIN service_types st ON st.id = b.service_type_id WHERE u_r.id = $1 ORDER BY b.created_at DESC LIMIT 100`, userID)
+    rows, err := pool.Query(ctx, `SELECT b.id, b.status, b.pickup_address, b.drop_address, COALESCE(b.estimated_fare,0), COALESCE(b.final_fare,0), COALESCE(b.distance_km,0), b.created_at, COALESCE(u_d.name,'') as driver_name, st.name as service_name, b.source, COALESCE(b.cancellation_fee,0), COALESCE(b.is_scheduled,false), b.scheduled_at FROM bookings b JOIN riders r ON r.id = b.rider_id JOIN users u_r ON u_r.id = r.user_id LEFT JOIN drivers d ON d.id = b.driver_id LEFT JOIN users u_d ON u_d.id = d.user_id JOIN service_types st ON st.id = b.service_type_id WHERE u_r.id = $1 ORDER BY b.created_at DESC LIMIT 100`, userID)
     if err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
         return
@@ -339,10 +398,17 @@ func ListRiderBookings(c *gin.Context) {
     var bookings []map[string]interface{}
     for rows.Next() {
         var id, status, pickup, drop, driverName, serviceName, source string
-        var estimatedFare, finalFare, distanceKm float64
+        var estimatedFare, finalFare, distanceKm, cancellationFee float64
         var createdAt time.Time
-        rows.Scan(&id, &status, &pickup, &drop, &estimatedFare, &finalFare, &distanceKm, &createdAt, &driverName, &serviceName, &source)
-        bookings = append(bookings, map[string]interface{}{"id": id, "status": status, "pickup_address": pickup, "drop_address": drop, "estimated_fare": estimatedFare, "final_fare": finalFare, "distance_km": distanceKm, "created_at": createdAt, "driver_name": driverName, "service_name": serviceName, "source": source})
+        var isScheduled bool
+        var scheduledAt *time.Time
+        rows.Scan(&id, &status, &pickup, &drop, &estimatedFare, &finalFare, &distanceKm, &createdAt, &driverName, &serviceName, &source, &cancellationFee, &isScheduled, &scheduledAt)
+        bookings = append(bookings, map[string]interface{}{
+            "id": id, "status": status, "pickup_address": pickup, "drop_address": drop,
+            "estimated_fare": estimatedFare, "final_fare": finalFare, "distance_km": distanceKm,
+            "created_at": createdAt, "driver_name": driverName, "service_name": serviceName, "source": source,
+            "cancellation_fee": cancellationFee, "is_scheduled": isScheduled, "scheduled_at": scheduledAt,
+        })
     }
     if bookings == nil { bookings = []map[string]interface{}{} }
     c.JSON(http.StatusOK, bookings)
@@ -933,8 +999,41 @@ func UpdateBookingStatus(c *gin.Context) {
         pool.QueryRow(ctx, `SELECT rider_id, driver_id FROM bookings WHERE id=$1`, bookingID).Scan(&riderID, &completedDriverID)
         creditReferralRewards("rider", riderID)
         creditReferralRewards("driver", completedDriverID)
+
+        // Simple v1 fee settlement: a completed ride always clears whatever
+        // outstanding cancellation fee the rider owes, since it was already
+        // folded into THIS booking's fare at creation (see CreateBooking).
+        pool.Exec(ctx, `UPDATE riders SET outstanding_cancellation_fee=0 WHERE id=$1 AND outstanding_cancellation_fee > 0`, riderID)
     case "cancelled":
-        pool.Exec(ctx, `UPDATE bookings SET status='cancelled',cancelled_at=NOW(),cancelled_by=$1,cancel_reason=$2 WHERE id=$3`, req.CancelBy, req.CancelReason, bookingID)
+        // Fee is computed server-side ONLY — never trust a client-supplied
+        // amount. Driver/support/system cancellations are always free for
+        // the rider; only a rider-initiated cancel can carry a fee.
+        var fee float64
+        if req.CancelBy == "rider" {
+            var status string
+            var acceptedAt *time.Time
+            var category, vehicleType string
+            pool.QueryRow(ctx, `
+                SELECT b.status, b.accepted_at, COALESCE(st.category,''), COALESCE(st.vehicle_type,'')
+                FROM bookings b JOIN service_types st ON st.id = b.service_type_id
+                WHERE b.id = $1
+            `, bookingID).Scan(&status, &acceptedAt, &category, &vehicleType)
+            fee, _, _, _ = calcCancellationFee(status, category, vehicleType, acceptedAt)
+        }
+
+        pool.Exec(ctx, `
+            UPDATE bookings
+            SET status='cancelled', cancelled_at=NOW(), cancelled_by=$1, cancel_reason=$2, cancellation_fee=$3
+            WHERE id=$4
+        `, req.CancelBy, req.CancelReason, fee, bookingID)
+
+        if fee > 0 {
+            var riderID string
+            pool.QueryRow(ctx, `SELECT rider_id FROM bookings WHERE id=$1`, bookingID).Scan(&riderID)
+            if riderID != "" {
+                pool.Exec(ctx, `UPDATE riders SET outstanding_cancellation_fee = COALESCE(outstanding_cancellation_fee,0) + $1 WHERE id=$2`, fee, riderID)
+            }
+        }
 
         // Auto-block driver if they cancel 2+ rides within 1 hour
         if req.CancelBy == "driver" {
@@ -963,6 +1062,7 @@ func UpdateBookingStatus(c *gin.Context) {
 
                     c.JSON(http.StatusOK, gin.H{
                         "status":        "cancelled",
+                        "cancellation_fee": fee,
                         "driver_blocked": true,
                         "blocked_until":  blockedUntil,
                         "block_reason":   reason,
@@ -971,8 +1071,84 @@ func UpdateBookingStatus(c *gin.Context) {
                 }
             }
         }
+        c.JSON(http.StatusOK, gin.H{"status": req.Status, "cancellation_fee": fee})
+        return
     }
     c.JSON(http.StatusOK, gin.H{"status": req.Status})
+}
+
+// GET /gogoo/bookings/:id/cancel-preview
+// Returns what cancelling this booking right now would cost. The actual
+// cancel path (UpdateBookingStatus, case "cancelled") calls the exact same
+// calcCancellationFee helper, so preview and charge can never disagree.
+func GetCancelPreview(c *gin.Context) {
+    bookingID := c.Param("id")
+    ctx := context.Background()
+    pool := db.GetDB().GetPool()
+
+    var status string
+    var acceptedAt *time.Time
+    var category, vehicleType string
+    err := pool.QueryRow(ctx, `
+        SELECT b.status, b.accepted_at, COALESCE(st.category,''), COALESCE(st.vehicle_type,'')
+        FROM bookings b
+        JOIN service_types st ON st.id = b.service_type_id
+        WHERE b.id = $1
+    `, bookingID).Scan(&status, &acceptedAt, &category, &vehicleType)
+    if err != nil {
+        c.JSON(http.StatusNotFound, gin.H{"error": "booking not found"})
+        return
+    }
+
+    fee, freeCancel, secondsSinceAccept, reason := calcCancellationFee(status, category, vehicleType, acceptedAt)
+    c.JSON(http.StatusOK, gin.H{
+        "fee":                  fee,
+        "free_cancel":          freeCancel,
+        "seconds_since_accept": secondsSinceAccept,
+        "reason":               reason,
+    })
+}
+
+// calcCancellationFee is the single source of truth for cancellation
+// pricing. Ambulance is always free (medical context — never penalize).
+// Cab/truck rides are free within 120s of driver acceptance, or if no
+// driver has accepted yet (searching/scheduled); after that, a flat
+// category-based fee applies.
+func calcCancellationFee(status, category, vehicleType string, acceptedAt *time.Time) (fee float64, freeCancel bool, secondsSinceAccept int, reason string) {
+    if category == "ambulance" {
+        return 0, true, 0, "Ambulance rides are always free to cancel"
+    }
+    if status == "searching" {
+        return 0, true, 0, "No driver assigned yet"
+    }
+    if status == "scheduled" {
+        return 0, true, 0, "Scheduled rides can be cancelled free before dispatch"
+    }
+    if acceptedAt == nil {
+        return 0, true, 0, "No driver assigned yet"
+    }
+    secondsSinceAccept = int(time.Since(*acceptedAt).Seconds())
+    if secondsSinceAccept < 120 {
+        return 0, true, secondsSinceAccept, "Within the free cancellation window"
+    }
+    fee = cancellationFeeForVehicle(vehicleType)
+    if fee == 0 {
+        return 0, true, secondsSinceAccept, "No cancellation fee for this service"
+    }
+    return fee, false, secondsSinceAccept, fmt.Sprintf("₹%.0f cancellation fee applies after the free window", fee)
+}
+
+func cancellationFeeForVehicle(vehicleType string) float64 {
+    switch vehicleType {
+    case "cab_2w", "cab_3w":
+        return 20
+    case "cab_4w", "cab_4w_suv":
+        return 30
+    }
+    if strings.HasPrefix(vehicleType, "truck_") {
+        return 50
+    }
+    return 0
 }
 
 // POST /gogoo/bookings/:id/verify-otp
@@ -1035,14 +1211,17 @@ func GetRiderProfile(c *gin.Context) {
     ctx := context.Background()
     pool := db.GetDB().GetPool()
     var riderID, phone string
-    var rating, walletBalance float64
+    var rating, walletBalance, outstandingCancellationFee float64
     var totalRides int
-    err := pool.QueryRow(ctx, `SELECT r.id, COALESCE(r.phone,''), COALESCE(r.rating,0), COALESCE(r.total_rides,0), COALESCE(r.wallet_balance,0) FROM riders r WHERE r.user_id=$1`, userID).Scan(&riderID, &phone, &rating, &totalRides, &walletBalance)
+    err := pool.QueryRow(ctx, `SELECT r.id, COALESCE(r.phone,''), COALESCE(r.rating,0), COALESCE(r.total_rides,0), COALESCE(r.wallet_balance,0), COALESCE(r.outstanding_cancellation_fee,0) FROM riders r WHERE r.user_id=$1`, userID).Scan(&riderID, &phone, &rating, &totalRides, &walletBalance, &outstandingCancellationFee)
     if err != nil {
         c.JSON(http.StatusNotFound, gin.H{"error": "rider profile not found"})
         return
     }
-    c.JSON(http.StatusOK, gin.H{"rider_id": riderID, "phone": phone, "rating": rating, "total_rides": totalRides, "wallet_balance": walletBalance})
+    c.JSON(http.StatusOK, gin.H{
+        "rider_id": riderID, "phone": phone, "rating": rating, "total_rides": totalRides, "wallet_balance": walletBalance,
+        "outstanding_cancellation_fee": outstandingCancellationFee,
+    })
 }
 
 func GetSavedPlaces(c *gin.Context) {
@@ -1472,7 +1651,10 @@ func ListRiderBookingsByID(c *gin.Context) {
                COALESCE(u_d.name, '') AS driver_name,
                st.name               AS service_name,
                COALESCE(b.cancelled_by, '')    AS cancelled_by,
-               COALESCE(b.cancel_reason, '')   AS cancel_reason
+               COALESCE(b.cancel_reason, '')   AS cancel_reason,
+               COALESCE(b.cancellation_fee, 0) AS cancellation_fee,
+               b.accepted_at, b.cancelled_at,
+               COALESCE(b.is_scheduled, false) AS is_scheduled, b.scheduled_at
         FROM bookings b
         JOIN service_types st ON st.id  = b.service_type_id
         LEFT JOIN drivers d   ON d.id   = b.driver_id
@@ -1496,9 +1678,12 @@ func ListRiderBookingsByID(c *gin.Context) {
     var bookings []map[string]interface{}
     for rows.Next() {
         var id, status, pickup, drop, driverName, serviceName, cancelledBy, cancelReason string
-        var fare, distanceKm float64
+        var fare, distanceKm, cancellationFee float64
         var createdAt time.Time
-        rows.Scan(&id, &status, &pickup, &drop, &fare, &distanceKm, &createdAt, &driverName, &serviceName, &cancelledBy, &cancelReason)
+        var acceptedAt, cancelledAt, scheduledAt *time.Time
+        var isScheduled bool
+        rows.Scan(&id, &status, &pickup, &drop, &fare, &distanceKm, &createdAt, &driverName, &serviceName,
+            &cancelledBy, &cancelReason, &cancellationFee, &acceptedAt, &cancelledAt, &isScheduled, &scheduledAt)
         bookings = append(bookings, map[string]interface{}{
             "id":             id,
             "status":         status,
@@ -1511,6 +1696,11 @@ func ListRiderBookingsByID(c *gin.Context) {
             "service_name":   serviceName,
             "cancelled_by":   cancelledBy,
             "cancel_reason":  cancelReason,
+            "cancellation_fee": cancellationFee,
+            "accepted_at":    acceptedAt,
+            "cancelled_at":   cancelledAt,
+            "is_scheduled":   isScheduled,
+            "scheduled_at":   scheduledAt,
         })
     }
     if bookings == nil {

@@ -115,6 +115,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.GET("/bookings", handlers.ListBookings)
 		gogoo.GET("/bookings-pending", handlers.ListPendingBookings)
 		gogoo.GET("/bookings/:id", handlers.GetBooking)
+		gogoo.GET("/bookings/:id/cancel-preview", handlers.GetCancelPreview)
         gogoo.POST("/bookings/:id/rate", handlers.RateBooking)
         gogoo.POST("/bookings/:id/accept", handlers.AcceptBooking)
         gogoo.POST("/bookings/:id/verify-otp", handlers.VerifyRideOTP)

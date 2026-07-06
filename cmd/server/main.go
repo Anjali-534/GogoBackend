@@ -53,6 +53,11 @@ func main() {
 		log.Println("✓ SOS ticket type ready")
 	}
 
+	// Scheduled-ride dispatcher — ticks scheduled bookings into the normal
+	// searching/matching flow ~15 minutes before pickup.
+	go handlers.StartScheduledDispatcher()
+	log.Println("✓ Scheduled ride dispatcher running")
+
 	// Setup API router
 	router := api.SetupRouter(cfg)
 

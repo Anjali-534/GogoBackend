@@ -131,6 +131,13 @@ func GetBooking(c *gin.Context) {
 		// Ambulance fields
 		hospitalID, hospitalName, ambulanceSubType, purposeType, patientName *string
 		isFreeAmbulance                                                       bool
+		// Cancellation + scheduling
+		vehicleCategory                          string
+		cancellationFee                          float64
+		cancelledBy, cancelReason                 string
+		cancelledAt                               *time.Time
+		isScheduled                               bool
+		scheduledAt                               *time.Time
 	)
 
 	err := pool.QueryRow(ctx, `
@@ -152,7 +159,14 @@ func GetBooking(c *gin.Context) {
 		       b.ambulance_sub_type,
 		       COALESCE(b.is_free_ambulance, FALSE),
 		       b.purpose_type,
-		       b.patient_name
+		       b.patient_name,
+		       COALESCE(st.category,''),
+		       COALESCE(b.cancellation_fee,0),
+		       COALESCE(b.cancelled_by,''),
+		       COALESCE(b.cancel_reason,''),
+		       b.cancelled_at,
+		       COALESCE(b.is_scheduled,false),
+		       b.scheduled_at
 		FROM bookings b
 		LEFT JOIN drivers      d   ON d.id    = b.driver_id
 		LEFT JOIN users        du  ON du.id   = d.user_id
@@ -171,6 +185,8 @@ func GetBooking(c *gin.Context) {
 		&finalFare, &startedAt, &completedAt,
 		&hospitalID, &hospitalName, &ambulanceSubType,
 		&isFreeAmbulance, &purposeType, &patientName,
+		&vehicleCategory, &cancellationFee, &cancelledBy, &cancelReason, &cancelledAt,
+		&isScheduled, &scheduledAt,
 	)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "booking not found"})
@@ -197,6 +213,13 @@ func GetBooking(c *gin.Context) {
 		"is_free_ambulance":  isFreeAmbulance,
 		"purpose_type":       purposeType,
 		"patient_name":       patientName,
+		"vehicle_category":   vehicleCategory,
+		"cancellation_fee":   cancellationFee,
+		"cancelled_by":       cancelledBy,
+		"cancel_reason":      cancelReason,
+		"cancelled_at":       cancelledAt,
+		"is_scheduled":       isScheduled,
+		"scheduled_at":       scheduledAt,
 	}
 	// Expose OTP once driver has arrived so the rider can read it aloud.
 	if status == "arriving" && rideOTP != nil {
