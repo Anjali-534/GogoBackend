@@ -371,6 +371,7 @@ func ListDrivers(c *gin.Context) {
     rows, err := pool.Query(ctx, `
         SELECT
             d.id,
+            COALESCE(d.user_id::text,'') AS user_id,
             COALESCE(u.name,'')          AS name,
             COALESCE(u.email,'')         AS email,
             COALESCE(d.phone,'')         AS phone,
@@ -417,7 +418,7 @@ func ListDrivers(c *gin.Context) {
     defer rows.Close()
     var drivers []map[string]interface{}
     for rows.Next() {
-        var id, name, email, phone, vType, vNum, vModel, blockReason string
+        var id, userID, name, email, phone, vType, vNum, vModel, blockReason string
         var isVerified, isOnline, isActive, isBlocked bool
         var rating, earnings float64
         var totalRides int
@@ -427,7 +428,7 @@ func ListDrivers(c *gin.Context) {
         var bgStatus, bgNotes, bgCheckedBy string
         var bgCheckedAt *time.Time
         if err := rows.Scan(
-            &id, &name, &email, &phone, &vType, &vNum, &vModel,
+            &id, &userID, &name, &email, &phone, &vType, &vNum, &vModel,
             &isVerified, &isOnline, &isActive, &isBlocked, &blockedUntil, &blockReason,
             &rating, &totalRides, &earnings, &createdAt, &documentsStatus,
             &bgStatus, &bgNotes, &bgCheckedBy, &bgCheckedAt,
@@ -441,6 +442,7 @@ func ListDrivers(c *gin.Context) {
         }
         drivers = append(drivers, map[string]interface{}{
             "id":                    id,
+            "user_id":               userID,
             "name":                  name,
             "email":                 email,
             "phone":                 phone,

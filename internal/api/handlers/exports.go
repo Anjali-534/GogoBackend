@@ -19,7 +19,7 @@ func ListRiders(c *gin.Context) {
 	pool := db.GetDB().GetPool()
 
 	rows, err := pool.Query(ctx, `
-		SELECT r.id, u.name, u.email, r.phone,
+		SELECT r.id, COALESCE(r.user_id::text,''), u.name, u.email, r.phone,
 		       r.rating, r.total_rides, r.created_at
 		FROM riders r JOIN users u ON u.id = r.user_id
 		ORDER BY r.created_at DESC LIMIT 500
@@ -32,13 +32,13 @@ func ListRiders(c *gin.Context) {
 
 	var riders []map[string]interface{}
 	for rows.Next() {
-		var id, name, email, phone string
+		var id, userID, name, email, phone string
 		var rating float64
 		var totalRides int
 		var createdAt time.Time
-		rows.Scan(&id, &name, &email, &phone, &rating, &totalRides, &createdAt)
+		rows.Scan(&id, &userID, &name, &email, &phone, &rating, &totalRides, &createdAt)
 		riders = append(riders, map[string]interface{}{
-			"id": id, "name": name, "email": email, "phone": phone,
+			"id": id, "user_id": userID, "name": name, "email": email, "phone": phone,
 			"rating": rating, "total_rides": totalRides, "created_at": createdAt,
 		})
 	}
