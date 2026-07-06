@@ -19,6 +19,7 @@ import (
 	"github.com/deploykit/backend/internal/db"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 var allowedMimeTypes = map[string]string{
@@ -37,6 +38,9 @@ var requiredDocs = map[string][]string{
 		"pan_card",
 		"driving_license",
 		"bank_passbook",
+		// MVAG 2020: Police Clearance Certificate is a personal (not
+		// vehicle-specific) document, so it's required for every category.
+		"police_clearance",
 	},
 	"truck": {
 		"rc", "insurance", "puc",
@@ -78,6 +82,7 @@ var docLabels = map[string]string{
 	"emt_cert":              "EMT / Paramedic Certificate",
 	"goods_insurance":       "Goods Insurance Certificate",
 	"bank_passbook":         "Bank Passbook / Cancelled Cheque",
+	"police_clearance":      "Police Clearance Certificate (PCC)",
 	"vehicle_photo":         "Vehicle Photo",
 	"vehicle_photo_front":   "Vehicle Photo (Front)",
 	"vehicle_photo_side":    "Vehicle Photo (Side)",
@@ -507,6 +512,11 @@ func ReviewDriverDocument(c *gin.Context) {
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 
+	if req.Status == "rejected" && strings.TrimSpace(req.RejectReason) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "reject_reason is required when rejecting a document"})
+		return
+	}
+
 	_, err := pool.Exec(ctx, `
     UPDATE driver_documents
     SET status=$1, reject_reason=$2, reviewed_at=NOW(), updated_at=NOW()
@@ -518,22 +528,48 @@ func ReviewDriverDocument(c *gin.Context) {
 		return
 	}
 
-	var pendingCount int
-	pool.QueryRow(ctx, `
-		SELECT COUNT(*) FROM driver_documents WHERE driver_id=$1 AND status != 'approved'
-	`, driverID).Scan(&pendingCount)
+	allDocsClear := maybeAutoVerifyDriver(ctx, pool, driverID)
 
-	if pendingCount == 0 {
+	c.JSON(http.StatusOK, gin.H{
+		"message":        "Document reviewed",
+		"status":         req.Status,
+		"all_docs_clear": allDocsClear,
+	})
+}
+
+// maybeAutoVerifyDriver flips is_verified=true once every document required
+// for the driver's vehicle category (common + category-specific — this now
+// includes the MVAG-mandated Police Clearance Certificate) is approved.
+// It never sets is_verified=false: already-verified drivers are grandfathered
+// in and are never re-evaluated against a newly added requirement. A
+// 'flagged' background check blocks auto-verify even if every document is
+// approved — an admin must clear the flag via VerifyDriver first.
+// Returns whether every required document is currently approved.
+func maybeAutoVerifyDriver(ctx context.Context, pool *pgxpool.Pool, driverID string) bool {
+	var vehicleType, bgStatus string
+	pool.QueryRow(ctx, `
+		SELECT COALESCE(vehicle_type,''), COALESCE(background_check_status,'pending')
+		FROM drivers WHERE id=$1
+	`, driverID).Scan(&vehicleType, &bgStatus)
+
+	category := getVehicleCategory(vehicleType)
+	required := append(append([]string{}, requiredDocs["common"]...), requiredDocs[category]...)
+
+	var approvedCount int
+	pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM driver_documents
+		WHERE driver_id=$1 AND status='approved' AND doc_type = ANY($2)
+	`, driverID, required).Scan(&approvedCount)
+
+	allApproved := approvedCount == len(required)
+
+	if allApproved && bgStatus != "flagged" {
 		pool.Exec(ctx, `
 			UPDATE drivers SET is_verified=true, docs_verified_at=NOW(), updated_at=NOW() WHERE id=$1
 		`, driverID)
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"message":        "Document reviewed",
-		"status":         req.Status,
-		"all_docs_clear": pendingCount == 0,
-	})
+	return allApproved
 }
 
 // DELETE /gogoo/drivers/:id/documents/:doc_type

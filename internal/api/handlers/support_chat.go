@@ -11,6 +11,7 @@ import (
 
 	"github.com/deploykit/backend/internal/db"
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const aiSystemPrompt = `You are a helpful customer support assistant for gogoo, a ride-hailing and logistics platform in Delhi NCR, India.
@@ -257,11 +258,34 @@ func StartSupportChat(c *gin.Context) {
 	})
 }
 
+// ticketBelongsToCaller verifies the ticket's rider_id/driver_id matches the
+// caller's own rider/driver record (looked up from the JWT user_id) — never
+// trust ticket_id alone, since it's a client-supplied path param.
+func ticketBelongsToCaller(ctx context.Context, pool *pgxpool.Pool, ticketID, userID string) bool {
+	var ok bool
+	pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM support_tickets t
+			LEFT JOIN riders  r ON r.id = t.rider_id
+			LEFT JOIN drivers d ON d.id = t.driver_id
+			WHERE t.id = $1
+			  AND (r.user_id = $2::uuid OR d.user_id = $2::uuid)
+		)
+	`, ticketID, userID).Scan(&ok)
+	return ok
+}
+
 // GET /gogoo/support/chat/:ticket_id/messages
 func GetChatMessages(c *gin.Context) {
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 	ticketID := c.Param("ticket_id")
+	userID := c.GetString("user_id")
+
+	if !ticketBelongsToCaller(ctx, pool, ticketID, userID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "not your ticket"})
+		return
+	}
 
 	var ticket struct {
 		ID           string `json:"id"`
@@ -308,6 +332,11 @@ func SendChatMessage(c *gin.Context) {
 	}
 
 	userID := c.GetString("user_id")
+
+	if !ticketBelongsToCaller(ctx, pool, ticketID, userID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "not your ticket"})
+		return
+	}
 	if req.SenderName == "" {
 		req.SenderName = c.GetString("user_name")
 	}

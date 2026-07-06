@@ -45,6 +45,7 @@ func MigrateNotifications() error {
 		`ALTER TABLE notifications ADD COLUMN IF NOT EXISTS link_url TEXT`,
 		`ALTER TABLE notifications ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT true`,
 		`ALTER TABLE notifications ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`,
+		`ALTER TABLE notifications ADD COLUMN IF NOT EXISTS target_user_id UUID`,
 		`DO $$ BEGIN ALTER TABLE notifications ALTER COLUMN user_id DROP NOT NULL; EXCEPTION WHEN undefined_column THEN NULL; END $$`,
 		`CREATE TABLE IF NOT EXISTS push_tokens (
 			user_id    UUID PRIMARY KEY,
@@ -104,24 +105,33 @@ func RegisterPushToken(c *gin.Context) {
 }
 
 // sendPushNotifications fires Expo push notifications in the background.
-func sendPushNotifications(audience, title, body, notifType string) {
+// When targetUserID is set, the push goes ONLY to that one person's device —
+// audience is ignored in that case. Audience-wide queries only run for
+// explicit broadcasts (targetUserID == nil).
+func sendPushNotifications(audience, title, body, notifType string, targetUserID *string) {
 	go func() {
 		ctx := context.Background()
 		pool := db.GetDB().GetPool()
 
 		var query string
-		switch audience {
-		case "drivers":
-			query = `SELECT pt.token FROM push_tokens pt
-			          JOIN drivers d ON d.user_id = pt.user_id::uuid`
-		case "riders":
-			query = `SELECT pt.token FROM push_tokens pt
-			          JOIN riders r ON r.user_id = pt.user_id::uuid`
-		default:
-			query = `SELECT token FROM push_tokens`
+		var args []interface{}
+		if targetUserID != nil {
+			query = `SELECT token FROM push_tokens WHERE user_id = $1::uuid`
+			args = []interface{}{*targetUserID}
+		} else {
+			switch audience {
+			case "drivers":
+				query = `SELECT pt.token FROM push_tokens pt
+				          JOIN drivers d ON d.user_id = pt.user_id::uuid`
+			case "riders":
+				query = `SELECT pt.token FROM push_tokens pt
+				          JOIN riders r ON r.user_id = pt.user_id::uuid`
+			default:
+				query = `SELECT token FROM push_tokens`
+			}
 		}
 
-		rows, err := pool.Query(ctx, query)
+		rows, err := pool.Query(ctx, query, args...)
 		if err != nil {
 			log.Printf("sendPushNotifications query error: %v", err)
 			return
@@ -238,6 +248,7 @@ func CreateNotification(c *gin.Context) {
 		Body           string `json:"body"            binding:"required"`
 		Type           string `json:"type"`
 		TargetAudience string `json:"target_audience"`
+		TargetUserID   string `json:"target_user_id"`
 		CouponCode     string `json:"coupon_code"`
 		LinkURL        string `json:"link_url"`
 	}
@@ -248,22 +259,32 @@ func CreateNotification(c *gin.Context) {
 	if req.Type == ""           { req.Type = "general" }
 	if req.TargetAudience == "" { req.TargetAudience = "all" }
 
+	var targetUserID *string
+	if req.TargetUserID != "" {
+		targetUserID = &req.TargetUserID
+	}
+
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 
 	id := uuid.New()
 	_, err := pool.Exec(ctx, `
-		INSERT INTO notifications (id, title, body, type, target_audience, coupon_code, link_url)
-		VALUES ($1, $2, $3, $4, $5, NULLIF($6,''), NULLIF($7,''))
-	`, id, req.Title, req.Body, req.Type, req.TargetAudience, req.CouponCode, req.LinkURL)
+		INSERT INTO notifications (id, title, body, type, target_audience, target_user_id, coupon_code, link_url)
+		VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7,''), NULLIF($8,''))
+	`, id, req.Title, req.Body, req.Type, req.TargetAudience, targetUserID, req.CouponCode, req.LinkURL)
 	if err != nil {
 		log.Printf("CreateNotification DB error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	sendPushNotifications(req.TargetAudience, req.Title, req.Body, req.Type)
-	c.JSON(http.StatusCreated, gin.H{"id": id, "message": "broadcast sent"})
+	sendPushNotifications(req.TargetAudience, req.Title, req.Body, req.Type, targetUserID)
+
+	msg := "broadcast sent"
+	if targetUserID != nil {
+		msg = "message sent"
+	}
+	c.JSON(http.StatusCreated, gin.H{"id": id, "message": msg})
 }
 
 // scanNotifications is shared between riders and drivers list endpoints.
@@ -282,7 +303,10 @@ func scanNotifications(c *gin.Context, audience string) {
 		LEFT JOIN notification_reads nr
 		       ON nr.notification_id = n.id AND nr.user_id = $1
 		WHERE n.is_active = true
-		  AND n.target_audience IN ($2, 'all')
+		  AND (
+		        n.target_user_id = $1::uuid
+		    OR (n.target_user_id IS NULL AND n.target_audience IN ($2, 'all'))
+		  )
 		ORDER BY n.created_at DESC
 		LIMIT 100
 	`, userID, audience)
@@ -331,7 +355,10 @@ func unreadCount(c *gin.Context, audience string) {
 	pool.QueryRow(ctx, `
 		SELECT COUNT(*) FROM notifications n
 		WHERE n.is_active = true
-		  AND n.target_audience IN ($2, 'all')
+		  AND (
+		        n.target_user_id = $1::uuid
+		    OR (n.target_user_id IS NULL AND n.target_audience IN ($2, 'all'))
+		  )
 		  AND NOT EXISTS (
 			SELECT 1 FROM notification_reads nr
 			WHERE nr.notification_id = n.id AND nr.user_id = $1
@@ -371,6 +398,7 @@ func AdminListNotifications(c *gin.Context) {
 
 	rows, err := pool.Query(ctx, `
 		SELECT n.id, n.title, n.body, n.type, n.target_audience,
+		       COALESCE(n.target_user_id::text, '') AS target_user_id,
 		       COALESCE(n.coupon_code,'') AS coupon_code,
 		       COALESCE(n.link_url,'')    AS link_url,
 		       n.is_active, n.created_at,
@@ -387,11 +415,11 @@ func AdminListNotifications(c *gin.Context) {
 
 	result := []map[string]interface{}{}
 	for rows.Next() {
-		var id, title, body, ntype, audience, couponCode, linkURL string
+		var id, title, body, ntype, audience, targetUserID, couponCode, linkURL string
 		var isActive bool
 		var createdAt time.Time
 		var readCount int
-		if err := rows.Scan(&id, &title, &body, &ntype, &audience, &couponCode, &linkURL, &isActive, &createdAt, &readCount); err != nil {
+		if err := rows.Scan(&id, &title, &body, &ntype, &audience, &targetUserID, &couponCode, &linkURL, &isActive, &createdAt, &readCount); err != nil {
 			continue
 		}
 		item := map[string]interface{}{
@@ -400,6 +428,7 @@ func AdminListNotifications(c *gin.Context) {
 			"body":            body,
 			"type":            ntype,
 			"target_audience": audience,
+			"target_user_id":  targetUserID,
 			"is_active":       isActive,
 			"created_at":      createdAt,
 			"read_count":      readCount,

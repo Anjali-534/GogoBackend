@@ -9,6 +9,7 @@ import (
     "math/big"
     "net/http"
     "os"
+    "strings"
     "time"
 
     "github.com/deploykit/backend/internal/config"
@@ -71,9 +72,14 @@ func DriverSignup(c *gin.Context) {
         UPIID             string `json:"upi_id"`
         GSTNumber         string `json:"gst_number"`
         ReferredByCode    string `json:"referred_by_code"`
+        MVAGDeclarationAccepted bool `json:"mvag_declaration_accepted"`
     }
     if err := c.ShouldBindJSON(&req); err != nil {
         c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+        return
+    }
+    if !req.MVAGDeclarationAccepted {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "You must accept the MVAG self-declaration to sign up"})
         return
     }
     if req.VehicleType == "" { req.VehicleType = "cab_4w" }
@@ -115,9 +121,9 @@ func DriverSignup(c *gin.Context) {
         return
     }
     if _, err := tx.Exec(ctx,
-        `INSERT INTO drivers (id,user_id,phone,license_number,vehicle_type,vehicle_category,vehicle_number,vehicle_model,vehicle_color,bank_account_holder,bank_account_number,bank_ifsc,bank_name,upi_id,gst_number,referral_code) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+        `INSERT INTO drivers (id,user_id,phone,license_number,vehicle_type,vehicle_category,vehicle_number,vehicle_model,vehicle_color,bank_account_holder,bank_account_number,bank_ifsc,bank_name,upi_id,gst_number,referral_code,mvag_declaration_accepted,mvag_declaration_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW())`,
         driverID, userID, req.Phone, req.LicenseNum, req.VehicleType, req.VehicleCategory, req.VehicleNum, req.VehicleModel, req.VehicleColor,
-        nullIfEmpty(req.BankAccountHolder), nullIfEmpty(req.BankAccountNumber), nullIfEmpty(req.BankIFSC), nullIfEmpty(req.BankName), nullIfEmpty(req.UPIID), nullIfEmpty(req.GSTNumber), referralCode,
+        nullIfEmpty(req.BankAccountHolder), nullIfEmpty(req.BankAccountNumber), nullIfEmpty(req.BankIFSC), nullIfEmpty(req.BankName), nullIfEmpty(req.UPIID), nullIfEmpty(req.GSTNumber), referralCode, req.MVAGDeclarationAccepted,
     ); err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create driver: " + err.Error()})
         return
@@ -381,15 +387,25 @@ func ListDrivers(c *gin.Context) {
             COALESCE(d.total_rides,   0) AS total_rides,
             COALESCE(d.total_earnings,0) AS total_earnings,
             d.created_at,
+            -- Coarse list-view badge only — NOT the security gate. The
+            -- authoritative per-category check (common docs, now including
+            -- the MVAG Police Clearance Certificate, + vehicle-category
+            -- docs) lives in maybeAutoVerifyDriver (documents.go) and is
+            -- what actually flips drivers.is_verified. 6 = current size of
+            -- the "common" required-doc set.
             (SELECT CASE
                WHEN COUNT(*) = 0                                          THEN 'incomplete'
                WHEN COUNT(*) FILTER (WHERE dd.status = 'rejected') > 0   THEN 'rejected'
                WHEN COUNT(*) FILTER (WHERE dd.status = 'pending')  > 0   THEN 'pending'
-               WHEN COUNT(*) FILTER (WHERE dd.status = 'approved') >= 4  THEN 'verified'
+               WHEN COUNT(*) FILTER (WHERE dd.status = 'approved') >= 6  THEN 'verified'
                ELSE 'incomplete'
              END
              FROM driver_documents dd WHERE dd.driver_id = d.id
-            ) AS documents_status
+            ) AS documents_status,
+            COALESCE(d.background_check_status,'pending') AS background_check_status,
+            COALESCE(d.background_check_notes,'')          AS background_check_notes,
+            COALESCE(d.background_checked_by,'')           AS background_checked_by,
+            d.background_checked_at
         FROM drivers d
         LEFT JOIN users u ON u.id = d.user_id
         ORDER BY d.created_at DESC
@@ -408,10 +424,13 @@ func ListDrivers(c *gin.Context) {
         var createdAt time.Time
         var blockedUntil *time.Time
         var documentsStatus *string
+        var bgStatus, bgNotes, bgCheckedBy string
+        var bgCheckedAt *time.Time
         if err := rows.Scan(
             &id, &name, &email, &phone, &vType, &vNum, &vModel,
             &isVerified, &isOnline, &isActive, &isBlocked, &blockedUntil, &blockReason,
             &rating, &totalRides, &earnings, &createdAt, &documentsStatus,
+            &bgStatus, &bgNotes, &bgCheckedBy, &bgCheckedAt,
         ); err != nil {
             log.Printf("ListDrivers scan error: %v", err)
             continue
@@ -444,6 +463,10 @@ func ListDrivers(c *gin.Context) {
             "registration_fee_paid": false,
             "created_at":            createdAt,
             "documents_status":      docStatus,
+            "background_check_status": bgStatus,
+            "background_check_notes":  bgNotes,
+            "background_checked_by":   bgCheckedBy,
+            "background_checked_at":   bgCheckedAt,
         })
     }
     if drivers == nil {
@@ -461,17 +484,22 @@ func GetDriverByID(c *gin.Context) {
     // 011-migration columns (wallet_balance, is_wallet_blocked, wallet_blocked_reason,
     // registration_fee_paid) are NOT selected here — they may not exist in production yet.
     // Defaults are returned in the JSON response below.
-    var id, name, email, phone, vType, vCategory, vNum, vModel, blockReason string
+    var id, userID, name, email, phone, vType, vCategory, vNum, vModel, blockReason string
     var isVerified, isOnline, isActive, isBlocked bool
     var rating, earnings float64
     var totalRides int
     var createdAt time.Time
     var blockedUntil *time.Time
     var licenseNumber, vehicleColor, bankHolder, bankNum, bankIFSC, upiID *string
+    var mvagAccepted bool
+    var mvagAt *time.Time
+    var bgStatus, bgNotes, bgCheckedBy string
+    var bgCheckedAt *time.Time
 
     err := pool.QueryRow(ctx, `
         SELECT
             d.id,
+            COALESCE(d.user_id::text,''),
             COALESCE(u.name,''),
             COALESCE(u.email,''),
             COALESCE(d.phone,''),
@@ -494,18 +522,26 @@ func GetDriverByID(c *gin.Context) {
             d.bank_account_holder,
             d.bank_account_number,
             d.bank_ifsc,
-            d.upi_id
+            d.upi_id,
+            COALESCE(d.mvag_declaration_accepted, false),
+            d.mvag_declaration_at,
+            COALESCE(d.background_check_status,'pending'),
+            COALESCE(d.background_check_notes,''),
+            COALESCE(d.background_checked_by,''),
+            d.background_checked_at
         FROM drivers d
         LEFT JOIN users u ON u.id = d.user_id
         WHERE d.id = $1
     `, driverID).Scan(
-        &id, &name, &email, &phone,
+        &id, &userID, &name, &email, &phone,
         &vType, &vCategory, &vNum, &vModel,
         &isVerified, &isOnline, &isActive,
         &rating, &totalRides, &earnings, &createdAt,
         &isBlocked, &blockedUntil, &blockReason,
         &licenseNumber, &vehicleColor,
         &bankHolder, &bankNum, &bankIFSC, &upiID,
+        &mvagAccepted, &mvagAt,
+        &bgStatus, &bgNotes, &bgCheckedBy, &bgCheckedAt,
     )
     if err != nil {
         c.JSON(http.StatusNotFound, gin.H{"error": "driver not found: " + err.Error()})
@@ -513,12 +549,18 @@ func GetDriverByID(c *gin.Context) {
     }
 
     c.JSON(http.StatusOK, map[string]interface{}{
-        "id": id, "name": name, "email": email, "phone": phone,
+        "id": id, "user_id": userID, "name": name, "email": email, "phone": phone,
         "vehicle_type": vType, "vehicle_category": vCategory,
         "vehicle_number": vNum, "vehicle_model": vModel,
         "is_verified": isVerified, "is_online": isOnline, "is_active": isActive,
         "rating": rating, "total_rides": totalRides, "total_earnings": earnings,
         "created_at": createdAt,
+        "mvag_declaration_accepted": mvagAccepted,
+        "mvag_declaration_at":       mvagAt,
+        "background_check_status":  bgStatus,
+        "background_check_notes":   bgNotes,
+        "background_checked_by":    bgCheckedBy,
+        "background_checked_at":    bgCheckedAt,
         "is_blocked": isBlocked, "blocked_until": blockedUntil, "block_reason": blockReason,
         "license_number": licenseNumber, "vehicle_color": vehicleColor,
         "bank_account_holder": bankHolder, "bank_account_number": bankNum,
@@ -535,12 +577,75 @@ func VerifyDriver(c *gin.Context) {
     driverID := c.Param("id")
     ctx := context.Background()
     pool := db.GetDB().GetPool()
+
+    var bgStatus string
+    pool.QueryRow(ctx, "SELECT COALESCE(background_check_status,'pending') FROM drivers WHERE id=$1", driverID).Scan(&bgStatus)
+    if bgStatus == "flagged" {
+        c.JSON(http.StatusConflict, gin.H{
+            "error":   "background_check_flagged",
+            "message": "This driver's background check is flagged. Clear the flag before verifying.",
+        })
+        return
+    }
+
     _, err := pool.Exec(ctx, "UPDATE drivers SET is_verified=true,updated_at=NOW() WHERE id=$1", driverID)
     if err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify driver"})
         return
     }
     c.JSON(http.StatusOK, gin.H{"message": "Driver verified"})
+}
+
+var validBGStatuses = map[string]bool{
+    "pending": true, "in_review": true, "clear": true, "flagged": true,
+}
+
+// PATCH /gogoo/drivers/:id/background-check — panel-only manual BGV review.
+// Records the reviewer (from the JWT, never trusting a client-supplied name)
+// and timestamp. This is the seam future automated checks (see
+// internal/services/bgv) will eventually write to as well.
+func UpdateDriverBackgroundCheck(c *gin.Context) {
+    driverID := c.Param("id")
+    var req struct {
+        Status string `json:"status" binding:"required"`
+        Notes  string `json:"notes"`
+    }
+    if err := c.ShouldBindJSON(&req); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+        return
+    }
+    if !validBGStatuses[req.Status] {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "status must be one of pending, in_review, clear, flagged"})
+        return
+    }
+    if req.Status == "flagged" && strings.TrimSpace(req.Notes) == "" {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "notes are required when flagging a driver"})
+        return
+    }
+
+    reviewer := c.GetString("user_email")
+    ctx := context.Background()
+    pool := db.GetDB().GetPool()
+
+    _, err := pool.Exec(ctx, `
+        UPDATE drivers
+        SET background_check_status=$1, background_check_notes=$2,
+            background_checked_by=$3, background_checked_at=NOW(), updated_at=NOW()
+        WHERE id=$4
+    `, req.Status, nullIfEmpty(req.Notes), reviewer, driverID)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update background check status"})
+        return
+    }
+
+    // Flagging always unverifies the driver immediately — this is the one
+    // path (besides blocking) that DOES flip is_verified back to false, since
+    // a flagged background check is a hard stop regardless of document state.
+    if req.Status == "flagged" {
+        pool.Exec(ctx, "UPDATE drivers SET is_verified=false, updated_at=NOW() WHERE id=$1", driverID)
+    }
+
+    c.JSON(http.StatusOK, gin.H{"message": "Background check status updated", "status": req.Status})
 }
 
 func GetAnalytics(c *gin.Context) {
@@ -650,6 +755,9 @@ func ListPayments(c *gin.Context) {
     c.JSON(http.StatusOK, payments)
 }
 
+// MVAG 2020: drivers must complete document verification before they can go
+// online or receive rides. This only gates turning ONLINE on — going offline
+// is always allowed regardless of verification state.
 func ToggleDriverOnline(c *gin.Context) {
     driverID := c.Param("id")
     var req struct {
@@ -660,6 +768,19 @@ func ToggleDriverOnline(c *gin.Context) {
     c.ShouldBindJSON(&req)
     ctx := context.Background()
     pool := db.GetDB().GetPool()
+
+    if req.IsOnline {
+        var isVerified bool
+        pool.QueryRow(ctx, "SELECT COALESCE(is_verified,false) FROM drivers WHERE id=$1", driverID).Scan(&isVerified)
+        if !isVerified {
+            c.JSON(http.StatusForbidden, gin.H{
+                "error":   "verification_pending",
+                "message": "Complete document verification to start taking rides",
+            })
+            return
+        }
+    }
+
     pool.Exec(ctx, "UPDATE drivers SET is_online=$1,current_lat=$2,current_lng=$3,updated_at=NOW() WHERE id=$4", req.IsOnline, req.Lat, req.Lng, driverID)
     c.JSON(http.StatusOK, gin.H{"is_online": req.IsOnline})
 }
@@ -701,14 +822,24 @@ func AcceptBooking(c *gin.Context) {
 
     // Resolve driver record from the authenticated user
     var driverID string
-    var isBlocked bool
+    var isBlocked, isVerified bool
     var blockedUntil *time.Time
     err := pool.QueryRow(ctx,
-        `SELECT id, COALESCE(is_blocked,FALSE), blocked_until FROM drivers WHERE user_id=$1`,
+        `SELECT id, COALESCE(is_blocked,FALSE), blocked_until, COALESCE(is_verified,FALSE) FROM drivers WHERE user_id=$1`,
         userID,
-    ).Scan(&driverID, &isBlocked, &blockedUntil)
+    ).Scan(&driverID, &isBlocked, &blockedUntil, &isVerified)
     if err != nil || driverID == "" {
         c.JSON(http.StatusNotFound, gin.H{"error": "Driver profile not found"})
+        return
+    }
+
+    // MVAG 2020: unverified drivers must never be assigned rides, even if
+    // is_online was somehow left true from before verification was required.
+    if !isVerified {
+        c.JSON(http.StatusForbidden, gin.H{
+            "error":   "verification_pending",
+            "message": "Complete document verification to start taking rides",
+        })
         return
     }
 
