@@ -111,6 +111,24 @@ const (
 	outcomeFailed
 )
 
+// TriggerOneStatement is the on-demand entry point for sending a single
+// driver's statement — used by the temporary admin trigger endpoint to
+// exercise the exact same path the monthly goroutine runs (build, email,
+// idempotency record), without waiting for the 1st of the month.
+func TriggerOneStatement(cfg *config.Config, driverID, monthKey string) (sent bool, skipped bool, err error) {
+	if !mail.IsConfigured(cfg) {
+		return false, false, fmt.Errorf("smtp not configured")
+	}
+	switch sendOneStatement(context.Background(), cfg, driverID, monthKey) {
+	case outcomeSent:
+		return true, false, nil
+	case outcomeSkipped:
+		return false, true, nil
+	default:
+		return false, false, fmt.Errorf("failed to send statement — see server logs for the exact SMTP/DB error")
+	}
+}
+
 // sendOneStatement handles a single driver end-to-end and never lets a
 // panic escape — the caller loop must keep going regardless of what
 // happens to any individual driver.

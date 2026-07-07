@@ -217,6 +217,10 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		// TEMPORARY — SMTP verification, master admin only. Remove once SMTP_*
 		// is confirmed working in production (see internal/mail/smtp.go).
 		gogoo.POST("/admin/test-email",                   middleware.RequirePanel(), handlers.TestSMTPEmail)
+		// TEMPORARY — on-demand monthly-statement trigger for one driver,
+		// master admin only. Remove once the mailer + idempotency path is
+		// confirmed working end-to-end (see internal/services/ledger).
+		gogoo.POST("/admin/trigger-monthly-statements-test", middleware.RequirePanel(), handlers.TriggerMonthlyStatementTest)
 
 		// Ambulance — NGO management
 		gogoo.GET("/ambulance/ngos",                      middleware.RequirePanel("ambulance"), handlers.GetNGOs)
