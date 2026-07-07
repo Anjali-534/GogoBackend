@@ -1,11 +1,8 @@
 package handlers
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -14,33 +11,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const aiSystemPrompt = `You are a helpful customer support assistant for gogoo, a ride-hailing and logistics platform in Delhi NCR, India.
-Services: cab (2W/3W/4W/SUV), truck (city/outstation), ambulance (free NGO + paid hospital).
+const faqPromptReply = "Thanks for reaching out! Please choose the topic that best matches your issue below, or tap 'Still need help' to talk to our team directly."
 
-Answer common questions helpfully and briefly in 2-3 sentences max.
-
-If you cannot resolve the issue say exactly:
-"ESCALATE: I am connecting you with a support agent who will assist you shortly."
-
-Common issues you CAN resolve:
-- How to track a ride
-- How to cancel a booking
-- Fare calculation questions
-- How ambulance service works
-- Wallet balance questions
-- App usage help
-- Booking flow questions
-
-Issues to ESCALATE (say ESCALATE):
-- Refund requests
-- Driver complaints
-- Payment disputes
-- Accidents or emergencies
-- Account blocked
-- Overcharging
-
-Always be polite and brief.
-Reply in same language as user (Hindi or English).`
+const botSenderName = "gogoo Assistant 🤖"
 
 func determinePriority(subject string) string {
 	lower := strings.ToLower(subject)
@@ -53,68 +26,14 @@ func determinePriority(subject string) string {
 	return "medium"
 }
 
-func generateAIReply(subject, message string) (string, bool) {
-	apiKey := os.Getenv("GEMINI_API_KEY")
-	if apiKey == "" {
-		return "", false
+// escalationPriority maps an FAQ category to the priority a ticket should
+// carry once a rider/driver taps "Still need help" — driver behavior
+// reports jump the queue, everything else is a normal follow-up.
+func escalationPriority(category string) string {
+	if category == "driver" {
+		return "high"
 	}
-
-	fullPrompt := aiSystemPrompt + "\n\nUser message about: " + subject + "\nMessage: " + message
-
-	reqBody := map[string]interface{}{
-		"contents": []map[string]interface{}{
-			{
-				"parts": []map[string]interface{}{
-					{"text": fullPrompt},
-				},
-			},
-		},
-		"generationConfig": map[string]interface{}{
-			"maxOutputTokens": 300,
-			"temperature":     0.7,
-		},
-	}
-
-	bodyBytes, _ := json.Marshal(reqBody)
-
-	url := "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + apiKey
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Post(url, "application/json", bytes.NewBuffer(bodyBytes))
-	if err != nil {
-		return "", false
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return "", false
-	}
-
-	var result struct {
-		Candidates []struct {
-			Content struct {
-				Parts []struct {
-					Text string `json:"text"`
-				} `json:"parts"`
-			} `json:"content"`
-		} `json:"candidates"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", false
-	}
-	if len(result.Candidates) == 0 || len(result.Candidates[0].Content.Parts) == 0 {
-		return "", false
-	}
-
-	aiReply := result.Candidates[0].Content.Parts[0].Text
-
-	shouldEscalate := strings.Contains(strings.ToUpper(aiReply), "ESCALATE")
-
-	// Strip the ESCALATE prefix before sending reply to user
-	aiReply = strings.Replace(aiReply, "ESCALATE: ", "", 1)
-	aiReply = strings.Replace(aiReply, "ESCALATE:", "", 1)
-
-	return aiReply, shouldEscalate
+	return "medium"
 }
 
 type chatMessage struct {
@@ -161,6 +80,7 @@ func StartSupportChat(c *gin.Context) {
 		Subject      string  `json:"subject"`
 		FirstMessage string  `json:"first_message"`
 		BookingID    *string `json:"booking_id"`
+		FAQID        string  `json:"faq_id"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil || req.Subject == "" || req.FirstMessage == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "subject and first_message required"})
@@ -221,35 +141,18 @@ func StartSupportChat(c *gin.Context) {
 		VALUES ($1, $2, $3, $4, $5)
 	`, ticketID, req.RaisedBy, userID, senderName, req.FirstMessage)
 
-	// Trigger AI reply — wait up to 2.5s then return anyway
-	replyCh := make(chan string, 1)
-	go func() {
-		reply, _ := generateAIReply(req.Subject, req.FirstMessage)
-		replyCh <- reply
-	}()
-
-	select {
-	case reply := <-replyCh:
-		if reply != "" {
-			pool.Exec(ctx, `
-				INSERT INTO support_messages
-					(ticket_id, sender_type, sender_id, sender_name, message)
-				VALUES ($1, 'bot', 'ai', 'gogoo Assistant 🤖', $2)
-			`, ticketID, reply)
-		}
-	case <-time.After(2500 * time.Millisecond):
-		// AI is slow; save reply in background when it arrives
-		go func() {
-			reply := <-replyCh
-			if reply != "" {
-				pool.Exec(context.Background(), `
-					INSERT INTO support_messages
-						(ticket_id, sender_type, sender_id, sender_name, message)
-					VALUES ($1, 'bot', 'ai', 'gogoo Assistant 🤖', $2)
-				`, ticketID, reply)
-			}
-		}()
+	// Instant fixed reply — no AI call, no network round-trip. If the rider
+	// tapped a known FAQ question, give its fixed answer; otherwise (they
+	// typed something freeform) nudge them toward the FAQ list or escalation.
+	botReply := faqPromptReply
+	if item, ok := faqByID[req.FAQID]; ok {
+		botReply = item.Answer
 	}
+	pool.Exec(ctx, `
+		INSERT INTO support_messages
+			(ticket_id, sender_type, sender_id, sender_name, message)
+		VALUES ($1, 'bot', 'faq', $2, $3)
+	`, ticketID, botSenderName, botReply)
 
 	c.JSON(http.StatusCreated, gin.H{
 		"ticket_id":     ticketID,
@@ -353,39 +256,8 @@ func SendChatMessage(c *gin.Context) {
 
 	pool.Exec(ctx, `UPDATE support_tickets SET updated_at = NOW() WHERE id = $1`, ticketID)
 
-	// Trigger AI reply if no human agent has responded yet
-	var subject string
-	pool.QueryRow(ctx, `SELECT subject FROM support_tickets WHERE id = $1`, ticketID).Scan(&subject)
-
-	var userMsgCount int
-	pool.QueryRow(ctx, `
-		SELECT COUNT(*) FROM support_messages
-		WHERE ticket_id = $1 AND sender_type IN ('rider', 'driver')
-	`, ticketID).Scan(&userMsgCount)
-
-	if userMsgCount <= 3 {
-		go func() {
-			var humanReplied bool
-			pool.QueryRow(context.Background(), `
-				SELECT EXISTS(
-					SELECT 1 FROM support_messages
-					WHERE ticket_id = $1 AND sender_type = 'support'
-				)
-			`, ticketID).Scan(&humanReplied)
-
-			if !humanReplied {
-				reply, _ := generateAIReply(subject, req.Message)
-				if reply != "" {
-					pool.Exec(context.Background(), `
-						INSERT INTO support_messages
-							(ticket_id, sender_type, sender_id, sender_name, message)
-						VALUES ($1, 'bot', 'ai', 'gogoo Assistant 🤖', $2)
-					`, ticketID, reply)
-				}
-			}
-		}()
-	}
-
+	// No auto-reply here anymore — freeform follow-up messages just wait for
+	// a human agent (or the rider re-opens the FAQ list / escalates).
 	c.JSON(http.StatusCreated, gin.H{"message": "sent"})
 }
 
@@ -472,4 +344,36 @@ func GetUnreadCount(c *gin.Context) {
 	`).Scan(&count)
 
 	c.JSON(http.StatusOK, gin.H{"unread": count})
+}
+
+// POST /gogoo/support/chat/:ticket_id/escalate — the rider/driver tapped
+// "Still need help" after a fixed FAQ answer didn't resolve things.
+// Deterministic, not AI-dependent: bumps priority based on category and
+// drops a system message so the ticket surfaces prominently in the support
+// panel's existing priority-sorted queue.
+func EscalateSupportChat(c *gin.Context) {
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+	ticketID := c.Param("ticket_id")
+	userID := c.GetString("user_id")
+
+	if !ticketBelongsToCaller(ctx, pool, ticketID, userID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "not your ticket"})
+		return
+	}
+
+	var req struct {
+		Category string `json:"category"`
+	}
+	c.ShouldBindJSON(&req)
+
+	priority := escalationPriority(req.Category)
+	pool.Exec(ctx, `UPDATE support_tickets SET priority = $1, updated_at = NOW() WHERE id = $2`, priority, ticketID)
+	pool.Exec(ctx, `
+		INSERT INTO support_messages
+			(ticket_id, sender_type, sender_id, sender_name, message)
+		VALUES ($1, 'system', 'system', 'System', 'Escalated to human support team')
+	`, ticketID)
+
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

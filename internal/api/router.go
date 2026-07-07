@@ -246,10 +246,12 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.POST("/support/block-rider/:id",            handlers.SupportBlockRider)
 
 		// In-app chat (rider + driver apps)
+		gogoo.GET("/support/faq",                         handlers.GetFAQ)
 		gogoo.POST("/support/chat/start",                 handlers.StartSupportChat)
 		gogoo.GET("/support/chat/my-tickets",             handlers.GetMyTickets)
 		gogoo.GET("/support/chat/:ticket_id/messages",    handlers.GetChatMessages)
 		gogoo.POST("/support/chat/:ticket_id/messages",   handlers.SendChatMessage)
+		gogoo.POST("/support/chat/:ticket_id/escalate",   handlers.EscalateSupportChat)
 		gogoo.GET("/support/unread-count",                handlers.GetUnreadCount)
 
 		// SOS emergency alert (riders + drivers share the same endpoint)

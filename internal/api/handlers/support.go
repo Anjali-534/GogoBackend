@@ -175,6 +175,27 @@ func UpdateSupportTicket(c *gin.Context) {
 	}
 	c.ShouldBindJSON(&req)
 
+	// This endpoint is otherwise wide open (any authenticated caller, no
+	// per-ticket check) since it was built for support-panel agents. Now
+	// that the rider/driver apps call it too (the FAQ chat's "Yes, resolved"
+	// button), a plain rider/driver token must be restricted to marking
+	// their OWN ticket resolved — nothing else — or any rider could
+	// resolve/reprioritize/reassign anyone else's ticket by guessing an ID.
+	role := c.GetString("role")
+	panel := c.GetString("panel")
+	isAgent := role == "master_admin" || panel != ""
+	if !isAgent {
+		userID := c.GetString("user_id")
+		if req.Status == nil || *req.Status != "resolved" || req.Priority != nil || req.AssignedTo != nil {
+			c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+			return
+		}
+		if !ticketBelongsToCaller(ctx, pool, id, userID) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "not your ticket"})
+			return
+		}
+	}
+
 	agentEmail := c.GetString("user_email")
 
 	if req.Status != nil && *req.Status == "resolved" {
