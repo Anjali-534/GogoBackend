@@ -91,7 +91,8 @@ func sendStatementsForMonth(cfg *config.Config, monthKey string) {
 
 	sent, skipped, failed := 0, 0, 0
 	for _, driverID := range driverIDs {
-		switch sendOneStatement(ctx, cfg, driverID, monthKey) {
+		outcome, _ := sendOneStatement(ctx, cfg, driverID, monthKey)
+		switch outcome {
 		case outcomeSent:
 			sent++
 		case outcomeSkipped:
@@ -114,29 +115,34 @@ const (
 // TriggerOneStatement is the on-demand entry point for sending a single
 // driver's statement — used by the temporary admin trigger endpoint to
 // exercise the exact same path the monthly goroutine runs (build, email,
-// idempotency record), without waiting for the 1st of the month.
+// idempotency record), without waiting for the 1st of the month. Surfaces
+// the real underlying error (not just "see server logs") since we don't
+// have direct access to Railway's logs to diagnose failures otherwise.
 func TriggerOneStatement(cfg *config.Config, driverID, monthKey string) (sent bool, skipped bool, err error) {
 	if !mail.IsConfigured(cfg) {
 		return false, false, fmt.Errorf("smtp not configured")
 	}
-	switch sendOneStatement(context.Background(), cfg, driverID, monthKey) {
+	outcome, sendErr := sendOneStatement(context.Background(), cfg, driverID, monthKey)
+	switch outcome {
 	case outcomeSent:
 		return true, false, nil
 	case outcomeSkipped:
 		return false, true, nil
 	default:
-		return false, false, fmt.Errorf("failed to send statement — see server logs for the exact SMTP/DB error")
+		return false, false, sendErr
 	}
 }
 
 // sendOneStatement handles a single driver end-to-end and never lets a
 // panic escape — the caller loop must keep going regardless of what
-// happens to any individual driver.
-func sendOneStatement(ctx context.Context, cfg *config.Config, driverID string, monthKey string) (outcome sendOutcome) {
+// happens to any individual driver. The returned error is nil unless
+// outcome is outcomeFailed.
+func sendOneStatement(ctx context.Context, cfg *config.Config, driverID string, monthKey string) (outcome sendOutcome, retErr error) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("monthly statement mailer: driver %s panicked: %v", driverID, r)
 			outcome = outcomeFailed
+			retErr = fmt.Errorf("panic: %v", r)
 		}
 	}()
 
@@ -147,25 +153,25 @@ func sendOneStatement(ctx context.Context, cfg *config.Config, driverID string, 
 		driverID, monthKey).Scan(&alreadySent)
 	if err != nil {
 		log.Printf("monthly statement mailer: idempotency check failed for driver %s: %v", driverID, err)
-		return outcomeFailed
+		return outcomeFailed, fmt.Errorf("idempotency check failed: %w", err)
 	}
 	if alreadySent {
-		return outcomeSkipped
+		return outcomeSkipped, nil
 	}
 
 	stmt, err := BuildStatement(ctx, pool, driverID, monthKey)
 	if err != nil {
 		log.Printf("monthly statement mailer: build failed for driver %s: %v", driverID, err)
-		return outcomeFailed
+		return outcomeFailed, fmt.Errorf("BuildStatement failed: %w", err)
 	}
 	if stmt.DriverEmail == "" || !strings.Contains(stmt.DriverEmail, "@") {
-		return outcomeSkipped
+		return outcomeSkipped, nil
 	}
 
 	pdfBytes, err := GeneratePDF(stmt)
 	if err != nil {
 		log.Printf("monthly statement mailer: pdf failed for driver %s: %v", driverID, err)
-		return outcomeFailed
+		return outcomeFailed, fmt.Errorf("GeneratePDF failed: %w", err)
 	}
 
 	monthLabel := stmt.PeriodLabel
@@ -189,7 +195,7 @@ func sendOneStatement(ctx context.Context, cfg *config.Config, driverID string, 
 	})
 	if err != nil {
 		log.Printf("monthly statement mailer: send failed for driver %s: %v", driverID, err)
-		return outcomeFailed
+		return outcomeFailed, fmt.Errorf("mail.Send failed: %w", err)
 	}
 
 	_, err = pool.Exec(ctx, `
@@ -201,5 +207,5 @@ func sendOneStatement(ctx context.Context, cfg *config.Config, driverID string, 
 		log.Printf("monthly statement mailer: CRITICAL — sent to driver %s but failed to record idempotency row: %v", driverID, err)
 	}
 
-	return outcomeSent
+	return outcomeSent, nil
 }
