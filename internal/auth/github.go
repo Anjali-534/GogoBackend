@@ -182,7 +182,7 @@ func HandleGitHubCallback(ctx context.Context, code string, cfg *config.Config) 
 	`, uuid.New(), userID, "github", accessToken, expiresAt, "{repo,workflow,user:email,admin:repo_hook}")
 
 	// Generate JWT token
-	token, err := GenerateToken(userID, email, userName, cfg)
+	token, err := GenerateToken(userID, email, userName, "", cfg)
 	if err != nil {
 		return uuid.Nil, "", err
 	}

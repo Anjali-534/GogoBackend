@@ -428,6 +428,14 @@ func vehicleCategoryFromType(vType string) string {
 }
 
 func ListDrivers(c *gin.Context) {
+    categoryFilter := c.Query("category") // "cab" | "truck" | "ambulance" — empty means no filter
+    // cab/truck/ambulance panels are locked to their own category regardless
+    // of what they pass in ?category= — master and support may query any.
+    if role := c.GetString("role"); role != "master_admin" {
+        if panel := c.GetString("panel"); panel == "cab" || panel == "truck" || panel == "ambulance" {
+            categoryFilter = panel
+        }
+    }
     ctx := context.Background()
     pool := db.GetDB().GetPool()
     // Only select columns guaranteed to exist in the base 002 schema + 009 blocking migration.
@@ -506,6 +514,10 @@ func ListDrivers(c *gin.Context) {
         if documentsStatus != nil {
             docStatus = *documentsStatus
         }
+        vCategory := vehicleCategoryFromType(vType)
+        if categoryFilter != "" && vCategory != categoryFilter {
+            continue
+        }
         drivers = append(drivers, map[string]interface{}{
             "id":                    id,
             "user_id":               userID,
@@ -513,7 +525,7 @@ func ListDrivers(c *gin.Context) {
             "email":                 email,
             "phone":                 phone,
             "vehicle_type":          vType,
-            "vehicle_category":      vehicleCategoryFromType(vType),
+            "vehicle_category":      vCategory,
             "vehicle_number":        vNum,
             "vehicle_model":         vModel,
             "is_verified":           isVerified,

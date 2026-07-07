@@ -36,6 +36,8 @@ func AuthMiddleware() gin.HandlerFunc {
 		c.Set("user_id", claims.UserID.String())
 		c.Set("user_email", claims.Email)
 		c.Set("user_name", claims.Name)
+		c.Set("panel", claims.Panel)
+		c.Set("role", claims.Role)
 		c.Next()
 	}
 }
@@ -69,6 +71,32 @@ func DownloadAuthMiddleware() gin.HandlerFunc {
 		c.Set("user_id", claims.UserID.String())
 		c.Set("user_email", claims.Email)
 		c.Set("user_name", claims.Name)
+		c.Set("panel", claims.Panel)
+		c.Set("role", claims.Role)
+		c.Next()
+	}
+}
+
+// RequirePanel restricts a route to the given panels. role == "master_admin"
+// always passes regardless of panel. Every other token - including riders,
+// drivers, and any token with a blank/unrecognized panel claim - is denied
+// by default; the caller must be explicitly listed.
+func RequirePanel(panels ...string) gin.HandlerFunc {
+	allowed := make(map[string]bool, len(panels))
+	for _, p := range panels {
+		allowed[p] = true
+	}
+	return func(c *gin.Context) {
+		if c.GetString("role") == "master_admin" {
+			c.Next()
+			return
+		}
+		panel := c.GetString("panel")
+		if panel == "" || !allowed[panel] {
+			c.JSON(http.StatusForbidden, gin.H{"error": "forbidden: insufficient panel access"})
+			c.Abort()
+			return
+		}
 		c.Next()
 	}
 }
@@ -98,6 +126,8 @@ func OptionalAuthMiddleware() gin.HandlerFunc {
 		c.Set("user_id", claims.UserID.String())
 		c.Set("user_email", claims.Email)
 		c.Set("user_name", claims.Name)
+		c.Set("panel", claims.Panel)
+		c.Set("role", claims.Role)
 		c.Next()
 	}
 }

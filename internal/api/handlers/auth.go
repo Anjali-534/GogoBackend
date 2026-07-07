@@ -3,6 +3,8 @@ package handlers
 import (
 	"context"
 	"net/http"
+	"os"
+	"strings"
 
 	"github.com/deploykit/backend/internal/auth"
 	"github.com/deploykit/backend/internal/config"
@@ -93,7 +95,7 @@ func Signup(c *gin.Context) {
 
 	// Generate token
 	cfg := c.MustGet("config").(*config.Config)
-	token, err := auth.GenerateToken(userID, req.Email, req.Name, cfg)
+	token, err := auth.GenerateToken(userID, req.Email, req.Name, "", cfg)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
 		return
@@ -145,9 +147,19 @@ func Login(c *gin.Context) {
 		return
 	}
 
-	// Generate token
+	// Generate token — the platform admin account gets role=master_admin so
+	// deny-by-default panel middleware recognizes it; everyone else (riders,
+	// drivers) gets a blank role and is denied on gated admin endpoints.
 	cfg := c.MustGet("config").(*config.Config)
-	token, err := auth.GenerateToken(userID, req.Email, name, cfg)
+	role := ""
+	adminEmail := os.Getenv("ADMIN_EMAIL")
+	if adminEmail == "" {
+		adminEmail = "admin@gogoo.in"
+	}
+	if strings.EqualFold(req.Email, adminEmail) {
+		role = "master_admin"
+	}
+	token, err := auth.GenerateToken(userID, req.Email, name, role, cfg)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
 		return

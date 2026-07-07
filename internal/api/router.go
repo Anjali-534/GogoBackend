@@ -122,7 +122,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.PATCH("/bookings/:id/status", handlers.UpdateBookingStatus)
 
 		// Drivers
-		gogoo.GET("/drivers", handlers.ListDrivers)
+		gogoo.GET("/drivers", middleware.RequirePanel("cab", "truck", "ambulance", "support"), handlers.ListDrivers)
 		gogoo.GET("/drivers/:id", handlers.GetDriverByID)
 		gogoo.PATCH("/drivers/:id/verify", handlers.VerifyDriver)
 		gogoo.PATCH("/drivers/:id/online", handlers.ToggleDriverOnline)
@@ -200,28 +200,32 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.GET("/referral/my-referrals",                handlers.GetMyReferrals)
 		gogoo.GET("/referral/all",                        handlers.AdminListReferrals)
 
-		// Broadcasts (admin)
-		gogoo.POST("/admin/notifications",                handlers.CreateNotification)
-		gogoo.GET("/admin/notifications",                 handlers.AdminListNotifications)
-		gogoo.DELETE("/admin/notifications/:id",          handlers.DeleteNotification)
+		// Broadcasts (admin) — every operating panel can send within its own
+		// category; scoping to that category is enforced inside the handlers.
+		gogoo.POST("/admin/notifications",                middleware.RequirePanel("cab", "truck", "ambulance", "support"), handlers.CreateNotification)
+		gogoo.GET("/admin/notifications",                 middleware.RequirePanel("cab", "truck", "ambulance", "support"), handlers.AdminListNotifications)
+		gogoo.DELETE("/admin/notifications/:id",          middleware.RequirePanel("cab", "truck", "ambulance", "support"), handlers.DeleteNotification)
+
+		// Notifications (hospitals) — in-portal inbox, no push mechanism
+		gogoo.GET("/ambulance/hospital/notifications",    handlers.ListHospitalNotifications)
 
 		// Panel access management (admin)
 		gogoo.GET("/admin/panel-access",                  handlers.GetPanelAccess)
 		gogoo.PATCH("/admin/panel-access/:id/password",   handlers.UpdatePanelPassword)
 
 		// Ambulance — NGO management
-		gogoo.GET("/ambulance/ngos",                      handlers.GetNGOs)
-		gogoo.POST("/ambulance/ngos",                     handlers.CreateNGO)
-		gogoo.PATCH("/ambulance/ngos/:id",                handlers.UpdateNGO)
-		gogoo.DELETE("/ambulance/ngos/:id",               handlers.DeleteNGO)
+		gogoo.GET("/ambulance/ngos",                      middleware.RequirePanel("ambulance"), handlers.GetNGOs)
+		gogoo.POST("/ambulance/ngos",                     middleware.RequirePanel("ambulance"), handlers.CreateNGO)
+		gogoo.PATCH("/ambulance/ngos/:id",                middleware.RequirePanel("ambulance"), handlers.UpdateNGO)
+		gogoo.DELETE("/ambulance/ngos/:id",               middleware.RequirePanel("ambulance"), handlers.DeleteNGO)
 
 		// Ambulance — Hospital management
-		gogoo.GET("/ambulance/hospitals",                 handlers.GetHospitals)
-		gogoo.GET("/ambulance/hospitals/:id",             handlers.GetHospitalByID)
-		gogoo.POST("/ambulance/hospitals",                handlers.CreateHospital)
-		gogoo.PATCH("/ambulance/hospitals/:id",           handlers.UpdateHospital)
-		gogoo.DELETE("/ambulance/hospitals/:id",          handlers.DeleteHospital)
-		gogoo.PATCH("/ambulance/hospitals/:id/password",  handlers.ResetHospitalPassword)
+		gogoo.GET("/ambulance/hospitals",                 middleware.RequirePanel("ambulance"), handlers.GetHospitals)
+		gogoo.GET("/ambulance/hospitals/:id",             middleware.RequirePanel("ambulance"), handlers.GetHospitalByID)
+		gogoo.POST("/ambulance/hospitals",                middleware.RequirePanel("ambulance"), handlers.CreateHospital)
+		gogoo.PATCH("/ambulance/hospitals/:id",           middleware.RequirePanel("ambulance"), handlers.UpdateHospital)
+		gogoo.DELETE("/ambulance/hospitals/:id",          middleware.RequirePanel("ambulance"), handlers.DeleteHospital)
+		gogoo.PATCH("/ambulance/hospitals/:id/password",  middleware.RequirePanel("ambulance"), handlers.ResetHospitalPassword)
 
 		// Ambulance — Bookings
 		gogoo.GET("/ambulance/bookings/hospital",         handlers.GetHospitalBookings)

@@ -10,9 +10,11 @@ import (
 )
 
 type Claims struct {
-	UserID    uuid.UUID `json:"user_id"`
-	Email     string    `json:"email"`
-	Name      string    `json:"name"`
+	UserID    uuid.UUID  `json:"user_id"`
+	Email     string     `json:"email"`
+	Name      string     `json:"name"`
+	Panel     string     `json:"panel,omitempty"`
+	Role      string     `json:"role,omitempty"`
 	ProjectID *uuid.UUID `json:"project_id,omitempty"`
 	jwt.RegisteredClaims
 }
@@ -31,14 +33,17 @@ func Init(cfg *config.Config) {
 	jwtSecret = cfg.JWTSecret
 }
 
-// GenerateToken generates a JWT token
-func GenerateToken(userID uuid.UUID, email, name string, cfg *config.Config) (string, error) {
+// GenerateToken generates a JWT token. role is "" for ordinary riders/drivers
+// and "master_admin" for the platform admin account — deny-by-default
+// middleware treats a blank role/panel as no panel access.
+func GenerateToken(userID uuid.UUID, email, name, role string, cfg *config.Config) (string, error) {
 	expirationTime := time.Now().Add(cfg.JWTExpiration)
 
 	claims := &Claims{
 		UserID: userID,
 		Email:  email,
 		Name:   name,
+		Role:   role,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(expirationTime),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -85,5 +90,5 @@ func RefreshToken(tokenString string, cfg *config.Config) (string, error) {
 		return "", err
 	}
 
-	return GenerateToken(claims.UserID, claims.Email, claims.Name, cfg)
+	return GenerateToken(claims.UserID, claims.Email, claims.Name, claims.Role, cfg)
 }
