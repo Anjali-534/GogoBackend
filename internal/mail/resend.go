@@ -40,7 +40,7 @@ type Message struct {
 // sending. Callers should treat a false return as "skip silently" rather
 // than an error — email is optional deploy-time configuration.
 func IsConfigured(cfg *config.Config) bool {
-	return cfg.ResendAPIKey != "" && cfg.SMTPFromEmail != ""
+	return cfg.ResendAPIKey != "" && cfg.ResendFromEmail != ""
 }
 
 type resendAttachment struct {
@@ -56,18 +56,26 @@ type resendPayload struct {
 	Attachments []resendAttachment `json:"attachments,omitempty"`
 }
 
-// Send delivers msg via the Resend HTTP API. Reuses SMTP_FROM_EMAIL/
-// SMTP_FROM_NAME as the sender identity — those describe who the email is
-// from, not how it's transported, so there's no reason to duplicate them
-// under a new name just because the transport changed.
+// Send delivers msg via the Resend HTTP API.
+//
+// TEMPORARY: the "from" address is cfg.ResendFromEmail, which defaults to
+// Resend's shared sandbox domain (onboarding@resend.dev) because
+// SMTP_FROM_EMAIL (bogielogistics@gmail.com) sits on gmail.com — a domain
+// nobody can verify on Resend, since verification requires DNS control
+// nobody has over gmail.com. Confirmed live: Resend rejected it with
+// "403 The gmail.com domain is not verified." Recipients currently see
+// mail from Resend's sandbox address, not gogoo. Fix: verify a real domain
+// you control (e.g. gogoo.in) at https://resend.com/domains, then set
+// RESEND_FROM_EMAIL to an address on it (e.g. statements@gogoo.in) and this
+// sandbox fallback stops being used.
 func Send(cfg *config.Config, msg Message) error {
 	if !IsConfigured(cfg) {
-		return fmt.Errorf("resend not configured (RESEND_API_KEY/SMTP_FROM_EMAIL missing)")
+		return fmt.Errorf("resend not configured (RESEND_API_KEY/RESEND_FROM_EMAIL missing)")
 	}
 
-	from := cfg.SMTPFromEmail
+	from := cfg.ResendFromEmail
 	if cfg.SMTPFromName != "" {
-		from = fmt.Sprintf("%s <%s>", cfg.SMTPFromName, cfg.SMTPFromEmail)
+		from = fmt.Sprintf("%s <%s>", cfg.SMTPFromName, cfg.ResendFromEmail)
 	}
 
 	payload := resendPayload{

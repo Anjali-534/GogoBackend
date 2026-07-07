@@ -65,6 +65,14 @@ type Config struct {
 
 	// Resend (transactional email — e.g. monthly driver earnings statements)
 	ResendAPIKey string
+	// TEMPORARY sandbox sender — Resend rejects sending from an unverified
+	// domain (SMTP_FROM_EMAIL is @gmail.com, which can never be verified
+	// since nobody owns gmail.com's DNS). Defaults to Resend's shared test
+	// domain so email sending works at all right now. MUST be switched to
+	// a real address on a verified domain (e.g. statements@gogoo.in, after
+	// adding it at https://resend.com/domains) before real drivers receive
+	// these statements — recipients currently see "onboarding@resend.dev".
+	ResendFromEmail string
 }
 
 func Load() *Config {
@@ -112,6 +120,9 @@ func Load() *Config {
 		SMTPFromName:  getString("SMTP_FROM_NAME", "gogoo"),
 
 		ResendAPIKey: getString("RESEND_API_KEY", ""),
+		// TEMPORARY — see field comment. Override with RESEND_FROM_EMAIL once
+		// a real domain is verified on Resend.
+		ResendFromEmail: getString("RESEND_FROM_EMAIL", "onboarding@resend.dev"),
 	}
 
 	return cfg
