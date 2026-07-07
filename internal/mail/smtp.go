@@ -7,6 +7,7 @@ package mail
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"mime"
@@ -38,15 +39,38 @@ func IsConfigured(cfg *config.Config) bool {
 	return cfg.SMTPHost != "" && cfg.SMTPFromEmail != ""
 }
 
-// Send delivers msg via the configured SMTP relay. It builds the MIME
-// message by hand (net/smtp has no attachment support) using a simple
-// multipart/mixed body: one text/plain part, one part per attachment,
-// each base64-encoded.
+// Send delivers msg via the configured SMTP relay. Port 465 (Gmail's
+// implicit-TLS port) is dialed with TLS from the first byte since
+// net/smtp has no built-in support for that; any other port goes through
+// net/smtp.SendMail, which upgrades via STARTTLS itself (the plain 587
+// path — this is what a "connect: connection timed out" error on 587
+// means the network/host is blocking, not a credentials problem).
 func Send(cfg *config.Config, msg Message) error {
 	if !IsConfigured(cfg) {
 		return fmt.Errorf("smtp not configured (SMTP_HOST/SMTP_FROM_EMAIL missing)")
 	}
 
+	body := buildMIMEMessage(cfg, msg)
+	toAddrs := strings.Split(msg.To, ",")
+
+	if cfg.SMTPPort == 465 {
+		return sendImplicitTLS(cfg, toAddrs, body)
+	}
+
+	addr := fmt.Sprintf("%s:%d", cfg.SMTPHost, cfg.SMTPPort)
+	var auth smtp.Auth
+	if cfg.SMTPUser != "" {
+		auth = smtp.PlainAuth("", cfg.SMTPUser, cfg.SMTPPassword, cfg.SMTPHost)
+	}
+	return smtp.SendMail(addr, auth, cfg.SMTPFromEmail, toAddrs, body)
+}
+
+// buildMIMEMessage hand-builds the raw RFC 5322 message (net/smtp has no
+// attachment support) as a simple multipart/mixed body: one text/plain
+// part, one base64-encoded part per attachment. Shared by both the
+// STARTTLS (587) and implicit-TLS (465) send paths — one place that knows
+// what an outgoing message looks like.
+func buildMIMEMessage(cfg *config.Config, msg Message) []byte {
 	boundary := "gogoo-boundary-42"
 	var buf bytes.Buffer
 
@@ -83,13 +107,50 @@ func Send(cfg *config.Config, msg Message) error {
 		}
 	}
 	fmt.Fprintf(&buf, "--%s--\r\n", boundary)
+	return buf.Bytes()
+}
 
+// sendImplicitTLS speaks SMTP over a connection that's already TLS from
+// the first byte (port 465) — net/smtp.SendMail can't do this, it always
+// connects plaintext and STARTTLS-upgrades, which is exactly the path that
+// times out when a host blocks 587.
+func sendImplicitTLS(cfg *config.Config, toAddrs []string, body []byte) error {
 	addr := fmt.Sprintf("%s:%d", cfg.SMTPHost, cfg.SMTPPort)
-	var auth smtp.Auth
-	if cfg.SMTPUser != "" {
-		auth = smtp.PlainAuth("", cfg.SMTPUser, cfg.SMTPPassword, cfg.SMTPHost)
+	conn, err := tls.Dial("tcp", addr, &tls.Config{ServerName: cfg.SMTPHost})
+	if err != nil {
+		return fmt.Errorf("tls dial to %s failed: %w", addr, err)
 	}
+	defer conn.Close()
 
-	toAddrs := strings.Split(msg.To, ",")
-	return smtp.SendMail(addr, auth, cfg.SMTPFromEmail, toAddrs, buf.Bytes())
+	client, err := smtp.NewClient(conn, cfg.SMTPHost)
+	if err != nil {
+		return fmt.Errorf("smtp client init failed: %w", err)
+	}
+	defer client.Close()
+
+	if cfg.SMTPUser != "" {
+		auth := smtp.PlainAuth("", cfg.SMTPUser, cfg.SMTPPassword, cfg.SMTPHost)
+		if err := client.Auth(auth); err != nil {
+			return fmt.Errorf("smtp auth failed: %w", err)
+		}
+	}
+	if err := client.Mail(cfg.SMTPFromEmail); err != nil {
+		return fmt.Errorf("MAIL FROM failed: %w", err)
+	}
+	for _, a := range toAddrs {
+		if err := client.Rcpt(strings.TrimSpace(a)); err != nil {
+			return fmt.Errorf("RCPT TO failed for %s: %w", a, err)
+		}
+	}
+	w, err := client.Data()
+	if err != nil {
+		return fmt.Errorf("DATA command failed: %w", err)
+	}
+	if _, err := w.Write(body); err != nil {
+		return fmt.Errorf("writing message body failed: %w", err)
+	}
+	if err := w.Close(); err != nil {
+		return fmt.Errorf("closing DATA writer failed: %w", err)
+	}
+	return client.Quit()
 }
