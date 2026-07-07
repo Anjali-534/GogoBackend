@@ -214,6 +214,10 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.GET("/admin/panel-access",                  handlers.GetPanelAccess)
 		gogoo.PATCH("/admin/panel-access/:id/password",   handlers.UpdatePanelPassword)
 
+		// TEMPORARY — SMTP verification, master admin only. Remove once SMTP_*
+		// is confirmed working in production (see internal/mail/smtp.go).
+		gogoo.POST("/admin/test-email",                   middleware.RequirePanel(), handlers.TestSMTPEmail)
+
 		// Ambulance — NGO management
 		gogoo.GET("/ambulance/ngos",                      middleware.RequirePanel("ambulance"), handlers.GetNGOs)
 		gogoo.POST("/ambulance/ngos",                     middleware.RequirePanel("ambulance"), handlers.CreateNGO)
