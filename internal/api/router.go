@@ -36,7 +36,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		public.GET("/auth/github/callback", handlers.GitHubCallback)
 
 		// Referral smart-redirect landing pages (shared via WhatsApp etc.) —
-		// no gogoo.app domain yet, so the backend itself serves these.
+		// bogie.in isn't wired up to host these yet, so the backend itself serves these.
 		public.GET("/r/:code", handlers.ReferralLandingUser)
 		public.GET("/dr/:code", handlers.ReferralLandingDriver)
 		public.GET("/driver-app", handlers.DriverAppLanding)

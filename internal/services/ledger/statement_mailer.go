@@ -157,7 +157,7 @@ func sendOneStatement(ctx context.Context, cfg *config.Config, driverID string, 
 	body := fmt.Sprintf(
 		"Hi %s,\n\nYour gogoo earnings statement for %s is attached.\n\n"+
 			"Opening balance: Rs.%.0f\nClosing balance: Rs.%.0f\n\n"+
-			"Questions about your earnings? Reply to this email or contact support@gogoo.in.\n\n"+
+			"Questions about your earnings? Reply to this email or contact support@bogie.in.\n\n"+
 			"— Team gogoo",
 		stmt.DriverName, monthLabel, stmt.OpeningBalance, stmt.ClosingBalance,
 	)

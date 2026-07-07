@@ -101,5 +101,5 @@ ON CONFLICT DO NOTHING;
 
 -- Ambulance panel_access entry
 INSERT INTO panel_access (panel_name, email, password_hash, role)
-VALUES ('ambulance','ambulance@gogoo.in','$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi','manager')
+VALUES ('ambulance','ambulance@bogie.in','$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi','manager')
 ON CONFLICT (panel_name, email) DO NOTHING;

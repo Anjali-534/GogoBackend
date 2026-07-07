@@ -11,9 +11,10 @@ import (
 )
 
 // backendPublicURL is the base URL the referral landing pages (and the
-// share_link returned by /gogoo/referral/my-code) are served from. We don't
-// have the gogoo.app domain hosting anything yet, so the Railway backend
-// itself acts as the link server — see referralLandingHTML.
+// share_link returned by /gogoo/referral/my-code) are served from. bogie.in
+// isn't wired up to host these yet, so the Railway backend itself acts as
+// the link server — see referralLandingHTML. Once bogie.in (or a subdomain
+// of it) points here, set GOGOO_BACKEND_URL rather than editing this default.
 func backendPublicURL() string {
 	if v := os.Getenv("GOGOO_BACKEND_URL"); v != "" {
 		return strings.TrimRight(v, "/")

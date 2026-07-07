@@ -214,12 +214,12 @@ riders_sections = [
             'Right to nominate a representative to exercise these rights on your behalf',
             'Right to file a grievance with our Grievance Officer (Section 11)',
         ],
-        'To exercise any of these rights, write to privacy@gogoo.in. We aim to respond within 7 working days.',
+        'To exercise any of these rights, write to privacy@bogie.in. We aim to respond within 7 working days.',
     ]),
     ("9. Children's Privacy", [
         'gogoo Services are intended for users who are 18 years of age or older. We do not knowingly collect '
         'personal data from minors. If you believe a minor has registered an account, please contact '
-        'privacy@gogoo.in so that we can take appropriate action.',
+        'privacy@bogie.in so that we can take appropriate action.',
     ]),
     ("10. Changes to this Policy", [
         'We may update this Privacy Policy from time to time to reflect changes in our practices or Applicable '
@@ -231,8 +231,8 @@ riders_sections = [
             'Grievance Officer: Anjali Aggarwal, Data Protection Officer',
             'Company: Aggarwal Publicity and Marketing Pvt. Ltd.',
             'Address: New Delhi, Delhi – 110001, India',
-            'Email: privacy@gogoo.in',
-            'General support: support@gogoo.in, or the in-app support chat',
+            'Email: privacy@bogie.in',
+            'General support: support@bogie.in, or the in-app support chat',
         ],
     ]),
 ]
@@ -382,7 +382,7 @@ drivers_sections = [
             'Right to nominate a representative to exercise these rights on your behalf',
             'Right to file a grievance with our Grievance Officer (Section 11)',
         ],
-        'To exercise any of these rights, write to privacy@gogoo.in. We aim to respond within 7 working days.',
+        'To exercise any of these rights, write to privacy@bogie.in. We aim to respond within 7 working days.',
     ]),
     ("9. Children's Privacy", [
         'The Driver App is intended only for users who are 18 years of age or older, consistent with the Driver '
@@ -398,8 +398,8 @@ drivers_sections = [
             'Grievance Officer: Anjali Aggarwal, Data Protection Officer',
             'Company: Aggarwal Publicity and Marketing Pvt. Ltd.',
             'Address: New Delhi, Delhi – 110001, India',
-            'Email: privacy@gogoo.in',
-            'Driver support: driver-support@gogoo.in, or the in-app support chat',
+            'Email: privacy@bogie.in',
+            'Driver support: driver-support@bogie.in, or the in-app support chat',
         ],
     ]),
 ]

@@ -188,7 +188,7 @@ func drawFooter(pdf *gofpdf.Fpdf, tr func(string) string) {
 	pdf.SetTextColor(140, 140, 140)
 	pdf.CellFormat(0, 5, fmt.Sprintf("Generated on %s", time.Now().Format("2 Jan 2006, 3:04 PM")), "", 1, "L", false, 0, "")
 	pdf.CellFormat(0, 5, tr("Aggarwal Publicity and Marketing Pvt. Ltd. — gogoo"), "", 1, "L", false, 0, "")
-	pdf.CellFormat(0, 5, "Support: support@gogoo.in", "", 1, "L", false, 0, "")
+	pdf.CellFormat(0, 5, "Support: support@bogie.in", "", 1, "L", false, 0, "")
 }
 
 func truncate(s string, max int) string {
