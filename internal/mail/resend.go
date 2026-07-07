@@ -56,18 +56,10 @@ type resendPayload struct {
 	Attachments []resendAttachment `json:"attachments,omitempty"`
 }
 
-// Send delivers msg via the Resend HTTP API.
-//
-// TEMPORARY: the "from" address is cfg.ResendFromEmail, which defaults to
-// Resend's shared sandbox domain (onboarding@resend.dev) because
-// SMTP_FROM_EMAIL (bogielogistics@gmail.com) sits on gmail.com — a domain
-// nobody can verify on Resend, since verification requires DNS control
-// nobody has over gmail.com. Confirmed live: Resend rejected it with
-// "403 The gmail.com domain is not verified." Recipients currently see
-// mail from Resend's sandbox address, not gogoo. Fix: verify a real domain
-// you control (e.g. gogoo.in) at https://resend.com/domains, then set
-// RESEND_FROM_EMAIL to an address on it (e.g. statements@gogoo.in) and this
-// sandbox fallback stops being used.
+// Send delivers msg via the Resend HTTP API, sending from cfg.ResendFromEmail
+// (an address on bogie.in, which is verified on Resend — that's what lets
+// this deliver to arbitrary recipients instead of only the account owner's
+// own address, which is all Resend's unverified sandbox domain allows).
 func Send(cfg *config.Config, msg Message) error {
 	if !IsConfigured(cfg) {
 		return fmt.Errorf("resend not configured (RESEND_API_KEY/RESEND_FROM_EMAIL missing)")
