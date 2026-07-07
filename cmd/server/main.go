@@ -12,6 +12,7 @@ import (
 	"github.com/deploykit/backend/internal/auth"
 	"github.com/deploykit/backend/internal/config"
 	"github.com/deploykit/backend/internal/db"
+	"github.com/deploykit/backend/internal/services/ledger"
 	"github.com/joho/godotenv"
 )
 
@@ -52,11 +53,20 @@ func main() {
 	} else {
 		log.Println("✓ SOS ticket type ready")
 	}
+	if err := ledger.MigrateSentStatements(); err != nil {
+		log.Printf("⚠ Sent-statements migration warning: %v", err)
+	} else {
+		log.Println("✓ Sent-statements table ready")
+	}
 
 	// Scheduled-ride dispatcher — ticks scheduled bookings into the normal
 	// searching/matching flow ~15 minutes before pickup.
 	go handlers.StartScheduledDispatcher()
 	log.Println("✓ Scheduled ride dispatcher running")
+
+	// Monthly driver earnings statement emailer — ticks daily, sends on the 1st.
+	go ledger.StartMonthlyStatementMailer(cfg)
+	log.Println("✓ Monthly statement mailer running")
 
 	// Setup API router
 	router := api.SetupRouter(cfg)

@@ -51,6 +51,14 @@ type Config struct {
 	
 	// Kubernetes
 	KubeConfig        string
+
+	// SMTP (transactional email — e.g. monthly driver earnings statements)
+	SMTPHost      string
+	SMTPPort      int
+	SMTPUser      string
+	SMTPPassword  string
+	SMTPFromEmail string
+	SMTPFromName  string
 }
 
 func Load() *Config {
@@ -89,8 +97,15 @@ func Load() *Config {
 		AWSRegion:        getString("AWS_REGION", "us-east-1"),
 		
 		KubeConfig:       getString("KUBECONFIG", ""),
+
+		SMTPHost:      getString("SMTP_HOST", ""),
+		SMTPPort:      getInt("SMTP_PORT", 587),
+		SMTPUser:      getString("SMTP_USER", ""),
+		SMTPPassword:  getString("SMTP_PASSWORD", ""),
+		SMTPFromEmail: getString("SMTP_FROM_EMAIL", ""),
+		SMTPFromName:  getString("SMTP_FROM_NAME", "gogoo"),
 	}
-	
+
 	return cfg
 }
 

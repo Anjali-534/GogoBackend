@@ -55,4 +55,7 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-require github.com/xuri/excelize/v2 v2.8.1
+require (
+	github.com/jung-kurt/gofpdf v1.16.2
+	github.com/xuri/excelize/v2 v2.8.1
+)
