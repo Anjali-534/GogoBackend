@@ -52,13 +52,19 @@ type Config struct {
 	// Kubernetes
 	KubeConfig        string
 
-	// SMTP (transactional email — e.g. monthly driver earnings statements)
+	// SMTP_HOST/PORT/USER/PASSWORD are unused for sending — Railway blocks
+	// outbound SMTP (confirmed: port 587 times out). Email actually goes out
+	// via Resend's HTTP API (RESEND_API_KEY); SMTP_FROM_EMAIL/SMTP_FROM_NAME
+	// are kept since they still describe the sender identity either way.
 	SMTPHost      string
 	SMTPPort      int
 	SMTPUser      string
 	SMTPPassword  string
 	SMTPFromEmail string
 	SMTPFromName  string
+
+	// Resend (transactional email — e.g. monthly driver earnings statements)
+	ResendAPIKey string
 }
 
 func Load() *Config {
@@ -104,6 +110,8 @@ func Load() *Config {
 		SMTPPassword:  getString("SMTP_PASSWORD", ""),
 		SMTPFromEmail: getString("SMTP_FROM_EMAIL", ""),
 		SMTPFromName:  getString("SMTP_FROM_NAME", "gogoo"),
+
+		ResendAPIKey: getString("RESEND_API_KEY", ""),
 	}
 
 	return cfg
