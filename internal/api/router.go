@@ -254,6 +254,10 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.POST("/support/chat/:ticket_id/escalate",   handlers.EscalateSupportChat)
 		gogoo.GET("/support/unread-count",                handlers.GetUnreadCount)
 
+		// Lost item reporting (rider app) — reuses the ticket/chat system
+		gogoo.POST("/support/lost-item/photo",            handlers.UploadLostItemPhoto)
+		gogoo.POST("/support/lost-item",                  handlers.ReportLostItem)
+
 		// SOS emergency alert (riders + drivers share the same endpoint)
 		gogoo.POST("/sos",                                handlers.TriggerSOS)
 	}
