@@ -1,5 +1,5 @@
 """
-One-time script to generate the real gogoo TDS Declaration PDF
+One-time script to generate the real bogie TDS Declaration PDF
 (Declaration U/S 393(1)/393(4) of the Income Tax Act, 2025 for goods-carriage
 contractors), replacing the earlier generic placeholder.
 
@@ -38,12 +38,12 @@ def esc(t):
 doc = SimpleDocTemplate(
     f"{OUT_DIR}/tds-declaration.pdf", pagesize=A4,
     topMargin=22 * mm, bottomMargin=18 * mm, leftMargin=22 * mm, rightMargin=22 * mm,
-    title="gogoo TDS Declaration",
+    title="bogie TDS Declaration",
 )
 
 story = [
     Paragraph("To,", body_style),
-    Paragraph(hl("<b>[gogoo legal entity name, e.g. Gogoo Technologies Private Limited]</b>,"), field_style),
+    Paragraph(hl("<b>[bogie legal entity name, e.g. Bogie Technologies Private Limited]</b>,"), field_style),
     Paragraph(hl("[Registered office address line 1],"), field_style),
     Paragraph(hl("[Address line 2],"), field_style),
     Paragraph(hl("[City - PIN, State]"), field_style),
@@ -64,7 +64,7 @@ story = [
     Paragraph(
         "do hereby make the following declaration as required under section 393(1) [Table: S. No. 6(i)], read "
         "with 393(4) [Table: S. No. 8] of the Income Tax Act, 2025 (‘Act’) for receiving payments from "
-        + hl("[gogoo legal entity name]") + " (‘Company’) without deduction of tax at source: -",
+        + hl("[bogie legal entity name]") + " (‘Company’) without deduction of tax at source: -",
         body_style,
     ),
 ]
@@ -106,7 +106,7 @@ story += [
     Paragraph(hl("Time Stamp"), field_style),
     Spacer(1, 10),
     Paragraph(
-        "Company: Aggarwal Publicity and Marketing Pvt. Ltd., Delhi NCR, India | Platform: gogoo | Version 1.0",
+        "Company: Aggarwal Publicity and Marketing Pvt. Ltd., Delhi NCR, India | Platform: bogie | Version 1.0",
         footer_style,
     ),
 ]

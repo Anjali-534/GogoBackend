@@ -1,4 +1,4 @@
-# GoGoo Backend — API Inventory
+# bogie Backend — API Inventory
 
 Authoritative list of every route registered in [`internal/api/router.go`](internal/api/router.go).
 `cmd/server/main.go` only calls `api.SetupRouter(cfg)` — no routes are registered anywhere else.

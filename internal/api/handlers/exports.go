@@ -137,7 +137,7 @@ func ExportDriversXLSX(c *gin.Context) {
 	f.SetColWidth(sheet, "C", "C", 16)
 	f.SetColWidth(sheet, "D", "R", 16)
 
-	writeXLSX(c, f, fmt.Sprintf("gogoo-drivers-%s.xlsx", time.Now().Format("2006-01-02")))
+	writeXLSX(c, f, fmt.Sprintf("bogie-drivers-%s.xlsx", time.Now().Format("2006-01-02")))
 }
 
 // ============================================================
@@ -191,7 +191,7 @@ func ExportUsersXLSX(c *gin.Context) {
 	f.SetColWidth(sheet, "C", "C", 16)
 	f.SetColWidth(sheet, "D", "F", 16)
 
-	writeXLSX(c, f, fmt.Sprintf("gogoo-users-%s.xlsx", time.Now().Format("2006-01-02")))
+	writeXLSX(c, f, fmt.Sprintf("bogie-users-%s.xlsx", time.Now().Format("2006-01-02")))
 }
 
 func yesNo(b bool) string {

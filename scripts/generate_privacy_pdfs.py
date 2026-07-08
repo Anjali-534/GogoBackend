@@ -1,11 +1,11 @@
 """
-One-time script to generate gogoo's Privacy Policy PDF set:
+One-time script to generate bogie's Privacy Policy PDF set:
   - privacy-policy.pdf           (index, links out to the two below)
   - privacy-policy-riders.pdf
   - privacy-policy-drivers.pdf
 
 Run once, output goes to backend/static/policies/. Content is original,
-gogoo-specific text — not copied from any third-party policy.
+bogie-specific text — not copied from any third-party policy.
 """
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -61,27 +61,27 @@ def build_index():
     doc = SimpleDocTemplate(
         f"{OUT_DIR}/privacy-policy.pdf", pagesize=A4,
         topMargin=30 * mm, bottomMargin=18 * mm, leftMargin=20 * mm, rightMargin=20 * mm,
-        title="gogoo Privacy Policy",
+        title="bogie Privacy Policy",
     )
     story = [
         Paragraph("Privacy Policy", title_style),
         Spacer(1, 10),
         Paragraph(
-            "Aggarwal Publicity and Marketing Pvt. Ltd. (“gogoo”), Delhi NCR, India",
+            "Aggarwal Publicity and Marketing Pvt. Ltd. (“bogie”), Delhi NCR, India",
             ParagraphStyle("company", parent=styles["Normal"], fontSize=11, textColor=colors.grey, spaceAfter=28),
         ),
-        Paragraph(f'(i) <a href="{RIDERS_URL}"><u>Privacy Policy for gogoo Riders</u></a>', link_style),
-        Paragraph(f'(ii) <a href="{DRIVERS_URL}"><u>Privacy Policy for gogoo Driver Partners</u></a>', link_style),
+        Paragraph(f'(i) <a href="{RIDERS_URL}"><u>Privacy Policy for bogie Riders</u></a>', link_style),
+        Paragraph(f'(ii) <a href="{DRIVERS_URL}"><u>Privacy Policy for bogie Driver Partners</u></a>', link_style),
         Spacer(1, 20),
         Paragraph(
-            "Please open the policy relevant to how you use gogoo — as a Rider booking cab, "
-            "truck or ambulance services through the gogoo user app, or as a Driver Partner "
-            "providing services through the gogoo Driver app.",
+            "Please open the policy relevant to how you use bogie — as a Rider booking cab, "
+            "truck or ambulance services through the bogie user app, or as a Driver Partner "
+            "providing services through the bogie Driver app.",
             body_style,
         ),
         Spacer(1, 30),
         Paragraph(
-            "Company: Aggarwal Publicity and Marketing Pvt. Ltd., Delhi NCR, India | Platform: gogoo | Version 1.0",
+            "Company: Aggarwal Publicity and Marketing Pvt. Ltd., Delhi NCR, India | Platform: bogie | Version 1.0",
             footer_style,
         ),
     ]
@@ -96,14 +96,14 @@ build_index()
 # ---------------------------------------------------------------------------
 riders_sections = [
     (None, [
-        'This Privacy Policy explains how Aggarwal Publicity and Marketing Pvt. Ltd. ("gogoo", "we", "us") '
-        'collects, uses, shares and protects the personal data of Riders who use the gogoo user application '
+        'This Privacy Policy explains how Aggarwal Publicity and Marketing Pvt. Ltd. ("bogie", "we", "us") '
+        'collects, uses, shares and protects the personal data of Riders who use the bogie user application '
         'to book cab, truck/goods transportation, or ambulance services (the "Services") in Delhi NCR and other '
         'serviceable areas.',
         'This Policy is an electronic record under the Information Technology Act, 2000 and forms part of, and is '
-        'to be read together with, the gogoo Terms of Service. By creating an account or using the gogoo app, you '
+        'to be read together with, the bogie Terms of Service. By creating an account or using the bogie app, you '
         'agree to the collection and use of your information as described here. If you do not agree, please do '
-        'not use the gogoo app.',
+        'not use the bogie app.',
     ]),
     ("1. Information We Collect", [
         'Personal details:',
@@ -119,7 +119,7 @@ riders_sections = [
         ],
         'Booking and payment:',
         [
-            'Booking history, fare and payment references (gogoo does not store your card or bank details — these '
+            'Booking history, fare and payment references (bogie does not store your card or bank details — these '
             'are handled by our payment processing partners)',
         ],
         'Device and usage:',
@@ -135,18 +135,18 @@ riders_sections = [
             'system to help respond to your queries',
             'Information generated when you use the SOS/emergency alert feature, including your live location at '
             'the time of the alert',
-            'Referral codes used or shared, and rewards earned, if you participate in the gogoo referral programme',
+            'Referral codes used or shared, and rewards earned, if you participate in the bogie referral programme',
         ],
     ]),
     ("2. How We Use Your Information", [
         [
             'Match you with a nearby, available Driver Partner for cab, truck or ambulance bookings',
             'Calculate fares, process payments and generate receipts',
-            'Share live trip tracking with you (and, where you use SOS, with your emergency contacts and gogoo '
+            'Share live trip tracking with you (and, where you use SOS, with your emergency contacts and bogie '
             'support) for safety',
             'Send booking confirmations, OTPs, ride status updates and service notifications',
             'Route and respond to your queries through in-app support chat, including AI-assisted responses',
-            'Administer the gogoo referral programme, including tracking codes and crediting rewards',
+            'Administer the bogie referral programme, including tracking codes and crediting rewards',
             'Improve app performance, fix bugs and develop new features',
             'Detect and prevent fraud and misuse of the platform',
             'Comply with Applicable Law, including requests from courts, police or regulatory authorities',
@@ -169,12 +169,12 @@ riders_sections = [
         '4.2 With service providers: we share data with vendors who support our operations, such as cloud hosting '
         'providers, Ola Maps (routing and navigation), Google Firebase (analytics, crash reporting and push '
         'notifications), payment processing partners, and AI-assisted support-chat providers. These providers may '
-        'access only the data needed to perform their function for gogoo.',
+        'access only the data needed to perform their function for bogie.',
         '4.3 With authorities: we may disclose information to government, regulatory or law-enforcement bodies '
         'where required under Applicable Law, or in good faith to prevent fraud, protect safety, or comply with a '
         'legal process.',
         '4.4 We do not sell your personal data to advertisers or other third parties, and we do not use it for '
-        'profiling outside of the gogoo platform.',
+        'profiling outside of the bogie platform.',
     ]),
     ("5. Permissions Used by the App", [
         [
@@ -217,13 +217,13 @@ riders_sections = [
         'To exercise any of these rights, write to privacy@bogie.in. We aim to respond within 7 working days.',
     ]),
     ("9. Children's Privacy", [
-        'gogoo Services are intended for users who are 18 years of age or older. We do not knowingly collect '
+        'bogie Services are intended for users who are 18 years of age or older. We do not knowingly collect '
         'personal data from minors. If you believe a minor has registered an account, please contact '
         'privacy@bogie.in so that we can take appropriate action.',
     ]),
     ("10. Changes to this Policy", [
         'We may update this Privacy Policy from time to time to reflect changes in our practices or Applicable '
-        'Law. Material changes will be notified through the gogoo app. Your continued use of the app after an '
+        'Law. Material changes will be notified through the bogie app. Your continued use of the app after an '
         'update constitutes acceptance of the revised Policy.',
     ]),
     ("11. Grievance Officer and Contact", [
@@ -239,10 +239,10 @@ riders_sections = [
 
 build_pdf(
     "privacy-policy-riders.pdf",
-    "GOGOO PRIVACY POLICY",
-    "For Riders — gogoo User App",
+    "BOGIE PRIVACY POLICY",
+    "For Riders — bogie User App",
     riders_sections,
-    "Company: Aggarwal Publicity and Marketing Pvt. Ltd., Delhi NCR, India | Platform: gogoo | Version 1.0",
+    "Company: Aggarwal Publicity and Marketing Pvt. Ltd., Delhi NCR, India | Platform: bogie | Version 1.0",
 )
 
 # ---------------------------------------------------------------------------
@@ -250,12 +250,12 @@ build_pdf(
 # ---------------------------------------------------------------------------
 drivers_sections = [
     (None, [
-        'This Privacy Policy explains how Aggarwal Publicity and Marketing Pvt. Ltd. ("gogoo", "we", "us") '
+        'This Privacy Policy explains how Aggarwal Publicity and Marketing Pvt. Ltd. ("bogie", "we", "us") '
         'collects, uses, shares and protects the personal data of Driver Partners who register on and use the '
-        'gogoo Driver application (the "Driver App") to provide cab, truck/goods transportation or ambulance '
-        'services through the gogoo platform.',
+        'bogie Driver application (the "Driver App") to provide cab, truck/goods transportation or ambulance '
+        'services through the bogie platform.',
         'This Policy is an electronic record under the Information Technology Act, 2000 and forms part of, and is '
-        'to be read together with, the gogoo Driver Partner Terms and Conditions. By registering on the Driver App '
+        'to be read together with, the bogie Driver Partner Terms and Conditions. By registering on the Driver App '
         'or accepting an Order, you agree to the collection and use of your information as described here. If you '
         'do not agree, please do not register on or use the Driver App.',
     ]),
@@ -301,13 +301,13 @@ drivers_sections = [
     ]),
     ("2. How We Use Your Information", [
         [
-            'Verify your identity, documents and eligibility to operate on the gogoo platform',
+            'Verify your identity, documents and eligibility to operate on the bogie platform',
             'Assign you Orders and enable navigation, live tracking and Order completion',
             'Calculate Driver Earnings, maintain your Wallet/ledger, and process payouts',
             'Deduct and record TDS in accordance with the TDS Declaration you provide and Applicable Law',
             'Share your name, phone number, vehicle details and photo with Customers during an active Order, so '
             'they can identify you',
-            'Provide safety features, including SOS alerts and sharing your location with gogoo support and, '
+            'Provide safety features, including SOS alerts and sharing your location with bogie support and, '
             'where relevant, emergency services',
             'Route and respond to your queries through in-app support chat, including AI-assisted responses',
             'Improve app performance, fix bugs and develop new features',
@@ -333,7 +333,7 @@ drivers_sections = [
         'providers, Ola Maps (routing and navigation), Google Firebase (analytics, crash reporting and push '
         'notifications), payment/payout processing partners, background-verification vendors, and AI-assisted '
         'support-chat providers. These providers may access only the data needed to perform their function for '
-        'gogoo.',
+        'bogie.',
         '4.3 With authorities: we may disclose information to government, regulatory, tax or law-enforcement '
         'bodies where required under Applicable Law (including for TDS/GST compliance, RTO checks or police '
         'inquiries), or in good faith to prevent fraud or protect safety.',
@@ -406,8 +406,8 @@ drivers_sections = [
 
 build_pdf(
     "privacy-policy-drivers.pdf",
-    "GOGOO PRIVACY POLICY",
-    "For Driver Partners — gogoo Driver App",
+    "BOGIE PRIVACY POLICY",
+    "For Driver Partners — bogie Driver App",
     drivers_sections,
-    "Company: Aggarwal Publicity and Marketing Pvt. Ltd., Delhi NCR, India | Platform: gogoo | Version 1.0",
+    "Company: Aggarwal Publicity and Marketing Pvt. Ltd., Delhi NCR, India | Platform: bogie | Version 1.0",
 )

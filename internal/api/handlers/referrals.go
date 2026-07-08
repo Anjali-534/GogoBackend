@@ -230,7 +230,7 @@ func resolveReferralActor(ctx context.Context, userID string) (userType, actorID
 func maskName(name string) string {
     name = strings.TrimSpace(name)
     if name == "" {
-        return "A gogoo user"
+        return "A bogie user"
     }
     runes := []rune(name)
     if len(runes) <= 3 {
@@ -506,5 +506,5 @@ func ExportReferralsXLSX(c *gin.Context) {
     f.SetColWidth(sheet, "A", "F", 22)
     f.SetColWidth(sheet, "G", "L", 16)
 
-    writeXLSX(c, f, fmt.Sprintf("gogoo-referrals-%s.xlsx", time.Now().Format("2006-01-02")))
+    writeXLSX(c, f, fmt.Sprintf("bogie-referrals-%s.xlsx", time.Now().Format("2006-01-02")))
 }

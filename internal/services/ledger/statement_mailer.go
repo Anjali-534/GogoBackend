@@ -155,19 +155,19 @@ func sendOneStatement(ctx context.Context, cfg *config.Config, driverID string, 
 
 	monthLabel := stmt.PeriodLabel
 	body := fmt.Sprintf(
-		"Hi %s,\n\nYour gogoo earnings statement for %s is attached.\n\n"+
+		"Hi %s,\n\nYour bogie earnings statement for %s is attached.\n\n"+
 			"Opening balance: Rs.%.0f\nClosing balance: Rs.%.0f\n\n"+
 			"Questions about your earnings? Reply to this email or contact support@bogie.in.\n\n"+
-			"— Team gogoo",
+			"— Team bogie",
 		stmt.DriverName, monthLabel, stmt.OpeningBalance, stmt.ClosingBalance,
 	)
 
 	err = mail.Send(cfg, mail.Message{
 		To:      stmt.DriverEmail,
-		Subject: fmt.Sprintf("Your gogoo earnings statement — %s", monthKey),
+		Subject: fmt.Sprintf("Your bogie earnings statement — %s", monthKey),
 		Body:    body,
 		Attachments: []mail.Attachment{{
-			Filename:    fmt.Sprintf("gogoo-ledger-%s-%s.pdf", driverID, monthKey),
+			Filename:    fmt.Sprintf("bogie-ledger-%s-%s.pdf", driverID, monthKey),
 			ContentType: "application/pdf",
 			Data:        pdfBytes,
 		}},

@@ -112,7 +112,7 @@ func Load() *Config {
 		SMTPUser:      getString("SMTP_USER", ""),
 		SMTPPassword:  getString("SMTP_PASSWORD", ""),
 		SMTPFromEmail: getString("SMTP_FROM_EMAIL", ""),
-		SMTPFromName:  getString("SMTP_FROM_NAME", "gogoo"),
+		SMTPFromName:  getString("SMTP_FROM_NAME", "bogie"),
 
 		ResendAPIKey:    getString("RESEND_API_KEY", ""),
 		ResendFromEmail: getString("RESEND_FROM_EMAIL", "statements@bogie.in"),

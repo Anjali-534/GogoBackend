@@ -13,7 +13,7 @@ import (
 
 const faqPromptReply = "Thanks for reaching out! Please choose the topic that best matches your issue below, or tap 'Still need help' to talk to our team directly."
 
-const botSenderName = "gogoo Assistant 🤖"
+const botSenderName = "bogie Assistant 🤖"
 
 func determinePriority(subject string) string {
 	lower := strings.ToLower(subject)

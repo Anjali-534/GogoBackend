@@ -139,7 +139,7 @@ func DriverSignup(c *gin.Context) {
             (id, driver_id, amount, type, description, is_debit, debit_type)
         VALUES
             ($1, $2, 700.00, 'adjustment',
-             'One-time registration fee — gogoo onboarding',
+             'One-time registration fee — bogie onboarding',
              true, 'registration_fee')
     `, uuid.New(), driverID)
     _, _ = pool.Exec(ctx, `UPDATE drivers SET wallet_balance = -700.00 WHERE id = $1`, driverID)
@@ -986,7 +986,7 @@ func UpdateBookingStatus(c *gin.Context) {
             `, uuid.New(), bookingID, driverNet)
             pool.Exec(ctx, `
                 INSERT INTO driver_earnings (id, driver_id, booking_id, amount, type, description, is_debit, debit_type, created_at)
-                SELECT $1, driver_id, $2, $3, 'adjustment', 'gogoo commission (20%)', true, 'commission', NOW()
+                SELECT $1, driver_id, $2, $3, 'adjustment', 'bogie commission (20%)', true, 'commission', NOW()
                 FROM bookings WHERE id=$2
             `, uuid.New(), bookingID, commission)
             pool.Exec(ctx, `

@@ -32,14 +32,14 @@ func referralLandingHTML(code, schemeURL, apkURL, referrerType string) string {
 
 	downloadBlock := `<p class="hint">Download link coming soon — ask the person who invited you for the app.</p>`
 	if apkURL != "" {
-		downloadBlock = fmt.Sprintf(`<a class="btn" id="dl" href="%s">&#11015;&#65039; Download gogoo</a>`, html.EscapeString(apkURL))
+		downloadBlock = fmt.Sprintf(`<a class="btn" id="dl" href="%s">&#11015;&#65039; Download bogie</a>`, html.EscapeString(apkURL))
 	}
 
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html>
 <head>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>gogoo &mdash; You're invited!</title>
+<title>bogie &mdash; You're invited!</title>
 <style>
   body { font-family: -apple-system, sans-serif; background:#FFF8F5; margin:0; padding:24px;
     display:flex; flex-direction:column; align-items:center; justify-content:center;
@@ -53,7 +53,7 @@ func referralLandingHTML(code, schemeURL, apkURL, referrerType string) string {
 </style>
 </head>
 <body>
-  <div class="logo">gogoo</div>
+  <div class="logo">bogie</div>
   <p>&#127873; <b>%s</b> invited you! Sign up with this code and ride:</p>
   <div class="code">%s</div>
   %s
@@ -88,5 +88,5 @@ func ReferralLandingDriver(c *gin.Context) {
 	}
 	schemeURL := fmt.Sprintf("gogoodriver://referral?code=%s", code)
 	c.Data(http.StatusOK, "text/html; charset=utf-8",
-		[]byte(referralLandingHTML(code, schemeURL, os.Getenv("DRIVER_APP_APK_URL"), "A gogoo driver")))
+		[]byte(referralLandingHTML(code, schemeURL, os.Getenv("DRIVER_APP_APK_URL"), "A bogie driver")))
 }

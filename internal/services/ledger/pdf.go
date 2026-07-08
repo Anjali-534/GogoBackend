@@ -42,7 +42,7 @@ func GeneratePDF(stmt *Statement) ([]byte, error) {
 func drawHeader(pdf *gofpdf.Fpdf, tr func(string) string, stmt *Statement) {
 	pdf.SetFont("Helvetica", "B", 18)
 	pdf.SetTextColor(brandOrangeR, brandOrangeG, brandOrangeB)
-	pdf.CellFormat(0, 10, "gogoo", "", 1, "L", false, 0, "")
+	pdf.CellFormat(0, 10, "bogie", "", 1, "L", false, 0, "")
 
 	pdf.SetFont("Helvetica", "B", 13)
 	pdf.SetTextColor(20, 20, 20)
@@ -187,7 +187,7 @@ func drawFooter(pdf *gofpdf.Fpdf, tr func(string) string) {
 	pdf.SetFont("Helvetica", "", 8)
 	pdf.SetTextColor(140, 140, 140)
 	pdf.CellFormat(0, 5, fmt.Sprintf("Generated on %s", time.Now().Format("2 Jan 2006, 3:04 PM")), "", 1, "L", false, 0, "")
-	pdf.CellFormat(0, 5, tr("Aggarwal Publicity and Marketing Pvt. Ltd. — gogoo"), "", 1, "L", false, 0, "")
+	pdf.CellFormat(0, 5, tr("Aggarwal Publicity and Marketing Pvt. Ltd. — bogie"), "", 1, "L", false, 0, "")
 	pdf.CellFormat(0, 5, "Support: support@bogie.in", "", 1, "L", false, 0, "")
 }
 

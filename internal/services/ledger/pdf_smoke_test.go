@@ -24,7 +24,7 @@ func TestGeneratePDFSmoke(t *testing.T) {
 		TotalDebit:     565.5,
 		Entries: []Entry{
 			{Date: time.Now(), Description: "Trip Earnings", Type: "ride", IsDebit: false, Amount: 400, Running: -300},
-			{Date: time.Now(), Description: "gogoo Commission (20%)", Type: "adjustment", IsDebit: true, Amount: 100, Running: -400},
+			{Date: time.Now(), Description: "bogie Commission (20%)", Type: "adjustment", IsDebit: true, Amount: 100, Running: -400},
 			{Date: time.Now(), Description: "Referral Bonus — friend's first trip", Type: "referral", IsDebit: false, Amount: 150, Running: -250},
 		},
 	}

@@ -27,7 +27,7 @@ func DriverAppLanding(c *gin.Context) {
 <html>
 <head>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>gogoo Driver &mdash; Drive with us</title>
+<title>bogie Driver &mdash; Drive with us</title>
 <style>
   body { font-family: -apple-system, sans-serif; background:#FFF8F5; margin:0; padding:24px;
     display:flex; flex-direction:column; align-items:center; justify-content:center;
@@ -42,8 +42,8 @@ func DriverAppLanding(c *gin.Context) {
 </style>
 </head>
 <body>
-  <div class="logo">gogoo</div>
-  <div class="heading">&#128663; Drive with gogoo</div>
+  <div class="logo">bogie</div>
+  <div class="heading">&#128663; Drive with bogie</div>
   <ul class="bullets">
     <li>Zero commission on ambulance rides</li>
     <li>Low commission on all other rides</li>

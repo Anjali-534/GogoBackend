@@ -62,7 +62,7 @@ var FAQItems = []FAQItem{
 	{
 		ID:       "wrong_fare_shown",
 		Question: "The fare estimate seems wrong",
-		Answer:   "Fare estimates are based on distance, vehicle type, and current demand. Actual fare may vary slightly. For ambulance bookings, remember gogoo charges zero commission.",
+		Answer:   "Fare estimates are based on distance, vehicle type, and current demand. Actual fare may vary slightly. For ambulance bookings, remember bogie charges zero commission.",
 		Category: "payment",
 	},
 	{

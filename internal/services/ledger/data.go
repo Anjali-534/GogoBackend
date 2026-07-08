@@ -158,7 +158,7 @@ func describeEntry(typ, description, debitType string) string {
 	case debitType == "registration_fee":
 		return "Registration Fee"
 	case debitType == "commission":
-		return "gogoo Commission (20%)"
+		return "bogie Commission (20%)"
 	case typ == "ride":
 		return "Trip Earnings"
 	case typ == "referral":

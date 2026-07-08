@@ -48,7 +48,7 @@ func GetDriverLedgerPDF(c *gin.Context) {
 		return
 	}
 
-	filename := fmt.Sprintf("gogoo-ledger-%s-%s.pdf", driverID, month)
+	filename := fmt.Sprintf("bogie-ledger-%s-%s.pdf", driverID, month)
 	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
 	c.Data(http.StatusOK, "application/pdf", pdfBytes)
 }
