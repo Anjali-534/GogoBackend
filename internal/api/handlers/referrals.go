@@ -210,6 +210,13 @@ func creditReferralRewards(userType, userID string) {
                 VALUES ($1, $2, $3, 'referral', $4, false, NOW())
             `, uuid.New(), r.beneficiaryID, r.amount, fmt.Sprintf("Referral bonus — level %d", r.level))
         }
+
+        var beneficiaryUserID string
+        if pool.QueryRow(ctx, fmt.Sprintf(`SELECT user_id::text FROM %s WHERE id=$1`, table), r.beneficiaryID).
+            Scan(&beneficiaryUserID) == nil && beneficiaryUserID != "" {
+            sendPushToUserIDs([]string{beneficiaryUserID}, "Referral Bonus Credited! 🎉",
+                fmt.Sprintf("You earned ₹%.0f — thanks for spreading the word!", r.amount), "referral")
+        }
     }
 }
 

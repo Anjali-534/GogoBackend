@@ -530,6 +530,21 @@ func ReviewDriverDocument(c *gin.Context) {
 
 	allDocsClear := maybeAutoVerifyDriver(ctx, pool, driverID)
 
+	var driverUserID string
+	if pool.QueryRow(ctx, `SELECT user_id::text FROM drivers WHERE id=$1`, driverID).Scan(&driverUserID) == nil && driverUserID != "" {
+		readableDoc := strings.ReplaceAll(docType, "_", " ")
+		if req.Status == "approved" {
+			sendPushToUserIDs([]string{driverUserID}, "Document Approved ✅",
+				fmt.Sprintf("Your %s has been approved.", readableDoc), "document_review")
+		} else {
+			body := fmt.Sprintf("Your %s was rejected.", readableDoc)
+			if strings.TrimSpace(req.RejectReason) != "" {
+				body = fmt.Sprintf("Your %s was rejected: %s", readableDoc, req.RejectReason)
+			}
+			sendPushToUserIDs([]string{driverUserID}, "Document Rejected ❌", body, "document_review")
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"message":        "Document reviewed",
 		"status":         req.Status,

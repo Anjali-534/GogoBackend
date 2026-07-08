@@ -224,6 +224,16 @@ func UpdateSupportTicket(c *gin.Context) {
 				*req.AssignedTo, id)
 		}
 	}
+
+	// Only push for an AGENT-driven status change — a rider/driver marking
+	// their own ticket resolved (the FAQ chat's "Yes, resolved" button)
+	// shouldn't get notified about their own action. This one hook covers
+	// lost-item status updates and SOS acknowledgment too, since both are
+	// just support_tickets under the hood.
+	if isAgent && req.Status != nil {
+		pushToTicketOwner(id, "Ticket Update", fmt.Sprintf("Your support ticket status is now: %s", *req.Status), "ticket_status")
+	}
+
 	c.JSON(http.StatusOK, gin.H{"message": "updated"})
 }
 
@@ -337,6 +347,14 @@ func SendTicketMessage(c *gin.Context) {
 	}
 
 	pool.Exec(ctx, `UPDATE support_tickets SET updated_at=NOW() WHERE id=$1`, id)
+
+	if req.SenderType == "support" {
+		body := req.Message
+		if len(body) > 120 {
+			body = body[:120] + "…"
+		}
+		pushToTicketOwner(id, "New reply from Support", body, "support_reply")
+	}
 
 	c.JSON(http.StatusCreated, gin.H{"message": "sent"})
 }

@@ -137,17 +137,24 @@ func allDriversInCategory(ctx context.Context, userIDs []string, category string
 
 // dispatchExpoPush fires a batch of Expo push notifications for the given
 // tokens. Shared by every push code path so the payload/HTTP handling lives
-// in one place.
-func dispatchExpoPush(tokens []string, title, body, notifType string) {
+// in one place. extraData is merged into the push "data" payload alongside
+// "type" — e.g. a ticket_id so the client can deep-link on tap — and may be
+// nil.
+func dispatchExpoPush(tokens []string, title, body, notifType string, extraData map[string]string) {
 	if len(tokens) == 0 {
 		return
 	}
 	type pushMsg struct {
-		To    string            `json:"to"`
-		Title string            `json:"title"`
-		Body  string            `json:"body"`
-		Data  map[string]string `json:"data"`
-		Sound string            `json:"sound"`
+		To        string            `json:"to"`
+		Title     string            `json:"title"`
+		Body      string            `json:"body"`
+		Data      map[string]string `json:"data"`
+		Sound     string            `json:"sound"`
+		ChannelID string            `json:"channelId"`
+	}
+	data := map[string]string{"type": notifType}
+	for k, v := range extraData {
+		data[k] = v
 	}
 	msgs := make([]pushMsg, 0, len(tokens))
 	for _, token := range tokens {
@@ -155,11 +162,12 @@ func dispatchExpoPush(tokens []string, title, body, notifType string) {
 			continue
 		}
 		msgs = append(msgs, pushMsg{
-			To:    token,
-			Title: title,
-			Body:  body,
-			Data:  map[string]string{"type": notifType},
-			Sound: "default",
+			To:        token,
+			Title:     title,
+			Body:      body,
+			Data:      data,
+			Sound:     "default",
+			ChannelID: "general",
 		})
 	}
 	if len(msgs) == 0 {
@@ -225,7 +233,7 @@ func sendPushNotifications(audience, title, body, notifType string, targetUserID
 				tokens = append(tokens, token)
 			}
 		}
-		dispatchExpoPush(tokens, title, body, notifType)
+		dispatchExpoPush(tokens, title, body, notifType, nil)
 	}()
 }
 
@@ -256,7 +264,42 @@ func sendPushToUserIDs(userIDs []string, title, body, notifType string) {
 				tokens = append(tokens, token)
 			}
 		}
-		dispatchExpoPush(tokens, title, body, notifType)
+		dispatchExpoPush(tokens, title, body, notifType, nil)
+	}()
+}
+
+// pushToTicketOwner fires a general-channel push to whichever rider or
+// driver owns the given support ticket. Shared by agent replies and
+// agent-driven status changes — lost-item updates and SOS acknowledgment
+// are just tickets under the hood, so this one helper covers all of them.
+func pushToTicketOwner(ticketID, title, body, notifType string) {
+	go func() {
+		ctx := context.Background()
+		pool := db.GetDB().GetPool()
+
+		var riderUserID, driverUserID string
+		pool.QueryRow(ctx, `
+			SELECT COALESCE(r.user_id::text,''), COALESCE(d.user_id::text,'')
+			FROM support_tickets t
+			LEFT JOIN riders  r ON r.id = t.rider_id
+			LEFT JOIN drivers d ON d.id = t.driver_id
+			WHERE t.id = $1
+		`, ticketID).Scan(&riderUserID, &driverUserID)
+
+		userID := riderUserID
+		if userID == "" {
+			userID = driverUserID
+		}
+		if userID == "" {
+			return
+		}
+
+		var token string
+		pool.QueryRow(ctx, `SELECT token FROM push_tokens WHERE user_id = $1::uuid`, userID).Scan(&token)
+		if token == "" {
+			return
+		}
+		dispatchExpoPush([]string{token}, title, body, notifType, map[string]string{"ticket_id": ticketID})
 	}()
 }
 
