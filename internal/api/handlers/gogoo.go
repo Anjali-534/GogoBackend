@@ -1402,14 +1402,95 @@ func GetDriverWallet(c *gin.Context) {
     })
 }
 
-// GET /gogoo/driver/ledger
+// istLocation is a fixed +5:30 offset (never DST-adjusted, matching India)
+// rather than time.LoadLocation("Asia/Kolkata") — the Alpine base image this
+// backend ships on has no tzdata package installed, so LoadLocation would
+// fail at runtime. A fixed zone needs no tzdata and is exactly correct for
+// India regardless.
+var istLocation = time.FixedZone("IST", 5*3600+30*60)
+
+// dateRange is a resolved [Start, End] window plus a human-readable label
+// for one of the driver-facing ledger/earnings range filters.
+type dateRange struct {
+    Start time.Time
+    End   time.Time
+    Label string
+}
+
+// resolveDateRange computes the [Start, End] window for a named range key,
+// in IST. joinedAt is the driver's drivers.created_at, used only for
+// "all_time" — that window starts from when the driver actually joined,
+// never an arbitrary lookback like 90 days. Unknown/empty keys fall back to
+// "this_week", matching most drivers' mental model of "how am I doing this
+// week".
+func resolveDateRange(rangeKey string, joinedAt time.Time) (string, dateRange) {
+    now := time.Now().In(istLocation)
+    startOfDay := func(t time.Time) time.Time {
+        return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, istLocation)
+    }
+    mondayOf := func(t time.Time) time.Time {
+        wd := int(t.Weekday())
+        if wd == 0 {
+            wd = 7 // Sunday -> 7, so the offset below still lands on Monday
+        }
+        return startOfDay(t).AddDate(0, 0, -(wd - 1))
+    }
+
+    switch rangeKey {
+    case "last_week":
+        thisMonday := mondayOf(now)
+        lastMonday := thisMonday.AddDate(0, 0, -7)
+        lastSunday := thisMonday.Add(-time.Second)
+        return rangeKey, dateRange{
+            Start: lastMonday, End: lastSunday,
+            Label: fmt.Sprintf("%s - %s", lastMonday.Format("2 Jan 2006"), lastSunday.Format("2 Jan 2006")),
+        }
+    case "this_month":
+        first := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, istLocation)
+        return rangeKey, dateRange{Start: first, End: now, Label: "This Month"}
+    case "last_month":
+        firstThisMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, istLocation)
+        lastMonthEnd := firstThisMonth.Add(-time.Second)
+        firstLastMonth := time.Date(lastMonthEnd.Year(), lastMonthEnd.Month(), 1, 0, 0, 0, 0, istLocation)
+        return rangeKey, dateRange{
+            Start: firstLastMonth, End: lastMonthEnd,
+            Label: fmt.Sprintf("%s - %s", firstLastMonth.Format("2 Jan 2006"), lastMonthEnd.Format("2 Jan 2006")),
+        }
+    case "this_year":
+        first := time.Date(now.Year(), 1, 1, 0, 0, 0, 0, istLocation)
+        return rangeKey, dateRange{Start: first, End: now, Label: "This Year"}
+    case "last_year":
+        firstThisYear := time.Date(now.Year(), 1, 1, 0, 0, 0, 0, istLocation)
+        lastYearEnd := firstThisYear.Add(-time.Second)
+        firstLastYear := time.Date(lastYearEnd.Year(), 1, 1, 0, 0, 0, 0, istLocation)
+        return rangeKey, dateRange{
+            Start: firstLastYear, End: lastYearEnd,
+            Label: fmt.Sprintf("%s - %s", firstLastYear.Format("2 Jan 2006"), lastYearEnd.Format("2 Jan 2006")),
+        }
+    case "all_time":
+        start := joinedAt.In(istLocation)
+        if start.IsZero() {
+            start = now
+        }
+        return rangeKey, dateRange{Start: start, End: now, Label: "All Time"}
+    case "this_week":
+        return rangeKey, dateRange{Start: mondayOf(now), End: now, Label: "This Week"}
+    default:
+        return "this_week", dateRange{Start: mondayOf(now), End: now, Label: "This Week"}
+    }
+}
+
+// GET /gogoo/driver/ledger?range=this_week|last_week|this_month|last_month|this_year|last_year|all_time
 func GetDriverLedger(c *gin.Context) {
     userID := c.GetString("user_id")
     ctx    := context.Background()
     pool   := db.GetDB().GetPool()
 
     var driverID string
-    pool.QueryRow(ctx, `SELECT id FROM drivers WHERE user_id = $1`, userID).Scan(&driverID)
+    var joinedAt time.Time
+    pool.QueryRow(ctx, `SELECT id, created_at FROM drivers WHERE user_id = $1`, userID).Scan(&driverID, &joinedAt)
+
+    rangeKey, dr := resolveDateRange(c.Query("range"), joinedAt)
 
     rows, err := pool.Query(ctx, `
         SELECT
@@ -1422,10 +1503,10 @@ func GetDriverLedger(c *gin.Context) {
             de.created_at,
             de.booking_id
         FROM driver_earnings de
-        WHERE de.driver_id = $1
+        WHERE de.driver_id = $1 AND de.created_at BETWEEN $2 AND $3
         ORDER BY de.created_at DESC
-        LIMIT 50
-    `, driverID)
+        LIMIT 500
+    `, driverID, dr.Start, dr.End)
     if err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch ledger"})
         return
@@ -1443,16 +1524,31 @@ func GetDriverLedger(c *gin.Context) {
         BookingID   *string   `json:"booking_id"`
     }
     var entries []LedgerEntry
+    var totalEarned, totalDebited float64
     for rows.Next() {
         var e LedgerEntry
         rows.Scan(&e.ID, &e.Amount, &e.Type, &e.Description,
             &e.IsDebit, &e.DebitType, &e.CreatedAt, &e.BookingID)
         entries = append(entries, e)
+        if e.IsDebit {
+            totalDebited += e.Amount
+        } else {
+            totalEarned += e.Amount
+        }
     }
     if entries == nil {
         entries = []LedgerEntry{}
     }
-    c.JSON(http.StatusOK, gin.H{"entries": entries})
+    c.JSON(http.StatusOK, gin.H{
+        "range":         rangeKey,
+        "range_label":   dr.Label,
+        "start_date":    dr.Start,
+        "end_date":      dr.End,
+        "total_earned":  totalEarned,
+        "total_debited": totalDebited,
+        "net":           totalEarned - totalDebited,
+        "transactions":  entries,
+    })
 }
 
 // GET /gogoo/driver/earnings/summary
