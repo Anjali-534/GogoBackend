@@ -116,6 +116,8 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.GET("/bookings-pending", handlers.ListPendingBookings)
 		gogoo.GET("/bookings/:id", handlers.GetBooking)
 		gogoo.GET("/bookings/:id/cancel-preview", handlers.GetCancelPreview)
+		gogoo.GET("/bookings/:id/messages", handlers.GetRideMessages)
+		gogoo.POST("/bookings/:id/messages", handlers.SendRideMessage)
         gogoo.POST("/bookings/:id/rate", handlers.RateBooking)
         gogoo.POST("/bookings/:id/accept", handlers.AcceptBooking)
         gogoo.POST("/bookings/:id/verify-otp", handlers.VerifyRideOTP)
@@ -128,6 +130,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.PATCH("/drivers/:id/online", handlers.ToggleDriverOnline)
 		gogoo.PATCH("/drivers/:id/background-check", handlers.UpdateDriverBackgroundCheck)
 		gogoo.POST("/drivers/:id/location", handlers.UpdateDriverLocation)
+		gogoo.GET("/drivers/nearby-count", handlers.GetNearbyDriverCount)
 
 		// Live map (admin panels)
 		gogoo.GET("/live/drivers", handlers.ListLiveDrivers)

@@ -58,6 +58,11 @@ func main() {
 	} else {
 		log.Println("✓ Sent-statements table ready")
 	}
+	if err := handlers.MigrateRideMessages(); err != nil {
+		log.Printf("⚠ Ride-messages migration warning: %v", err)
+	} else {
+		log.Println("✓ Ride-chat table ready")
+	}
 
 	// Scheduled-ride dispatcher — ticks scheduled bookings into the normal
 	// searching/matching flow ~15 minutes before pickup.

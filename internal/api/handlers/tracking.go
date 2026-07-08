@@ -226,6 +226,24 @@ func GetBooking(c *gin.Context) {
 		resp["ride_otp"] = *rideOTP
 	}
 
+	// Ride-chat unread badge — count messages from the OTHER party relative
+	// to whoever is polling (rider sees unread driver messages, and vice versa).
+	callerUserID := c.GetString("user_id")
+	otherSenderType := "driver"
+	if driverID != nil {
+		var isDriverCaller bool
+		pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM drivers WHERE id = $1 AND user_id = $2::uuid)`, *driverID, callerUserID).Scan(&isDriverCaller)
+		if isDriverCaller {
+			otherSenderType = "rider"
+		}
+	}
+	var unreadCount int
+	pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM ride_messages
+		WHERE booking_id = $1 AND sender_type = $2 AND is_read = FALSE
+	`, bookingID, otherSenderType).Scan(&unreadCount)
+	resp["unread_message_count"] = unreadCount
+
 	if driverID != nil {
 		driver := gin.H{"id": *driverID}
 		if driverName != nil {
