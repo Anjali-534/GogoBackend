@@ -74,6 +74,8 @@ func DriverSignup(c *gin.Context) {
         GSTNumber         string `json:"gst_number"`
         ReferredByCode    string `json:"referred_by_code"`
         MVAGDeclarationAccepted bool `json:"mvag_declaration_accepted"`
+        DateOfBirth       string `json:"date_of_birth"` // optional, "2006-01-02"
+        Address           string `json:"address"`       // optional
     }
     if err := c.ShouldBindJSON(&req); err != nil {
         c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -82,6 +84,15 @@ func DriverSignup(c *gin.Context) {
     if !req.MVAGDeclarationAccepted {
         c.JSON(http.StatusBadRequest, gin.H{"error": "You must accept the MVAG self-declaration to sign up"})
         return
+    }
+    var dateOfBirth interface{}
+    if req.DateOfBirth != "" {
+        parsed, err := time.Parse("2006-01-02", req.DateOfBirth)
+        if err != nil {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "date_of_birth must be in YYYY-MM-DD format"})
+            return
+        }
+        dateOfBirth = parsed
     }
     if req.VehicleType == "" { req.VehicleType = "cab_4w" }
     if req.VehicleCategory == "" {
@@ -122,9 +133,10 @@ func DriverSignup(c *gin.Context) {
         return
     }
     if _, err := tx.Exec(ctx,
-        `INSERT INTO drivers (id,user_id,phone,license_number,vehicle_type,vehicle_category,vehicle_number,vehicle_model,vehicle_color,bank_account_holder,bank_account_number,bank_ifsc,bank_name,upi_id,gst_number,referral_code,mvag_declaration_accepted,mvag_declaration_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW())`,
+        `INSERT INTO drivers (id,user_id,phone,license_number,vehicle_type,vehicle_category,vehicle_number,vehicle_model,vehicle_color,bank_account_holder,bank_account_number,bank_ifsc,bank_name,upi_id,gst_number,referral_code,mvag_declaration_accepted,mvag_declaration_at,date_of_birth,address) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW(),$18,$19)`,
         driverID, userID, req.Phone, req.LicenseNum, req.VehicleType, req.VehicleCategory, req.VehicleNum, req.VehicleModel, req.VehicleColor,
         nullIfEmpty(req.BankAccountHolder), nullIfEmpty(req.BankAccountNumber), nullIfEmpty(req.BankIFSC), nullIfEmpty(req.BankName), nullIfEmpty(req.UPIID), nullIfEmpty(req.GSTNumber), referralCode, req.MVAGDeclarationAccepted,
+        dateOfBirth, nullIfEmpty(req.Address),
     ); err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create driver: " + err.Error()})
         return
@@ -495,7 +507,9 @@ func ListDrivers(c *gin.Context) {
             COALESCE(d.background_check_status,'pending') AS background_check_status,
             COALESCE(d.background_check_notes,'')          AS background_check_notes,
             COALESCE(d.background_checked_by,'')           AS background_checked_by,
-            d.background_checked_at
+            d.background_checked_at,
+            d.date_of_birth,
+            d.address
         FROM drivers d
         LEFT JOIN users u ON u.id = d.user_id
         ORDER BY d.created_at DESC
@@ -524,12 +538,15 @@ func ListDrivers(c *gin.Context) {
         var documentsStatus *string
         var bgStatus, bgNotes, bgCheckedBy string
         var bgCheckedAt *time.Time
+        var dateOfBirth *time.Time
+        var address *string
         if err := rows.Scan(
             &id, &userID, &name, &email, &phone, &vType, &vNum, &vModel,
             &isVerified, &isOnline, &isActive, &isBlocked, &blockedUntil, &blockReason,
             &rating, &totalRides, &earnings, &createdAt,
             &walletBalance, &isWalletBlocked, &registrationFeePaid, &documentsStatus,
             &bgStatus, &bgNotes, &bgCheckedBy, &bgCheckedAt,
+            &dateOfBirth, &address,
         ); err != nil {
             log.Printf("ListDrivers scan error: %v", err)
             continue
@@ -573,6 +590,8 @@ func ListDrivers(c *gin.Context) {
             "background_check_notes":  bgNotes,
             "background_checked_by":   bgCheckedBy,
             "background_checked_at":   bgCheckedAt,
+            "date_of_birth":           dateOfBirth,
+            "address":                 address,
         })
     }
     if drivers == nil {
@@ -609,6 +628,8 @@ func GetDriverByID(c *gin.Context) {
     var walletBlockedReason *string
     var referralCode, referredByCode *string
     var locationUpdatedAt *time.Time
+    var dateOfBirth *time.Time
+    var address *string
 
     err := pool.QueryRow(ctx, `
         SELECT
@@ -652,7 +673,9 @@ func GetDriverByID(c *gin.Context) {
             d.referral_code,
             d.referred_by_code,
             COALESCE(d.first_trip_completed, false),
-            d.location_updated_at
+            d.location_updated_at,
+            d.date_of_birth,
+            d.address
         FROM drivers d
         LEFT JOIN users u ON u.id = d.user_id
         WHERE d.id = $1
@@ -669,6 +692,7 @@ func GetDriverByID(c *gin.Context) {
         &walletBalance, &isWalletBlocked, &registrationFeePaid, &walletBlockedReason,
         &bankName, &gstNumber, &referralCode, &referredByCode,
         &firstTripCompleted, &locationUpdatedAt,
+        &dateOfBirth, &address,
     )
     if err != nil {
         c.JSON(http.StatusNotFound, gin.H{"error": "driver not found: " + err.Error()})
@@ -700,6 +724,8 @@ func GetDriverByID(c *gin.Context) {
         "referred_by_code":      referredByCode,
         "first_trip_completed":  firstTripCompleted,
         "location_updated_at":   locationUpdatedAt,
+        "date_of_birth":         dateOfBirth,
+        "address":               address,
     })
 }
 
