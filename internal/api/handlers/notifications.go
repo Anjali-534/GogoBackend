@@ -9,10 +9,21 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/deploykit/backend/internal/dateutil"
 	"github.com/deploykit/backend/internal/db"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
+
+// nullableTime returns t as a *time.Time when the range filter is active, or
+// nil otherwise — used so the query's `$2::timestamptz IS NULL` branch can
+// pass through unfiltered when no ?range= was requested.
+func nullableTime(active bool, t time.Time) *time.Time {
+	if !active {
+		return nil
+	}
+	return &t
+}
 
 // MigrateNotifications creates or upgrades the notifications tables.
 func MigrateNotifications() error {
@@ -668,6 +679,12 @@ func AdminListNotifications(c *gin.Context) {
 		}
 	}
 
+	var dr dateutil.Range
+	hasRange := c.Query("range") != ""
+	if hasRange {
+		_, dr = dateutil.Resolve(c.Query("range"), time.Time{}, c.Query("from"), c.Query("to"))
+	}
+
 	rows, err := pool.Query(ctx, `
 		SELECT n.id, n.title, n.body, n.type, n.target_audience,
 		       COALESCE(n.target_category,'')        AS target_category,
@@ -681,8 +698,11 @@ func AdminListNotifications(c *gin.Context) {
 		       (SELECT COUNT(*) FROM notification_reads nr WHERE nr.notification_id = n.id) AS read_count
 		FROM notifications n
 		WHERE ($1 = '' OR n.target_category = $1)
-		ORDER BY n.created_at DESC
-	`, categoryFilter)
+		  AND ($2::timestamptz IS NULL OR n.created_at >= $2)
+		  AND ($3::timestamptz IS NULL OR n.created_at <= $3)
+		ORDER BY n.created_at `+dateutil.ParseSort(c.Query("sort"))+`
+		LIMIT 500
+	`, categoryFilter, nullableTime(hasRange, dr.Start), nullableTime(hasRange, dr.End))
 	if err != nil {
 		log.Printf("AdminListNotifications DB error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

@@ -10,6 +10,7 @@ import (
     "strings"
     "time"
 
+    "github.com/deploykit/backend/internal/dateutil"
     "github.com/deploykit/backend/internal/db"
     "github.com/gin-gonic/gin"
     "github.com/google/uuid"
@@ -421,7 +422,8 @@ func scanReferralRows(rows pgx.Rows) []referralRow {
     return out
 }
 
-// GET /gogoo/referral/all — full referral tree + summary stats for the master panel.
+// GET /gogoo/referral/all?range=&from=&to=&sort= — full referral tree +
+// summary stats for the master panel.
 func AdminListReferrals(c *gin.Context) {
     ctx := context.Background()
     pool := db.GetDB().GetPool()
@@ -432,6 +434,24 @@ func AdminListReferrals(c *gin.Context) {
     }
     defer rows.Close()
     parsed := scanReferralRows(rows)
+
+    // range/sort are applied here (not in referralAdminQuery, which the xlsx
+    // export also uses unfiltered) so the export always keeps the full set.
+    if rangeKey := c.Query("range"); rangeKey != "" {
+        _, dr := dateutil.Resolve(rangeKey, time.Time{}, c.Query("from"), c.Query("to"))
+        filtered := parsed[:0]
+        for _, r := range parsed {
+            if !r.CreatedAt.Before(dr.Start) && !r.CreatedAt.After(dr.End) {
+                filtered = append(filtered, r)
+            }
+        }
+        parsed = filtered
+    }
+    if dateutil.ParseSort(c.Query("sort")) == "ASC" {
+        for i, j := 0, len(parsed)-1; i < j; i, j = i+1, j-1 {
+            parsed[i], parsed[j] = parsed[j], parsed[i]
+        }
+    }
 
     out := []gin.H{}
     totalReferrals, riderReferrals, driverReferrals := 0, 0, 0

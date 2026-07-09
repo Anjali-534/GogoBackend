@@ -6,11 +6,12 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/deploykit/backend/internal/dateutil"
 	"github.com/deploykit/backend/internal/db"
 	"github.com/gin-gonic/gin"
 )
 
-// GET /gogoo/support/tickets
+// GET /gogoo/support/tickets?status=&priority=&type=&range=&from=&to=&sort=
 func GetSupportTickets(c *gin.Context) {
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
@@ -57,14 +58,32 @@ func GetSupportTickets(c *gin.Context) {
 		args = append(args, ticketType)
 		argIdx++
 	}
+	if rangeKey := c.Query("range"); rangeKey != "" {
+		_, dr := dateutil.Resolve(rangeKey, time.Time{}, c.Query("from"), c.Query("to"))
+		query += ` AND t.created_at >= $` + fmt.Sprintf("%d", argIdx)
+		args = append(args, dr.Start)
+		argIdx++
+		query += ` AND t.created_at <= $` + fmt.Sprintf("%d", argIdx)
+		args = append(args, dr.End)
+		argIdx++
+	}
 
-	query += ` ORDER BY
-		CASE t.priority
-			WHEN 'urgent' THEN 1
-			WHEN 'high' THEN 2
-			WHEN 'medium' THEN 3
-			ELSE 4
-		END, t.created_at DESC`
+	// No explicit sort param: keep the original priority-first ordering (urgent
+	// tickets float to the top regardless of date) for backward compatibility.
+	// An explicit sort=asc|desc means the caller tapped the Oldest/Newest
+	// toggle and wants a literal date sort, not priority grouping.
+	if sortParam := c.Query("sort"); sortParam != "" {
+		query += ` ORDER BY t.created_at ` + dateutil.ParseSort(sortParam)
+	} else {
+		query += ` ORDER BY
+			CASE t.priority
+				WHEN 'urgent' THEN 1
+				WHEN 'high' THEN 2
+				WHEN 'medium' THEN 3
+				ELSE 4
+			END, t.created_at DESC`
+	}
+	query += ` LIMIT 500`
 
 	rows, err := pool.Query(ctx, query, args...)
 	if err != nil {

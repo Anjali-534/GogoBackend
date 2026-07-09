@@ -6,24 +6,32 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/deploykit/backend/internal/dateutil"
 	"github.com/deploykit/backend/internal/db"
 	"github.com/gin-gonic/gin"
 	"github.com/xuri/excelize/v2"
 )
 
 // ============================================================
-// GET /gogoo/riders — list of all riders (for the dashboard)
+// GET /gogoo/riders?range=&from=&to=&sort= — list of all riders (dashboard)
 // ============================================================
 func ListRiders(c *gin.Context) {
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 
-	rows, err := pool.Query(ctx, `
+	query := `
 		SELECT r.id, COALESCE(r.user_id::text,''), u.name, u.email, r.phone,
 		       r.rating, r.total_rides, r.created_at
-		FROM riders r JOIN users u ON u.id = r.user_id
-		ORDER BY r.created_at DESC LIMIT 500
-	`)
+		FROM riders r JOIN users u ON u.id = r.user_id`
+	args := []interface{}{}
+	if rangeKey := c.Query("range"); rangeKey != "" {
+		_, dr := dateutil.Resolve(rangeKey, time.Time{}, c.Query("from"), c.Query("to"))
+		args = append(args, dr.Start, dr.End)
+		query += " WHERE r.created_at >= $1 AND r.created_at <= $2"
+	}
+	query += " ORDER BY r.created_at " + dateutil.ParseSort(c.Query("sort")) + " LIMIT 500"
+
+	rows, err := pool.Query(ctx, query, args...)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return

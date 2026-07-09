@@ -13,6 +13,7 @@ import (
     "time"
 
     "github.com/deploykit/backend/internal/config"
+    "github.com/deploykit/backend/internal/dateutil"
     "github.com/deploykit/backend/internal/db"
     "github.com/gin-gonic/gin"
     "github.com/golang-jwt/jwt/v5"
@@ -315,6 +316,10 @@ func ListBookings(c *gin.Context) {
     pool := db.GetDB().GetPool()
     status := c.Query("status")
     limit := 50
+    if c.Query("range") == "all_time" {
+        limit = 2000
+    }
+    sortDir := dateutil.ParseSort(c.Query("sort"))
     query := `SELECT b.id, b.status, b.pickup_address, b.drop_address, b.estimated_fare, b.final_fare, b.created_at,
         u_r.name as rider_name, COALESCE(r.phone,'') as rider_phone,
         COALESCE(u_d.name,'') as driver_name, COALESCE(d.phone,'') as driver_phone,
@@ -334,12 +339,23 @@ func ListBookings(c *gin.Context) {
         LEFT JOIN drivers d ON d.id=b.driver_id
         LEFT JOIN users u_d ON u_d.id=d.user_id
         JOIN service_types st ON st.id=b.service_type_id`
+    conds := []string{}
     args := []interface{}{}
     if status != "" {
-        query += " WHERE b.status=$1"
         args = append(args, status)
+        conds = append(conds, "b.status=$"+fmt.Sprintf("%d", len(args)))
     }
-    query += " ORDER BY b.created_at DESC LIMIT $" + fmt.Sprintf("%d", len(args)+1)
+    if rangeKey := c.Query("range"); rangeKey != "" {
+        _, dr := dateutil.Resolve(rangeKey, time.Time{}, c.Query("from"), c.Query("to"))
+        args = append(args, dr.Start)
+        conds = append(conds, "b.created_at>=$"+fmt.Sprintf("%d", len(args)))
+        args = append(args, dr.End)
+        conds = append(conds, "b.created_at<=$"+fmt.Sprintf("%d", len(args)))
+    }
+    if len(conds) > 0 {
+        query += " WHERE " + strings.Join(conds, " AND ")
+    }
+    query += " ORDER BY b.created_at " + sortDir + " LIMIT $" + fmt.Sprintf("%d", len(args)+1)
     args = append(args, limit)
     rows, err := pool.Query(ctx, query, args...)
     if err != nil {
@@ -490,6 +506,13 @@ func ListDrivers(c *gin.Context) {
         return
     }
     defer rows.Close()
+
+    var dr dateutil.Range
+    hasRange := c.Query("range") != ""
+    if hasRange {
+        _, dr = dateutil.Resolve(c.Query("range"), time.Time{}, c.Query("from"), c.Query("to"))
+    }
+
     var drivers []map[string]interface{}
     for rows.Next() {
         var id, userID, name, email, phone, vType, vNum, vModel, blockReason string
@@ -516,6 +539,9 @@ func ListDrivers(c *gin.Context) {
         }
         vCategory := vehicleCategoryFromType(vType)
         if categoryFilter != "" && vCategory != categoryFilter {
+            continue
+        }
+        if hasRange && (createdAt.Before(dr.Start) || createdAt.After(dr.End)) {
             continue
         }
         drivers = append(drivers, map[string]interface{}{
@@ -551,6 +577,12 @@ func ListDrivers(c *gin.Context) {
     }
     if drivers == nil {
         drivers = []map[string]interface{}{}
+    }
+    // Rows arrive newest-first from SQL; reverse in place for oldest-first.
+    if dateutil.ParseSort(c.Query("sort")) == "ASC" {
+        for i, j := 0, len(drivers)-1; i < j; i, j = i+1, j-1 {
+            drivers[i], drivers[j] = drivers[j], drivers[i]
+        }
     }
     c.JSON(http.StatusOK, drivers)
 }
@@ -815,10 +847,19 @@ func GetAnalytics(c *gin.Context) {
     })
 }
 
+// GET /gogoo/payments?range=&from=&to=&sort=
 func ListPayments(c *gin.Context) {
     ctx := context.Background()
     pool := db.GetDB().GetPool()
-    rows, err := pool.Query(ctx, `SELECT p.id, p.amount, p.platform_fee, p.driver_earnings, p.method, p.status, p.created_at, u.name as rider_name, b.pickup_address, b.drop_address FROM payments p JOIN riders r ON r.id=p.rider_id JOIN users u ON u.id=r.user_id JOIN bookings b ON b.id=p.booking_id ORDER BY p.created_at DESC LIMIT 100`)
+    query := `SELECT p.id, p.amount, p.platform_fee, p.driver_earnings, p.method, p.status, p.created_at, u.name as rider_name, b.pickup_address, b.drop_address FROM payments p JOIN riders r ON r.id=p.rider_id JOIN users u ON u.id=r.user_id JOIN bookings b ON b.id=p.booking_id`
+    args := []interface{}{}
+    if rangeKey := c.Query("range"); rangeKey != "" {
+        _, dr := dateutil.Resolve(rangeKey, time.Time{}, c.Query("from"), c.Query("to"))
+        args = append(args, dr.Start, dr.End)
+        query += " WHERE p.created_at >= $1 AND p.created_at <= $2"
+    }
+    query += " ORDER BY p.created_at " + dateutil.ParseSort(c.Query("sort")) + " LIMIT 100"
+    rows, err := pool.Query(ctx, query, args...)
     if err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
         return
@@ -1402,82 +1443,18 @@ func GetDriverWallet(c *gin.Context) {
     })
 }
 
-// istLocation is a fixed +5:30 offset (never DST-adjusted, matching India)
-// rather than time.LoadLocation("Asia/Kolkata") — the Alpine base image this
-// backend ships on has no tzdata package installed, so LoadLocation would
-// fail at runtime. A fixed zone needs no tzdata and is exactly correct for
-// India regardless.
-var istLocation = time.FixedZone("IST", 5*3600+30*60)
+// istLocation/dateRange/resolveDateRange are thin aliases over the shared
+// internal/dateutil package (extracted so every list endpoint needing
+// date-range filtering — not just the driver ledger — calls the same tested
+// IST boundary math). joinedAt is the driver's drivers.created_at, used only
+// for "all_time" — that window starts from when the driver actually joined,
+// never an arbitrary lookback like 90 days.
+var istLocation = dateutil.ISTLocation
 
-// dateRange is a resolved [Start, End] window plus a human-readable label
-// for one of the driver-facing ledger/earnings range filters.
-type dateRange struct {
-    Start time.Time
-    End   time.Time
-    Label string
-}
+type dateRange = dateutil.Range
 
-// resolveDateRange computes the [Start, End] window for a named range key,
-// in IST. joinedAt is the driver's drivers.created_at, used only for
-// "all_time" — that window starts from when the driver actually joined,
-// never an arbitrary lookback like 90 days. Unknown/empty keys fall back to
-// "this_week", matching most drivers' mental model of "how am I doing this
-// week".
 func resolveDateRange(rangeKey string, joinedAt time.Time) (string, dateRange) {
-    now := time.Now().In(istLocation)
-    startOfDay := func(t time.Time) time.Time {
-        return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, istLocation)
-    }
-    mondayOf := func(t time.Time) time.Time {
-        wd := int(t.Weekday())
-        if wd == 0 {
-            wd = 7 // Sunday -> 7, so the offset below still lands on Monday
-        }
-        return startOfDay(t).AddDate(0, 0, -(wd - 1))
-    }
-
-    switch rangeKey {
-    case "last_week":
-        thisMonday := mondayOf(now)
-        lastMonday := thisMonday.AddDate(0, 0, -7)
-        lastSunday := thisMonday.Add(-time.Second)
-        return rangeKey, dateRange{
-            Start: lastMonday, End: lastSunday,
-            Label: fmt.Sprintf("%s - %s", lastMonday.Format("2 Jan 2006"), lastSunday.Format("2 Jan 2006")),
-        }
-    case "this_month":
-        first := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, istLocation)
-        return rangeKey, dateRange{Start: first, End: now, Label: "This Month"}
-    case "last_month":
-        firstThisMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, istLocation)
-        lastMonthEnd := firstThisMonth.Add(-time.Second)
-        firstLastMonth := time.Date(lastMonthEnd.Year(), lastMonthEnd.Month(), 1, 0, 0, 0, 0, istLocation)
-        return rangeKey, dateRange{
-            Start: firstLastMonth, End: lastMonthEnd,
-            Label: fmt.Sprintf("%s - %s", firstLastMonth.Format("2 Jan 2006"), lastMonthEnd.Format("2 Jan 2006")),
-        }
-    case "this_year":
-        first := time.Date(now.Year(), 1, 1, 0, 0, 0, 0, istLocation)
-        return rangeKey, dateRange{Start: first, End: now, Label: "This Year"}
-    case "last_year":
-        firstThisYear := time.Date(now.Year(), 1, 1, 0, 0, 0, 0, istLocation)
-        lastYearEnd := firstThisYear.Add(-time.Second)
-        firstLastYear := time.Date(lastYearEnd.Year(), 1, 1, 0, 0, 0, 0, istLocation)
-        return rangeKey, dateRange{
-            Start: firstLastYear, End: lastYearEnd,
-            Label: fmt.Sprintf("%s - %s", firstLastYear.Format("2 Jan 2006"), lastYearEnd.Format("2 Jan 2006")),
-        }
-    case "all_time":
-        start := joinedAt.In(istLocation)
-        if start.IsZero() {
-            start = now
-        }
-        return rangeKey, dateRange{Start: start, End: now, Label: "All Time"}
-    case "this_week":
-        return rangeKey, dateRange{Start: mondayOf(now), End: now, Label: "This Week"}
-    default:
-        return "this_week", dateRange{Start: mondayOf(now), End: now, Label: "This Week"}
-    }
+    return dateutil.Resolve(rangeKey, joinedAt, "", "")
 }
 
 // GET /gogoo/driver/ledger?range=this_week|last_week|this_month|last_month|this_year|last_year|all_time
