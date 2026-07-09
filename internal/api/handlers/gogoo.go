@@ -593,9 +593,6 @@ func GetDriverByID(c *gin.Context) {
     ctx := context.Background()
     pool := db.GetDB().GetPool()
 
-    // 011-migration columns (wallet_balance, is_wallet_blocked, wallet_blocked_reason,
-    // registration_fee_paid) are NOT selected here — they may not exist in production yet.
-    // Defaults are returned in the JSON response below.
     var id, userID, name, email, phone, vType, vCategory, vNum, vModel, blockReason string
     var isVerified, isOnline, isActive, isBlocked bool
     var rating, earnings float64
@@ -607,6 +604,9 @@ func GetDriverByID(c *gin.Context) {
     var mvagAt *time.Time
     var bgStatus, bgNotes, bgCheckedBy string
     var bgCheckedAt *time.Time
+    var walletBalance float64
+    var isWalletBlocked, registrationFeePaid bool
+    var walletBlockedReason *string
 
     err := pool.QueryRow(ctx, `
         SELECT
@@ -640,7 +640,11 @@ func GetDriverByID(c *gin.Context) {
             COALESCE(d.background_check_status,'pending'),
             COALESCE(d.background_check_notes,''),
             COALESCE(d.background_checked_by,''),
-            d.background_checked_at
+            d.background_checked_at,
+            COALESCE(d.wallet_balance, -700.00),
+            COALESCE(d.is_wallet_blocked, false),
+            COALESCE(d.registration_fee_paid, false),
+            d.wallet_blocked_reason
         FROM drivers d
         LEFT JOIN users u ON u.id = d.user_id
         WHERE d.id = $1
@@ -654,6 +658,7 @@ func GetDriverByID(c *gin.Context) {
         &bankHolder, &bankNum, &bankIFSC, &upiID,
         &mvagAccepted, &mvagAt,
         &bgStatus, &bgNotes, &bgCheckedBy, &bgCheckedAt,
+        &walletBalance, &isWalletBlocked, &registrationFeePaid, &walletBlockedReason,
     )
     if err != nil {
         c.JSON(http.StatusNotFound, gin.H{"error": "driver not found: " + err.Error()})
@@ -677,11 +682,10 @@ func GetDriverByID(c *gin.Context) {
         "license_number": licenseNumber, "vehicle_color": vehicleColor,
         "bank_account_holder": bankHolder, "bank_account_number": bankNum,
         "bank_ifsc": bankIFSC, "upi_id": upiID,
-        // 011-migration columns — defaults until migration runs in production
-        "wallet_balance":        -700.00,
-        "is_wallet_blocked":     false,
-        "wallet_blocked_reason": nil,
-        "registration_fee_paid": false,
+        "wallet_balance":        walletBalance,
+        "is_wallet_blocked":     isWalletBlocked,
+        "wallet_blocked_reason": walletBlockedReason,
+        "registration_fee_paid": registrationFeePaid,
     })
 }
 
