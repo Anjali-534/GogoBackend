@@ -256,8 +256,27 @@ func SendChatMessage(c *gin.Context) {
 
 	pool.Exec(ctx, `UPDATE support_tickets SET updated_at = NOW() WHERE id = $1`, ticketID)
 
-	// No auto-reply here anymore — freeform follow-up messages just wait for
-	// a human agent (or the rider re-opens the FAQ list / escalates).
+	// No bot auto-reply here — freeform follow-up messages wait for a human
+	// agent. That silence reads as "the bot isn't responding" unless we say
+	// so once per ticket, so drop a single system note the first time a
+	// rider/driver sends a follow-up without having escalated yet.
+	if req.SenderType == "rider" || req.SenderType == "driver" {
+		var alreadyNoted bool
+		pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM support_messages
+				WHERE ticket_id = $1 AND sender_type = 'system'
+			)
+		`, ticketID).Scan(&alreadyNoted)
+		if !alreadyNoted {
+			pool.Exec(ctx, `
+				INSERT INTO support_messages
+					(ticket_id, sender_type, sender_id, sender_name, message)
+				VALUES ($1, 'system', 'system', 'System', 'Our support team will review your message and reply here soon.')
+			`, ticketID)
+		}
+	}
+
 	c.JSON(http.StatusCreated, gin.H{"message": "sent"})
 }
 

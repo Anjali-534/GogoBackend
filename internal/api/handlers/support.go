@@ -28,9 +28,9 @@ func GetSupportTickets(c *gin.Context) {
 			t.refund_status, t.created_at, t.updated_at,
 			t.resolved_at, t.resolution,
 			COALESCE(u.name, '') as rider_name,
-			COALESCE(u.phone, '') as rider_phone,
+			COALESCE(r.phone, '') as rider_phone,
 			COALESCE(du.name, '') as driver_name,
-			COALESCE(du.phone, '') as driver_phone,
+			COALESCE(d.phone, '') as driver_phone,
 			t.booking_id
 		FROM support_tickets t
 		LEFT JOIN riders r ON r.id = t.rider_id
