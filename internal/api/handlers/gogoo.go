@@ -599,14 +599,16 @@ func GetDriverByID(c *gin.Context) {
     var totalRides int
     var createdAt time.Time
     var blockedUntil *time.Time
-    var licenseNumber, vehicleColor, bankHolder, bankNum, bankIFSC, upiID *string
+    var licenseNumber, vehicleColor, bankHolder, bankNum, bankIFSC, upiID, bankName, gstNumber *string
     var mvagAccepted bool
     var mvagAt *time.Time
     var bgStatus, bgNotes, bgCheckedBy string
     var bgCheckedAt *time.Time
     var walletBalance float64
-    var isWalletBlocked, registrationFeePaid bool
+    var isWalletBlocked, registrationFeePaid, firstTripCompleted bool
     var walletBlockedReason *string
+    var referralCode, referredByCode *string
+    var locationUpdatedAt *time.Time
 
     err := pool.QueryRow(ctx, `
         SELECT
@@ -644,7 +646,13 @@ func GetDriverByID(c *gin.Context) {
             COALESCE(d.wallet_balance, -700.00),
             COALESCE(d.is_wallet_blocked, false),
             COALESCE(d.registration_fee_paid, false),
-            d.wallet_blocked_reason
+            d.wallet_blocked_reason,
+            d.bank_name,
+            d.gst_number,
+            d.referral_code,
+            d.referred_by_code,
+            COALESCE(d.first_trip_completed, false),
+            d.location_updated_at
         FROM drivers d
         LEFT JOIN users u ON u.id = d.user_id
         WHERE d.id = $1
@@ -659,6 +667,8 @@ func GetDriverByID(c *gin.Context) {
         &mvagAccepted, &mvagAt,
         &bgStatus, &bgNotes, &bgCheckedBy, &bgCheckedAt,
         &walletBalance, &isWalletBlocked, &registrationFeePaid, &walletBlockedReason,
+        &bankName, &gstNumber, &referralCode, &referredByCode,
+        &firstTripCompleted, &locationUpdatedAt,
     )
     if err != nil {
         c.JSON(http.StatusNotFound, gin.H{"error": "driver not found: " + err.Error()})
@@ -681,11 +691,15 @@ func GetDriverByID(c *gin.Context) {
         "is_blocked": isBlocked, "blocked_until": blockedUntil, "block_reason": blockReason,
         "license_number": licenseNumber, "vehicle_color": vehicleColor,
         "bank_account_holder": bankHolder, "bank_account_number": bankNum,
-        "bank_ifsc": bankIFSC, "upi_id": upiID,
+        "bank_ifsc": bankIFSC, "upi_id": upiID, "bank_name": bankName, "gst_number": gstNumber,
         "wallet_balance":        walletBalance,
         "is_wallet_blocked":     isWalletBlocked,
         "wallet_blocked_reason": walletBlockedReason,
         "registration_fee_paid": registrationFeePaid,
+        "referral_code":         referralCode,
+        "referred_by_code":      referredByCode,
+        "first_trip_completed":  firstTripCompleted,
+        "location_updated_at":   locationUpdatedAt,
     })
 }
 
