@@ -454,10 +454,6 @@ func ListDrivers(c *gin.Context) {
     }
     ctx := context.Background()
     pool := db.GetDB().GetPool()
-    // Only select columns guaranteed to exist in the base 002 schema + 009 blocking migration.
-    // wallet_balance / is_wallet_blocked / registration_fee_paid (011) and vehicle_category
-    // are omitted here because they may not exist in the production DB yet.
-    // Defaults are supplied below in Go so the JSON response shape stays consistent.
     rows, err := pool.Query(ctx, `
         SELECT
             d.id,
@@ -478,6 +474,9 @@ func ListDrivers(c *gin.Context) {
             COALESCE(d.total_rides,   0) AS total_rides,
             COALESCE(d.total_earnings,0) AS total_earnings,
             d.created_at,
+            COALESCE(d.wallet_balance, -700.00)        AS wallet_balance,
+            COALESCE(d.is_wallet_blocked, FALSE)        AS is_wallet_blocked,
+            COALESCE(d.registration_fee_paid, FALSE)    AS registration_fee_paid,
             -- Coarse list-view badge only — NOT the security gate. The
             -- authoritative per-category check (common docs, now including
             -- the MVAG Police Clearance Certificate, + vehicle-category
@@ -517,17 +516,19 @@ func ListDrivers(c *gin.Context) {
     for rows.Next() {
         var id, userID, name, email, phone, vType, vNum, vModel, blockReason string
         var isVerified, isOnline, isActive, isBlocked bool
-        var rating, earnings float64
+        var rating, earnings, walletBalance float64
         var totalRides int
         var createdAt time.Time
         var blockedUntil *time.Time
+        var isWalletBlocked, registrationFeePaid bool
         var documentsStatus *string
         var bgStatus, bgNotes, bgCheckedBy string
         var bgCheckedAt *time.Time
         if err := rows.Scan(
             &id, &userID, &name, &email, &phone, &vType, &vNum, &vModel,
             &isVerified, &isOnline, &isActive, &isBlocked, &blockedUntil, &blockReason,
-            &rating, &totalRides, &earnings, &createdAt, &documentsStatus,
+            &rating, &totalRides, &earnings, &createdAt,
+            &walletBalance, &isWalletBlocked, &registrationFeePaid, &documentsStatus,
             &bgStatus, &bgNotes, &bgCheckedBy, &bgCheckedAt,
         ); err != nil {
             log.Printf("ListDrivers scan error: %v", err)
@@ -563,10 +564,9 @@ func ListDrivers(c *gin.Context) {
             "rating":                rating,
             "total_rides":           totalRides,
             "total_earnings":        earnings,
-            // 011-migration columns — default until migration runs in production
-            "wallet_balance":        -700.00,
-            "is_wallet_blocked":     false,
-            "registration_fee_paid": false,
+            "wallet_balance":        walletBalance,
+            "is_wallet_blocked":     isWalletBlocked,
+            "registration_fee_paid": registrationFeePaid,
             "created_at":            createdAt,
             "documents_status":      docStatus,
             "background_check_status": bgStatus,
