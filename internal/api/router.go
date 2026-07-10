@@ -112,7 +112,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	{
 		// Bookings
 		gogoo.POST("/bookings", handlers.CreateBooking)
-		gogoo.GET("/bookings", handlers.ListBookings)
+		gogoo.GET("/bookings", middleware.RequirePanel("cab", "truck", "ambulance", "support"), handlers.ListBookings)
 		gogoo.GET("/bookings-pending", handlers.ListPendingBookings)
 		gogoo.GET("/bookings/:id", handlers.GetBooking)
 		gogoo.GET("/bookings/:id/cancel-preview", handlers.GetCancelPreview)
@@ -125,7 +125,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 
 		// Drivers
 		gogoo.GET("/drivers", middleware.RequirePanel("cab", "truck", "ambulance", "support"), handlers.ListDrivers)
-		gogoo.GET("/drivers/:id", handlers.GetDriverByID)
+		gogoo.GET("/drivers/:id", middleware.RequirePanel("cab", "truck", "ambulance", "support"), handlers.GetDriverByID)
 		gogoo.PATCH("/drivers/:id/verify", handlers.VerifyDriver)
 		gogoo.PATCH("/drivers/:id/online", handlers.ToggleDriverOnline)
 		gogoo.PATCH("/drivers/:id/background-check", handlers.UpdateDriverBackgroundCheck)
@@ -173,7 +173,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.GET("/driver/earnings/summary", handlers.GetEarningsSummary)
 
 		// Admin driver payments
-		gogoo.GET("/admin/driver-payments", handlers.AdminDriverPayments)
+		gogoo.GET("/admin/driver-payments", middleware.RequirePanel("support"), handlers.AdminDriverPayments)
 
 		// Analytics
 		gogoo.GET("/analytics",                  handlers.GetAnalytics)
