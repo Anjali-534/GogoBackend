@@ -214,8 +214,8 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.GET("/ambulance/hospital/notifications",    handlers.ListHospitalNotifications)
 
 		// Panel access management (admin)
-		gogoo.GET("/admin/panel-access",                  handlers.GetPanelAccess)
-		gogoo.PATCH("/admin/panel-access/:id/password",   handlers.UpdatePanelPassword)
+		gogoo.GET("/admin/panel-access",                  middleware.RequirePanel(), handlers.GetPanelAccess)
+		gogoo.PATCH("/admin/panel-access/:id/password",   middleware.RequirePanel(), handlers.UpdatePanelPassword)
 
 		// Ambulance — NGO management
 		gogoo.GET("/ambulance/ngos",                      middleware.RequirePanel("ambulance"), handlers.GetNGOs)
