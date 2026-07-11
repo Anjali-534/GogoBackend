@@ -211,6 +211,9 @@ func CreateBooking(c *gin.Context) {
         // Scheduled rides
         IsScheduled bool   `json:"is_scheduled"`
         ScheduledAt string `json:"scheduled_at"` // ISO 8601
+        // Receiver details (truck/parcel deliveries)
+        ReceiverName  *string `json:"receiver_name"`
+        ReceiverPhone *string `json:"receiver_phone"`
     }
     if err := c.ShouldBindJSON(&req); err != nil {
         log.Printf("CreateBooking bind error: %v", err)
@@ -275,12 +278,12 @@ func CreateBooking(c *gin.Context) {
         INSERT INTO bookings
             (id,rider_id,service_type_id,status,pickup_lat,pickup_lng,pickup_address,
              drop_lat,drop_lng,drop_address,estimated_fare,distance_km,ride_otp,source,
-             is_scheduled,scheduled_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+             is_scheduled,scheduled_at,receiver_name,receiver_phone)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
     `,
         bookingID, req.RiderID, req.ServiceTypeID, status, req.PickupLat, req.PickupLng, req.PickupAddress,
         req.DropLat, req.DropLng, req.DropAddress, finalFareEstimate, req.DistanceKm, otp, req.Source,
-        req.IsScheduled && svcCategory != "ambulance", scheduledAt)
+        req.IsScheduled && svcCategory != "ambulance", scheduledAt, req.ReceiverName, req.ReceiverPhone)
     if err != nil {
         log.Printf("CreateBooking insert error: %v", err)
         c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create booking: " + err.Error()})
@@ -344,7 +347,8 @@ func ListBookings(c *gin.Context) {
         b.patient_name, b.purpose_type, b.source,
         b.accepted_at, b.cancelled_at, COALESCE(b.cancelled_by,'') as cancelled_by,
         COALESCE(b.cancel_reason,'') as cancel_reason, COALESCE(b.cancellation_fee,0) as cancellation_fee,
-        COALESCE(b.is_scheduled,false) as is_scheduled, b.scheduled_at
+        COALESCE(b.is_scheduled,false) as is_scheduled, b.scheduled_at,
+        b.receiver_name, b.receiver_phone
         FROM bookings b
         JOIN riders r ON r.id=b.rider_id
         JOIN users u_r ON u_r.id=r.user_id
@@ -388,12 +392,13 @@ func ListBookings(c *gin.Context) {
         var cancelledBy, cancelReason string
         var cancellationFee float64
         var isScheduled bool
+        var receiverName, receiverPhone *string
         rows.Scan(&id, &status, &pickup, &drop, &estFare, &finalFare, &createdAt,
             &riderName, &riderPhone, &driverName, &driverPhone, &vehicleNumber,
             &serviceName, &serviceCategory, &serviceSlug, &vehicleType, &distanceKm, &rideOTP,
             &hospitalName, &ambulanceSubType, &isFreeAmbulance, &patientName, &purposeType, &source,
             &acceptedAt, &cancelledAt, &cancelledBy, &cancelReason, &cancellationFee,
-            &isScheduled, &scheduledAt)
+            &isScheduled, &scheduledAt, &receiverName, &receiverPhone)
         bookings = append(bookings, map[string]interface{}{
             "id": id, "status": status, "pickup_address": pickup, "drop_address": drop,
             "estimated_fare": estFare, "final_fare": finalFare, "created_at": createdAt,
@@ -407,6 +412,7 @@ func ListBookings(c *gin.Context) {
             "accepted_at": acceptedAt, "cancelled_at": cancelledAt, "cancelled_by": cancelledBy,
             "cancel_reason": cancelReason, "cancellation_fee": cancellationFee,
             "is_scheduled": isScheduled, "scheduled_at": scheduledAt,
+            "receiver_name": receiverName, "receiver_phone": receiverPhone,
         })
     }
     if bookings == nil { bookings = []map[string]interface{}{} }

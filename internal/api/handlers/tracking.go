@@ -138,6 +138,8 @@ func GetBooking(c *gin.Context) {
 		cancelledAt                               *time.Time
 		isScheduled                               bool
 		scheduledAt                               *time.Time
+		// Receiver details (truck/parcel deliveries)
+		receiverName, receiverPhone *string
 	)
 
 	err := pool.QueryRow(ctx, `
@@ -166,7 +168,9 @@ func GetBooking(c *gin.Context) {
 		       COALESCE(b.cancel_reason,''),
 		       b.cancelled_at,
 		       COALESCE(b.is_scheduled,false),
-		       b.scheduled_at
+		       b.scheduled_at,
+		       b.receiver_name,
+		       b.receiver_phone
 		FROM bookings b
 		LEFT JOIN drivers      d   ON d.id    = b.driver_id
 		LEFT JOIN users        du  ON du.id   = d.user_id
@@ -187,6 +191,7 @@ func GetBooking(c *gin.Context) {
 		&isFreeAmbulance, &purposeType, &patientName,
 		&vehicleCategory, &cancellationFee, &cancelledBy, &cancelReason, &cancelledAt,
 		&isScheduled, &scheduledAt,
+		&receiverName, &receiverPhone,
 	)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "booking not found"})
@@ -220,6 +225,8 @@ func GetBooking(c *gin.Context) {
 		"cancelled_at":       cancelledAt,
 		"is_scheduled":       isScheduled,
 		"scheduled_at":       scheduledAt,
+		"receiver_name":      receiverName,
+		"receiver_phone":     receiverPhone,
 	}
 	// Expose OTP once driver has arrived so the rider can read it aloud.
 	if status == "arriving" && rideOTP != nil {
