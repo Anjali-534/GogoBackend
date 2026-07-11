@@ -664,6 +664,36 @@ func ListHospitalNotifications(c *gin.Context) {
 	c.JSON(http.StatusOK, result)
 }
 
+// GET /gogoo/ambulance/hospital/notifications/unread-count — hospital portal
+// unread badge; same targeting rules as ListHospitalNotifications. Reads are
+// tracked in notification_reads keyed by the hospital id (hospital tokens
+// carry it as user_id), so the generic MarkNotificationRead works for marking.
+func GetHospitalNotificationUnreadCount(c *gin.Context) {
+	hospitalID := c.GetString("user_id")
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+
+	var count int
+	pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM notifications n
+		WHERE n.is_active = true
+		  AND (
+		        n.target_hospital_id = $1::uuid
+		    OR  $1::uuid = ANY(n.target_hospital_ids)
+		    OR (
+		         n.target_hospital_id IS NULL
+		     AND (n.target_hospital_ids IS NULL OR array_length(n.target_hospital_ids,1) IS NULL)
+		     AND n.target_audience = 'hospitals'
+		    )
+		  )
+		  AND NOT EXISTS (
+			SELECT 1 FROM notification_reads nr
+			WHERE nr.notification_id = n.id AND nr.user_id = $1
+		)
+	`, hospitalID).Scan(&count)
+	c.JSON(http.StatusOK, gin.H{"count": count})
+}
+
 // GET /gogoo/admin/notifications  — admin sees all broadcasts; cab/truck/
 // ambulance panels only see broadcasts sent within their own category
 // (every broadcast they create is stamped with that category server-side,

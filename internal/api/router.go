@@ -211,7 +211,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.DELETE("/admin/notifications/:id",          middleware.RequirePanel("cab", "truck", "ambulance", "support"), handlers.DeleteNotification)
 
 		// Notifications (hospitals) — in-portal inbox, no push mechanism
-		gogoo.GET("/ambulance/hospital/notifications",    handlers.ListHospitalNotifications)
+		gogoo.GET("/ambulance/hospital/notifications",              middleware.RequirePanel("hospital"), handlers.ListHospitalNotifications)
+		gogoo.GET("/ambulance/hospital/notifications/unread-count", middleware.RequirePanel("hospital"), handlers.GetHospitalNotificationUnreadCount)
+		gogoo.POST("/ambulance/hospital/notifications/:id/read",    middleware.RequirePanel("hospital"), handlers.MarkNotificationRead)
 
 		// Panel access management (admin)
 		gogoo.GET("/admin/panel-access",                  middleware.RequirePanel(), handlers.GetPanelAccess)
@@ -232,10 +234,10 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.PATCH("/ambulance/hospitals/:id/password",  middleware.RequirePanel("ambulance"), handlers.ResetHospitalPassword)
 
 		// Ambulance — Bookings
-		gogoo.GET("/ambulance/bookings/hospital",         handlers.GetHospitalBookings)
-		gogoo.POST("/ambulance/bookings/hospital",        handlers.CreateHospitalBooking)
-		gogoo.PATCH("/ambulance/bookings/hospital/:id/status", handlers.UpdateHospitalBookingStatus)
-		gogoo.GET("/ambulance/all-bookings",              handlers.GetAmbulanceAllBookings)
+		gogoo.GET("/ambulance/bookings/hospital",         middleware.RequirePanel("hospital", "ambulance"), handlers.GetHospitalBookings)
+		gogoo.POST("/ambulance/bookings/hospital",        middleware.RequirePanel("hospital"), handlers.CreateHospitalBooking)
+		gogoo.PATCH("/ambulance/bookings/hospital/:id/status", middleware.RequirePanel("hospital", "ambulance"), handlers.UpdateHospitalBookingStatus)
+		gogoo.GET("/ambulance/all-bookings",              middleware.RequirePanel("ambulance"), handlers.GetAmbulanceAllBookings)
 
 		// Support panel
 		gogoo.GET("/support/tickets",                     handlers.GetSupportTickets)
