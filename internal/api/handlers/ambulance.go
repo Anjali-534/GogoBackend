@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/deploykit/backend/internal/config"
@@ -652,7 +653,7 @@ func UpdateHospitalBookingStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Status updated"})
 }
 
-// GET /gogoo/ambulance/hospitals/nearby?lat=X&lng=X
+// GET /gogoo/ambulance/hospitals/nearby?lat=X&lng=X&radius_km=50
 func GetNearbyHospitals(c *gin.Context) {
 	lat := c.Query("lat")
 	lng := c.Query("lng")
@@ -661,29 +662,40 @@ func GetNearbyHospitals(c *gin.Context) {
 		return
 	}
 
+	radiusKm := 50.0
+	if r := c.Query("radius_km"); r != "" {
+		if v, err := strconv.ParseFloat(r, 64); err == nil && v > 0 {
+			radiusKm = v
+		}
+	}
+
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 
+	// Hospitals without coordinates have no distance and are excluded.
 	rows, err := pool.Query(ctx, `
-		SELECT
-			id, name, COALESCE(type,'hospital'), phone,
-			COALESCE(address,''), COALESCE(area,''),
-			COALESCE(ambulance_types, ARRAY[]::TEXT[]),
-			vehicle_count, base_fare, per_km_rate,
-			COALESCE(latitude,0), COALESCE(longitude,0),
-			COALESCE(rating,0), is_verified,
-			ROUND(
-				6371 * acos(
-					LEAST(1.0, cos(radians($1::float)) * cos(radians(latitude)) *
-					cos(radians(longitude) - radians($2::float)) +
-					sin(radians($1::float)) * sin(radians(latitude)))
-				)::numeric, 2
-			) AS distance_km
-		FROM ambulance_hospitals
-		WHERE is_active = TRUE
+		SELECT * FROM (
+			SELECT
+				id, name, COALESCE(type,'hospital'), phone,
+				COALESCE(address,''), COALESCE(area,''),
+				COALESCE(ambulance_types, ARRAY[]::TEXT[]),
+				vehicle_count, base_fare, per_km_rate,
+				COALESCE(latitude,0), COALESCE(longitude,0),
+				COALESCE(rating,0), is_verified,
+				ROUND(
+					6371 * acos(
+						LEAST(1.0, cos(radians($1::float)) * cos(radians(latitude)) *
+						cos(radians(longitude) - radians($2::float)) +
+						sin(radians($1::float)) * sin(radians(latitude)))
+					)::numeric, 2
+				) AS distance_km
+			FROM ambulance_hospitals
+			WHERE is_active = TRUE
+		) nearby
+		WHERE distance_km <= $3
 		ORDER BY distance_km
 		LIMIT 10
-	`, lat, lng)
+	`, lat, lng, radiusKm)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error: " + err.Error()})
 		return
