@@ -146,6 +146,22 @@ func allDriversInCategory(ctx context.Context, userIDs []string, category string
 	return matched == len(userIDs), nil
 }
 
+// allHospitalsExist reports whether every one of the given ids is a real
+// hospital. Same job as allDriversInCategory but for the ambulance panel's
+// hospitals lane — the UI's hospital picker only offers real hospitals, but
+// the server can't trust a client-supplied id list.
+func allHospitalsExist(ctx context.Context, hospitalIDs []string) (bool, error) {
+	pool := db.GetDB().GetPool()
+	var matched int
+	err := pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM ambulance_hospitals WHERE id = ANY($1::uuid[])`,
+		hospitalIDs).Scan(&matched)
+	if err != nil {
+		return false, err
+	}
+	return matched == len(hospitalIDs), nil
+}
+
 // dispatchExpoPush fires a batch of Expo push notifications for the given
 // tokens. Shared by every push code path so the payload/HTTP handling lives
 // in one place. extraData is merged into the push "data" payload alongside
@@ -400,13 +416,14 @@ func CreateNotification(c *gin.Context) {
 	if req.Type == ""           { req.Type = "general" }
 	if req.TargetAudience == "" { req.TargetAudience = "all" }
 
-	// Lock every non-master panel to its own lane: cab/truck/ambulance can only
-	// blast their own driver category (never riders, never another category,
-	// never hospitals); support can target riders or drivers of any category
-	// but still not hospitals (that's ambulance-only).
+	// Lock every non-master panel to its own lane: cab/truck can only blast
+	// their own driver category (never riders, never another category, never
+	// hospitals); ambulance gets its drivers plus the hospitals lane (hospitals
+	// are web-portal-only — in-portal inbox, no push); support can target
+	// riders or drivers of any category but not hospitals.
 	if c.GetString("role") != "master_admin" {
 		switch panel := c.GetString("panel"); panel {
-		case "cab", "truck", "ambulance":
+		case "cab", "truck":
 			req.TargetAudience = "drivers"
 			req.TargetCategory = panel
 			req.TargetHospitalID = ""
@@ -420,6 +437,46 @@ func CreateNotification(c *gin.Context) {
 				if !ok {
 					c.JSON(http.StatusForbidden, gin.H{"error": "one or more selected recipients are outside your panel's category"})
 					return
+				}
+			}
+		case "ambulance":
+			// Two lanes: ambulance drivers or hospitals, chosen by
+			// target_audience. "Send to both" is two separate creates from the
+			// panel UI, one per lane — never mixed in a single notification.
+			if req.TargetAudience == "hospitals" {
+				req.TargetCategory = ""
+				req.TargetUserID = ""
+				req.TargetUserIDs = nil
+				hospitalIDs := req.TargetHospitalIDs
+				if req.TargetHospitalID != "" {
+					hospitalIDs = append(hospitalIDs, req.TargetHospitalID)
+				}
+				if len(hospitalIDs) > 0 {
+					ok, err := allHospitalsExist(context.Background(), hospitalIDs)
+					if err != nil {
+						c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to validate recipients"})
+						return
+					}
+					if !ok {
+						c.JSON(http.StatusForbidden, gin.H{"error": "one or more selected hospitals were not found"})
+						return
+					}
+				}
+			} else {
+				req.TargetAudience = "drivers"
+				req.TargetCategory = "ambulance"
+				req.TargetHospitalID = ""
+				req.TargetHospitalIDs = nil
+				if len(req.TargetUserIDs) > 0 {
+					ok, err := allDriversInCategory(context.Background(), req.TargetUserIDs, "ambulance")
+					if err != nil {
+						c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to validate recipients"})
+						return
+					}
+					if !ok {
+						c.JSON(http.StatusForbidden, gin.H{"error": "one or more selected recipients are outside your panel's category"})
+						return
+					}
 				}
 			}
 		case "support":
