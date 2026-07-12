@@ -897,6 +897,23 @@ func GetAnalytics(c *gin.Context) {
     })
 }
 
+// GetPublicStats returns aggregate platform counts for the public marketing
+// site. PUBLIC (no auth): exposes three integers only — no PII, no lists.
+// GET /gogoo/stats/public
+func GetPublicStats(c *gin.Context) {
+    ctx := context.Background()
+    pool := db.GetDB().GetPool()
+    var totalRiders, totalDrivers, totalCompletedRides int
+    pool.QueryRow(ctx, "SELECT COUNT(*) FROM riders").Scan(&totalRiders)
+    pool.QueryRow(ctx, "SELECT COUNT(*) FROM drivers WHERE is_verified=true").Scan(&totalDrivers)
+    pool.QueryRow(ctx, "SELECT COUNT(*) FROM bookings WHERE status='completed'").Scan(&totalCompletedRides)
+    c.JSON(http.StatusOK, gin.H{
+        "total_riders":          totalRiders,
+        "total_drivers":         totalDrivers,
+        "total_completed_rides": totalCompletedRides,
+    })
+}
+
 // GET /gogoo/payments?range=&from=&to=&sort=
 func ListPayments(c *gin.Context) {
     ctx := context.Background()

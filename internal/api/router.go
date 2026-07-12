@@ -102,6 +102,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogooPublic.POST("/hospital-login", handlers.HospitalLogin)
 		gogooPublic.GET("/ambulance/hospitals/nearby", handlers.GetNearbyHospitals)
 		gogooPublic.POST("/referral/validate",         handlers.ValidateReferralCode)
+		gogooPublic.GET("/stats/public",               handlers.GetPublicStats)
 	}
 
 	// ============================================================
