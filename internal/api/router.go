@@ -276,12 +276,20 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	// ============================================================
 	// GOGOO â€" EXCEL EXPORTS (token via header or ?token= query)
 	// ============================================================
+	// DownloadAuthMiddleware sets the same panel/role context keys as
+	// AuthMiddleware, so RequirePanel composes on top. master_admin always
+	// passes RequirePanel, so the dashboard's export buttons keep working.
 	gogooExport := router.Group("/gogoo/export")
 	gogooExport.Use(middleware.DownloadAuthMiddleware())
 	{
-		gogooExport.GET("/drivers.xlsx", handlers.ExportDriversXLSX)
-		gogooExport.GET("/users.xlsx", handlers.ExportUsersXLSX)
-		gogooExport.GET("/referrals.xlsx", handlers.ExportReferralsXLSX)
+		// Category panels manage their own drivers (cab panel has an export
+		// button today); note the handler currently exports ALL categories.
+		gogooExport.GET("/drivers.xlsx", middleware.RequirePanel("cab", "truck", "ambulance"), handlers.ExportDriversXLSX)
+		// Full rider list with emails+phones: master admin + support staff.
+		gogooExport.GET("/users.xlsx", middleware.RequirePanel("support"), handlers.ExportUsersXLSX)
+		// No frontend calls this today; master admin only (empty allow-list
+		// denies every panel, master_admin bypasses).
+		gogooExport.GET("/referrals.xlsx", middleware.RequirePanel(), handlers.ExportReferralsXLSX)
 	}
 
 	return router
