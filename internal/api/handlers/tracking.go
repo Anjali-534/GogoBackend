@@ -114,6 +114,24 @@ func GetBooking(c *gin.Context) {
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 
+	// Ownership check: this response carries both parties' phones, patient
+	// name, live driver GPS, and the ride OTP, so it is limited to the
+	// booking's own rider or assigned driver plus oversight tokens
+	// (master admin and the support/category panels). Everyone else gets a
+	// bare 403 — including for booking IDs that don't exist, so the
+	// endpoint can't be used to probe which UUIDs are real.
+	if c.GetString("role") != "master_admin" {
+		switch c.GetString("panel") {
+		case "support", "cab", "truck", "ambulance":
+			// panel staff: allowed
+		default:
+			if _, _, ok := bookingCallerRole(ctx, pool, bookingID, c.GetString("user_id")); !ok {
+				c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+				return
+			}
+		}
+	}
+
 	var (
 		id, riderID, status                              string
 		driverID                                         *string
