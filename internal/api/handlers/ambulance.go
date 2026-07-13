@@ -518,7 +518,14 @@ func GetHospitalBookings(c *gin.Context) {
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 
+	// A hospital token is hard-scoped to its own bookings — its identity comes
+	// from the JWT (user_id = hospital id), never from the query string, so no
+	// ?hospital_id= override is possible. The ambulance panel / master admin
+	// (already gated by RequirePanel) keep the optional cross-hospital filter.
 	hospitalID := c.Query("hospital_id")
+	if c.GetString("panel") == "hospital" {
+		hospitalID = c.GetString("user_id")
+	}
 	status := c.Query("status")
 
 	query := `
@@ -638,16 +645,28 @@ func UpdateHospitalBookingStatus(c *gin.Context) {
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 
-	_, err := pool.Exec(ctx, `
+	// Hospital tokens may only touch their own bookings; the WHERE clause is
+	// scoped to the JWT's hospital id so a wrong :id silently matches nothing.
+	// Ambulance panel / master admin (RequirePanel-gated) may update any.
+	query := `
 		UPDATE hospital_ambulance_bookings SET
 		    status=$1,
 		    hospital_rejected_reason=$2,
 		    hospital_confirmed_at = CASE WHEN $1='confirmed' THEN NOW() ELSE hospital_confirmed_at END,
 		    updated_at=NOW()
-		WHERE id=$3
-	`, req.Status, req.RejectedReason, id)
+		WHERE id=$3`
+	args := []interface{}{req.Status, req.RejectedReason, id}
+	if c.GetString("panel") == "hospital" {
+		query += ` AND hospital_id=$4`
+		args = append(args, c.GetString("user_id"))
+	}
+	tag, err := pool.Exec(ctx, query, args...)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "update failed"})
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "booking not found"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "Status updated"})

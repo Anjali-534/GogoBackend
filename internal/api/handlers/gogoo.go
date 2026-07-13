@@ -223,8 +223,10 @@ func CreateBooking(c *gin.Context) {
     if req.Source == "" {
         req.Source = "app"
     }
-    log.Printf("CreateBooking: rider=%s service=%s pickup=(%v,%v) drop=(%v,%v) fare=%v isFree=%v scheduled=%v",
-        req.RiderID, req.ServiceTypeID, req.PickupLat, req.PickupLng, req.DropLat, req.DropLng, req.EstimatedFare, req.IsFreeAmbulance, req.IsScheduled)
+    // Coordinates are deliberately not logged — precise pickup/drop GPS is
+    // personal location data and doesn't belong in server logs.
+    log.Printf("CreateBooking: rider=%s service=%s fare=%v isFree=%v scheduled=%v",
+        req.RiderID, req.ServiceTypeID, req.EstimatedFare, req.IsFreeAmbulance, req.IsScheduled)
 
     ctx := context.Background()
     pool := db.GetDB().GetPool()
