@@ -959,6 +959,13 @@ func ToggleDriverOnline(c *gin.Context) {
     ctx := context.Background()
     pool := db.GetDB().GetPool()
 
+    // A driver can only toggle their own online status — no panel calls
+    // this on a driver's behalf.
+    if !isDriverOwner(ctx, pool, driverID, c.GetString("user_id")) {
+        c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+        return
+    }
+
     if req.IsOnline {
         var isVerified bool
         pool.QueryRow(ctx, "SELECT COALESCE(is_verified,false) FROM drivers WHERE id=$1", driverID).Scan(&isVerified)
@@ -1074,16 +1081,46 @@ func UpdateBookingStatus(c *gin.Context) {
     ctx  := context.Background()
     pool := db.GetDB().GetPool()
 
+    // Ownership check: only the booking's rider or assigned driver may
+    // drive its state machine (plus panel/master oversight). Without this,
+    // any authenticated account could complete, cancel, or fast-forward
+    // someone else's ride.
+    callerRole, _, isParty := bookingCallerRole(ctx, pool, bookingID, c.GetString("user_id"))
+    isPanel := c.GetString("role") == "master_admin"
+    switch c.GetString("panel") {
+    case "support", "cab", "truck", "ambulance":
+        isPanel = true
+    }
+    if !isParty && !isPanel {
+        c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+        return
+    }
+    // arriving/in_progress/completed are driver-driven transitions; only
+    // "cancelled" may come from the rider side.
+    if req.Status != "cancelled" && callerRole == "rider" {
+        c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+        return
+    }
+    // Trust the caller's own identity for who's cancelling, not the request
+    // body — a rider/driver token can only ever be cancelling as themself.
+    // This also drives the cancellation-fee and driver-auto-block logic
+    // below, so a client can no longer misreport it to dodge a fee or a
+    // 2-strikes block.
+    if isParty {
+        req.CancelBy = callerRole
+    }
+
     switch req.Status {
     case "arriving":
         pool.Exec(ctx, `UPDATE bookings SET status='arriving',arrived_at=NOW() WHERE id=$1`, bookingID)
     case "in_progress":
         pool.Exec(ctx, `UPDATE bookings SET status='in_progress',started_at=NOW() WHERE id=$1`, bookingID)
     case "completed":
-        finalFare := req.FinalFare
-        if finalFare <= 0 {
-            pool.QueryRow(ctx, `SELECT COALESCE(estimated_fare,0) FROM bookings WHERE id=$1`, bookingID).Scan(&finalFare)
-        }
+        // final_fare is never taken from the client — no legitimate caller
+        // sends it (the app always relies on the estimated_fare fallback),
+        // so accepting it here was a pure fare-tampering hole.
+        var finalFare float64
+        pool.QueryRow(ctx, `SELECT COALESCE(estimated_fare,0) FROM bookings WHERE id=$1`, bookingID).Scan(&finalFare)
         pool.Exec(ctx, `UPDATE bookings SET status='completed',completed_at=NOW(),final_fare=$1 WHERE id=$2`, finalFare, bookingID)
         // Credit driver wallet: 80% earnings, 20% gogoo commission
         if finalFare > 0 {
@@ -1288,6 +1325,15 @@ func VerifyRideOTP(c *gin.Context) {
     ctx := context.Background()
     pool := db.GetDB().GetPool()
 
+    // Only the assigned driver may attempt OTP verification for this
+    // booking. The OTP is a 4-digit code with no attempt limiting, so
+    // leaving this open to any authenticated account would let it be
+    // brute-forced to hijack ride starts.
+    if callerRole, _, isParty := bookingCallerRole(ctx, pool, bookingID, c.GetString("user_id")); !isParty || callerRole != "driver" {
+        c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+        return
+    }
+
     var storedOTP *string
     var status string
     if err := pool.QueryRow(ctx,
@@ -1318,6 +1364,17 @@ func RateBooking(c *gin.Context) {
     c.ShouldBindJSON(&req)
     ctx := context.Background()
     pool := db.GetDB().GetPool()
+
+    // A caller can only submit the rating for the side they actually are on
+    // this booking — otherwise any authenticated account could inflate or
+    // tank any driver's/rider's rating on a booking they had nothing to do
+    // with. rater_type must match who they are, not what they claim.
+    callerRole, _, isParty := bookingCallerRole(ctx, pool, bookingID, c.GetString("user_id"))
+    if !isParty || callerRole != req.RaterType {
+        c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+        return
+    }
+
     if req.RaterType == "rider" {
         pool.Exec(ctx, "UPDATE bookings SET driver_rating=$1,driver_review=$2 WHERE id=$3", req.Rating, req.Review, bookingID)
         pool.Exec(ctx, `UPDATE drivers SET rating=(SELECT ROUND(AVG(driver_rating)::numeric,2) FROM bookings WHERE driver_id=(SELECT driver_id FROM bookings WHERE id=$1) AND driver_rating IS NOT NULL) WHERE id=(SELECT driver_id FROM bookings WHERE id=$1)`, bookingID)

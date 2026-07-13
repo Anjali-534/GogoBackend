@@ -127,9 +127,12 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		// Drivers
 		gogoo.GET("/drivers", middleware.RequirePanel("cab", "truck", "ambulance", "support"), handlers.ListDrivers)
 		gogoo.GET("/drivers/:id", middleware.RequirePanel("cab", "truck", "ambulance", "support"), handlers.GetDriverByID)
-		gogoo.PATCH("/drivers/:id/verify", handlers.VerifyDriver)
+		// verify/background-check are staff-only actions (deny-by-default);
+		// online/location are the driver acting on their own record, checked
+		// for ownership inside the handler since panels never call them.
+		gogoo.PATCH("/drivers/:id/verify", middleware.RequirePanel("cab", "truck", "ambulance", "support"), handlers.VerifyDriver)
 		gogoo.PATCH("/drivers/:id/online", handlers.ToggleDriverOnline)
-		gogoo.PATCH("/drivers/:id/background-check", handlers.UpdateDriverBackgroundCheck)
+		gogoo.PATCH("/drivers/:id/background-check", middleware.RequirePanel("cab", "truck", "ambulance", "support"), handlers.UpdateDriverBackgroundCheck)
 		gogoo.POST("/drivers/:id/location", handlers.UpdateDriverLocation)
 		gogoo.GET("/drivers/nearby-count", handlers.GetNearbyDriverCount)
 
@@ -154,14 +157,17 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.DELETE("/rider/saved-places/:label", handlers.DeleteSavedPlace)
 		// Driver ride history + block management (admin)
 		gogoo.GET("/drivers/:id/bookings",  handlers.ListDriverBookingsByID)
-		gogoo.PATCH("/drivers/:id/block",   handlers.ManageDriverBlock)
+		gogoo.PATCH("/drivers/:id/block",   middleware.RequirePanel("cab", "truck", "ambulance", "support"), handlers.ManageDriverBlock)
 		// Rider ride history (admin)
 		gogoo.GET("/riders/:id/bookings",   handlers.ListRiderBookingsByID)
 
-		// Documents
+		// Documents — GET/POST/DELETE are the driver acting on their own
+		// documents (checked for ownership inside the handler) but panels also
+		// GET them for review, so that one stays open at the router level;
+		// review itself is a staff-only verdict.
 		gogoo.GET("/drivers/:id/documents", handlers.GetDriverDocuments)
 		gogoo.POST("/drivers/:id/documents", handlers.UploadDriverDocument)
-		gogoo.PATCH("/drivers/:id/documents/:doc_type/review", handlers.ReviewDriverDocument)
+		gogoo.PATCH("/drivers/:id/documents/:doc_type/review", middleware.RequirePanel("cab", "truck", "ambulance", "support"), handlers.ReviewDriverDocument)
 		gogoo.DELETE("/drivers/:id/documents/:doc_type", handlers.DeleteDriverDocument)
 
 		// Payments
@@ -249,12 +255,15 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.GET("/support/tickets",                     middleware.RequirePanel("support"), handlers.GetSupportTickets)
 		gogoo.POST("/support/tickets",                    handlers.CreateSupportTicket)
 		gogoo.PATCH("/support/tickets/:id",               handlers.UpdateSupportTicket)
-		gogoo.POST("/support/tickets/:id/refund",         handlers.ProcessRefund)
+		// Financial/account-altering staff actions — arbitrary-amount refunds,
+		// cancelling any booking, blocking any rider — were reachable by any
+		// authenticated rider/driver token with no panel check at all.
+		gogoo.POST("/support/tickets/:id/refund",         middleware.RequirePanel("support"), handlers.ProcessRefund)
 		gogoo.GET("/support/tickets/:id/messages",        middleware.RequirePanel("support"), handlers.GetTicketMessages)
 		gogoo.POST("/support/tickets/:id/messages",       handlers.SendTicketMessage)
 		gogoo.GET("/support/stats",                       handlers.GetSupportStats)
-		gogoo.POST("/support/cancel-booking/:id",         handlers.SupportCancelBooking)
-		gogoo.POST("/support/block-rider/:id",            handlers.SupportBlockRider)
+		gogoo.POST("/support/cancel-booking/:id",         middleware.RequirePanel("support"), handlers.SupportCancelBooking)
+		gogoo.POST("/support/block-rider/:id",            middleware.RequirePanel("support"), handlers.SupportBlockRider)
 
 		// In-app chat (rider + driver apps)
 		gogoo.GET("/support/faq",                         handlers.GetFAQ)

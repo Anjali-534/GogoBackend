@@ -17,12 +17,15 @@ func ListPendingBookings(c *gin.Context) {
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 
+	// rider_phone is deliberately NOT in this feed: it goes to every driver
+	// for every un-accepted booking. Drivers get the phone from GetBooking
+	// after accepting, which is the only point they need it.
 	rows, err := pool.Query(ctx, `
     SELECT b.id, b.rider_id, b.service_type_id, b.status,
            b.pickup_lat, b.pickup_lng, b.pickup_address,
            b.drop_lat, b.drop_lng, b.drop_address,
            COALESCE(b.estimated_fare,0), COALESCE(b.distance_km,0),
-           COALESCE(u.name,''), COALESCE(r.phone,''),
+           COALESCE(u.name,''),
            COALESCE(st.name,''), b.requested_at
     FROM bookings b
     JOIN riders r ON r.id = b.rider_id
@@ -42,11 +45,11 @@ func ListPendingBookings(c *gin.Context) {
 	for rows.Next() {
 		var id, riderID, serviceTypeID, status string
 		var pLat, pLng, dLat, dLng, fare, dist float64
-		var pAddr, dAddr, riderName, riderPhone, serviceName string
+		var pAddr, dAddr, riderName, serviceName string
 		var requestedAt interface{}
 		if err := rows.Scan(&id, &riderID, &serviceTypeID, &status,
 			&pLat, &pLng, &pAddr, &dLat, &dLng, &dAddr,
-			&fare, &dist, &riderName, &riderPhone, &serviceName, &requestedAt); err != nil {
+			&fare, &dist, &riderName, &serviceName, &requestedAt); err != nil {
 			continue
 		}
 		out = append(out, gin.H{
@@ -60,7 +63,6 @@ func ListPendingBookings(c *gin.Context) {
 			"estimated_fare":  fare,
 			"distance_km":     dist,
 			"rider_name":      riderName,
-			"rider_phone":     riderPhone,
 			"requested_at":    requestedAt,
 		})
 	}
@@ -85,6 +87,14 @@ func UpdateDriverLocation(c *gin.Context) {
 
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
+
+	// A driver can only push their own GPS position — otherwise any
+	// authenticated account could spoof another driver's live location
+	// (which mirrors onto that driver's active booking and the rider's map).
+	if !isDriverOwner(ctx, pool, driverID, c.GetString("user_id")) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		return
+	}
 
 	if _, err := pool.Exec(ctx,
 		`UPDATE drivers SET current_lat=$1, current_lng=$2, location_updated_at=NOW()

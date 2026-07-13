@@ -277,10 +277,31 @@ func GetDriverProfile(c *gin.Context) {
 }
 
 // GET /gogoo/drivers/:id/documents
+// isDriverOwner reports whether userID is the account behind driverID —
+// used to scope self-service document/GPS/online-status actions to the
+// driver's own row, since panels never call those routes on a driver's behalf.
+func isDriverOwner(ctx context.Context, pool *pgxpool.Pool, driverID, userID string) bool {
+	var ok bool
+	pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM drivers WHERE id=$1 AND user_id=$2::uuid)`, driverID, userID).Scan(&ok)
+	return ok
+}
+
 func GetDriverDocuments(c *gin.Context) {
 	driverID := c.Param("id")
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
+
+	// KYC documents (Aadhaar, license, bank passbook, ...) — only the
+	// driver themself or staff reviewing the application may view them.
+	switch c.GetString("panel") {
+	case "cab", "truck", "ambulance", "support":
+		// panel staff: allowed
+	default:
+		if c.GetString("role") != "master_admin" && !isDriverOwner(ctx, pool, driverID, c.GetString("user_id")) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+			return
+		}
+	}
 
 	var vehicleType string
 	pool.QueryRow(ctx, "SELECT vehicle_type FROM drivers WHERE id=$1", driverID).Scan(&vehicleType)
@@ -373,11 +394,11 @@ func UploadDriverDocument(c *gin.Context) {
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 
-	// Guard: driver must exist before we write files to disk for them.
-	var exists bool
-	pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM drivers WHERE id=$1)", driverID).Scan(&exists)
-	if !exists {
-		c.JSON(http.StatusNotFound, gin.H{"error": "driver not found"})
+	// Only the driver themself uploads their own KYC documents — no panel
+	// does this on a driver's behalf today. isDriverOwner also confirms
+	// existence, replacing the old plain existence check.
+	if !isDriverOwner(ctx, pool, driverID, c.GetString("user_id")) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
 		return
 	}
 
@@ -592,6 +613,13 @@ func DeleteDriverDocument(c *gin.Context) {
 	driverID := c.Param("id")
 	docType := c.Param("doc_type")
 	ctx := context.Background()
+
+	// Only the driver themself deletes their own documents (e.g. to
+	// re-upload after a rejection) — no panel does this on their behalf.
+	if !isDriverOwner(ctx, db.GetDB().GetPool(), driverID, c.GetString("user_id")) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		return
+	}
 	pool := db.GetDB().GetPool()
 
 	var fileURL string
