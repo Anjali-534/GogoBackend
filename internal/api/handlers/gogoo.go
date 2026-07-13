@@ -6,6 +6,7 @@ import (
     "encoding/json"
     "fmt"
     "log"
+    "math"
     "math/big"
     "net/http"
     "os"
@@ -184,6 +185,20 @@ func ListServiceTypes(c *gin.Context) {
     c.JSON(http.StatusOK, services)
 }
 
+// cabExtraFareMultipliers mirrors the app's cab/vehicles.tsx EXTRAS table.
+// These "extra" vehicle options (cab_any, cab_prime_sed, cab_mini_nonac) all
+// book against the plain cab_4w service_type row but are priced at a
+// multiple of its base+distance fare. The multiplier list is hardcoded here
+// — never taken from the client — so a request can only select one of these
+// three known, reviewed multipliers, not an arbitrary one.
+var cabExtraFareMultipliers = map[string]float64{
+    "cab_any":        0.88,
+    "cab_prime_sed":  1.15,
+    "cab_mini_nonac": 0.82,
+}
+
+const truckAddonPrice = 200.0
+
 func CreateBooking(c *gin.Context) {
     var req struct {
         RiderID       string  `json:"rider_id" binding:"required"`
@@ -199,6 +214,12 @@ func CreateBooking(c *gin.Context) {
         PromoCode     *string `json:"promo_code"`
         DiscountAmt   float64 `json:"discount_amount"`
         Source        string  `json:"source" binding:"omitempty,oneof=app website"`
+        // Cab "extra" vehicle variant (cab_any/cab_prime_sed/cab_mini_nonac);
+        // blank or unrecognized means the plain service_type fare applies.
+        VehicleSlug string `json:"vehicle_slug"`
+        // Truck addons (flat ₹200 each, matches truck/addons.tsx)
+        LoadingAddon   bool `json:"loading_addon"`
+        UnloadingAddon bool `json:"unloading_addon"`
         // Ambulance-specific fields
         HospitalID       *string `json:"hospital_id"`
         HospitalName     *string `json:"hospital_name"`
@@ -239,9 +260,14 @@ func CreateBooking(c *gin.Context) {
         return
     }
 
-    // Validate service_type exists
-    var svcCategory string
-    if err := pool.QueryRow(ctx, `SELECT COALESCE(category,'') FROM service_types WHERE id=$1`, req.ServiceTypeID).Scan(&svcCategory); err != nil {
+    // Validate service_type exists and fetch its official pricing — the
+    // client never gets to declare its own base_fare/per_km_rate.
+    var svcCategory, svcSlug string
+    var svcBaseFare, svcPerKmRate float64
+    if err := pool.QueryRow(ctx,
+        `SELECT COALESCE(category,''), slug, base_fare, per_km_rate FROM service_types WHERE id=$1`,
+        req.ServiceTypeID,
+    ).Scan(&svcCategory, &svcSlug, &svcBaseFare, &svcPerKmRate); err != nil {
         log.Printf("CreateBooking: service_type not found: %s (err=%v)", req.ServiceTypeID, err)
         c.JSON(http.StatusBadRequest, gin.H{"error": "service_type not found: " + req.ServiceTypeID})
         return
@@ -271,7 +297,52 @@ func CreateBooking(c *gin.Context) {
     // booking actually completes (see UpdateBookingStatus).
     var outstandingFee float64
     pool.QueryRow(ctx, `SELECT COALESCE(outstanding_cancellation_fee,0) FROM riders WHERE id=$1`, req.RiderID).Scan(&outstandingFee)
-    finalFareEstimate := req.EstimatedFare + outstandingFee
+
+    // Server-side fare engine — the client's estimated_fare is never trusted
+    // outright. We recompute the fare from the service_type's own pricing
+    // and the client-reported distance (distance itself isn't independently
+    // verified server-side — see the report accompanying this change) and
+    // only accept the client's number if it's within a small tolerance of
+    // ours. A free ambulance booking is the one deliberate exception: its
+    // fare is always 0 regardless of distance.
+    var finalFareEstimate float64
+    if svcCategory == "ambulance" && req.IsFreeAmbulance {
+        finalFareEstimate = 0
+    } else {
+        serverFare := math.Round(svcBaseFare + req.DistanceKm*svcPerKmRate)
+        if mult, ok := cabExtraFareMultipliers[req.VehicleSlug]; ok && req.VehicleSlug != svcSlug {
+            serverFare = math.Round(serverFare * mult)
+        }
+        if svcCategory == "truck" {
+            if req.LoadingAddon {
+                serverFare += truckAddonPrice
+            }
+            if req.UnloadingAddon {
+                serverFare += truckAddonPrice
+            }
+        }
+        // Coupon/discount amount is still client-reported (no promo_code
+        // validation exists server-side yet — flagged separately) but it
+        // can only ever reduce the fare, never invert it into a negative.
+        discount := req.DiscountAmt
+        if discount < 0 {
+            discount = 0
+        }
+        if discount > serverFare {
+            discount = serverFare
+        }
+        serverFare -= discount
+
+        expected := serverFare + outstandingFee
+        tolerance := math.Max(expected*0.05, 5.0)
+        if math.Abs(req.EstimatedFare-expected) > tolerance {
+            log.Printf("CreateBooking: fare mismatch rider=%s service=%s client_fare=%.2f server_fare=%.2f",
+                req.RiderID, req.ServiceTypeID, req.EstimatedFare, expected)
+            c.JSON(http.StatusBadRequest, gin.H{"error": "fare could not be verified — please go back and try booking again"})
+            return
+        }
+        finalFareEstimate = expected
+    }
 
     bookingID := uuid.New()
     n, _ := rand.Int(rand.Reader, big.NewInt(10000))
