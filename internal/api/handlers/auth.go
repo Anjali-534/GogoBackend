@@ -153,10 +153,7 @@ func Login(c *gin.Context) {
 	cfg := c.MustGet("config").(*config.Config)
 	role := ""
 	adminEmail := os.Getenv("ADMIN_EMAIL")
-	if adminEmail == "" {
-		adminEmail = "admin@gogoo.in"
-	}
-	if strings.EqualFold(req.Email, adminEmail) {
+	if adminEmail != "" && strings.EqualFold(req.Email, adminEmail) {
 		role = "master_admin"
 	}
 	token, err := auth.GenerateToken(userID, req.Email, name, role, cfg)

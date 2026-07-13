@@ -2005,12 +2005,10 @@ func PanelLogin(c *gin.Context) {
         return
     }
 
-    // 2. Master admin fallback — only ADMIN_EMAIL can log into any panel
+    // 2. Master admin fallback — only ADMIN_EMAIL can log into any panel.
+    // No baked-in default: if ADMIN_EMAIL is unset, the fallback is disabled.
     adminEmail := os.Getenv("ADMIN_EMAIL")
-    if adminEmail == "" {
-        adminEmail = "admin@gogoo.in"
-    }
-    if req.Email != adminEmail {
+    if adminEmail == "" || req.Email != adminEmail {
         c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
         return
     }

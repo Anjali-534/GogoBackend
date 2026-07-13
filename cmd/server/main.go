@@ -23,6 +23,12 @@ func main() {
 	// Load config
 	cfg := config.Load()
 
+	// Refuse to start without a signing key — an empty JWT_SECRET would make
+	// every issued token forgeable.
+	if cfg.JWTSecret == "" {
+		log.Fatal("FATAL: JWT_SECRET environment variable is required and cannot be empty")
+	}
+
 	// Initialize JWT
 	auth.Init(cfg)
 
