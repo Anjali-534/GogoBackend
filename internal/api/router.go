@@ -240,12 +240,17 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.PATCH("/ambulance/bookings/hospital/:id/status", middleware.RequirePanel("hospital", "ambulance"), handlers.UpdateHospitalBookingStatus)
 		gogoo.GET("/ambulance/all-bookings",              middleware.RequirePanel("ambulance"), handlers.GetAmbulanceAllBookings)
 
-		// Support panel
-		gogoo.GET("/support/tickets",                     handlers.GetSupportTickets)
+		// Support panel — listing all tickets and reading arbitrary tickets'
+		// messages is support-staff-only (tickets carry names, phones, and SOS
+		// live locations). Riders/drivers have their own ownership-checked
+		// path: /support/chat/my-tickets + /support/chat/:ticket_id/messages.
+		// PATCH stays ungated for now: the rider app calls it to mark its own
+		// ticket resolved (user-app support/chat.tsx).
+		gogoo.GET("/support/tickets",                     middleware.RequirePanel("support"), handlers.GetSupportTickets)
 		gogoo.POST("/support/tickets",                    handlers.CreateSupportTicket)
 		gogoo.PATCH("/support/tickets/:id",               handlers.UpdateSupportTicket)
 		gogoo.POST("/support/tickets/:id/refund",         handlers.ProcessRefund)
-		gogoo.GET("/support/tickets/:id/messages",        handlers.GetTicketMessages)
+		gogoo.GET("/support/tickets/:id/messages",        middleware.RequirePanel("support"), handlers.GetTicketMessages)
 		gogoo.POST("/support/tickets/:id/messages",       handlers.SendTicketMessage)
 		gogoo.GET("/support/stats",                       handlers.GetSupportStats)
 		gogoo.POST("/support/cancel-booking/:id",         handlers.SupportCancelBooking)
