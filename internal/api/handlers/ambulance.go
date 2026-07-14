@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -817,4 +818,61 @@ func GetAmbulanceAllBookings(c *gin.Context) {
 		bookings = []AmbBooking{}
 	}
 	c.JSON(http.StatusOK, bookings)
+}
+
+// ─── Free-ambulance staff waiver ──────────────────────────────────────────────
+
+// POST /gogoo/bookings/:id/waive-ambulance-fare
+// Staff-only (ambulance or support panel, or master_admin via RequirePanel's
+// bypass). is_free_ambulance is never client-controlled at CreateBooking time
+// (see gogoo.go) — this is the only path that can zero an ambulance fare, and
+// it's deliberately one-way: no un-waive endpoint. Mistaken waivers go through
+// the existing refund/manual-correction path instead, same as any other
+// booking-level billing error.
+func WaiveAmbulanceFare(c *gin.Context) {
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+	bookingID := c.Param("id")
+
+	var svcCategory, status string
+	err := pool.QueryRow(ctx, `
+		SELECT COALESCE(st.category,''), b.status
+		FROM bookings b
+		JOIN service_types st ON st.id = b.service_type_id
+		WHERE b.id = $1
+	`, bookingID).Scan(&svcCategory, &status)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "booking not found"})
+		return
+	}
+	if svcCategory != "ambulance" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "waive-ambulance-fare only applies to ambulance bookings"})
+		return
+	}
+	if status == "cancelled" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot waive the fare on a cancelled booking"})
+		return
+	}
+
+	agentEmail := c.GetString("user_email")
+	_, err = pool.Exec(ctx, `
+		UPDATE bookings
+		SET is_free_ambulance = TRUE,
+		    estimated_fare    = 0,
+		    final_fare        = CASE WHEN final_fare IS NOT NULL THEN 0 ELSE final_fare END,
+		    waived_by         = $1,
+		    waived_at         = NOW()
+		WHERE id = $2
+	`, agentEmail, bookingID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to waive fare"})
+		return
+	}
+
+	log.Printf("WaiveAmbulanceFare: booking=%s waived_by=%s", bookingID, agentEmail)
+	c.JSON(http.StatusOK, gin.H{
+		"booking_id":        bookingID,
+		"is_free_ambulance": true,
+		"waived_by":         agentEmail,
+	})
 }

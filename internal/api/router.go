@@ -123,6 +123,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
         gogoo.POST("/bookings/:id/accept", handlers.AcceptBooking)
         gogoo.POST("/bookings/:id/verify-otp", handlers.VerifyRideOTP)
 		gogoo.PATCH("/bookings/:id/status", handlers.UpdateBookingStatus)
+		gogoo.POST("/bookings/:id/waive-ambulance-fare", middleware.RequirePanel("ambulance", "support"), handlers.WaiveAmbulanceFare)
 
 		// Drivers
 		gogoo.GET("/drivers", middleware.RequirePanel("cab", "truck", "ambulance", "support"), handlers.ListDrivers)

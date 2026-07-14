@@ -224,7 +224,9 @@ func CreateBooking(c *gin.Context) {
         HospitalID       *string `json:"hospital_id"`
         HospitalName     *string `json:"hospital_name"`
         AmbulanceSubType *string `json:"ambulance_sub_type"`
-        IsFreeAmbulance  bool    `json:"is_free_ambulance"`
+        // is_free_ambulance is deliberately not bound here — it's never
+        // client-controlled. Every ambulance booking is created as paid;
+        // staff flip it via POST /bookings/:id/waive-ambulance-fare.
         PurposeType      *string `json:"purpose_type"`
         PatientName      *string `json:"patient_name"`
         ContactPhone     *string `json:"contact_phone"`
@@ -246,8 +248,8 @@ func CreateBooking(c *gin.Context) {
     }
     // Coordinates are deliberately not logged — precise pickup/drop GPS is
     // personal location data and doesn't belong in server logs.
-    log.Printf("CreateBooking: rider=%s service=%s fare=%v isFree=%v scheduled=%v",
-        req.RiderID, req.ServiceTypeID, req.EstimatedFare, req.IsFreeAmbulance, req.IsScheduled)
+    log.Printf("CreateBooking: rider=%s service=%s fare=%v scheduled=%v",
+        req.RiderID, req.ServiceTypeID, req.EstimatedFare, req.IsScheduled)
 
     ctx := context.Background()
     pool := db.GetDB().GetPool()
@@ -301,48 +303,44 @@ func CreateBooking(c *gin.Context) {
     // Server-side fare engine — the client's estimated_fare is never trusted
     // outright. We recompute the fare from the service_type's own pricing
     // and the client-reported distance (distance itself isn't independently
-    // verified server-side — see the report accompanying this change) and
-    // only accept the client's number if it's within a small tolerance of
-    // ours. A free ambulance booking is the one deliberate exception: its
-    // fare is always 0 regardless of distance.
-    var finalFareEstimate float64
-    if svcCategory == "ambulance" && req.IsFreeAmbulance {
-        finalFareEstimate = 0
-    } else {
-        serverFare := math.Round(svcBaseFare + req.DistanceKm*svcPerKmRate)
-        if mult, ok := cabExtraFareMultipliers[req.VehicleSlug]; ok && req.VehicleSlug != svcSlug {
-            serverFare = math.Round(serverFare * mult)
-        }
-        if svcCategory == "truck" {
-            if req.LoadingAddon {
-                serverFare += truckAddonPrice
-            }
-            if req.UnloadingAddon {
-                serverFare += truckAddonPrice
-            }
-        }
-        // Coupon/discount amount is still client-reported (no promo_code
-        // validation exists server-side yet — flagged separately) but it
-        // can only ever reduce the fare, never invert it into a negative.
-        discount := req.DiscountAmt
-        if discount < 0 {
-            discount = 0
-        }
-        if discount > serverFare {
-            discount = serverFare
-        }
-        serverFare -= discount
-
-        expected := serverFare + outstandingFee
-        tolerance := math.Max(expected*0.05, 5.0)
-        if math.Abs(req.EstimatedFare-expected) > tolerance {
-            log.Printf("CreateBooking: fare mismatch rider=%s service=%s client_fare=%.2f server_fare=%.2f",
-                req.RiderID, req.ServiceTypeID, req.EstimatedFare, expected)
-            c.JSON(http.StatusBadRequest, gin.H{"error": "fare could not be verified — please go back and try booking again"})
-            return
-        }
-        finalFareEstimate = expected
+    // verified server-side — see the report accompanying this change).
+    // Every ambulance booking is priced and created as paid, including
+    // Patient Transport/BLS/ALS — there is no client-side "free" path.
+    // Free-ambulance status is only ever granted afterward by staff via
+    // POST /bookings/:id/waive-ambulance-fare.
+    serverFare := math.Round(svcBaseFare + req.DistanceKm*svcPerKmRate)
+    if mult, ok := cabExtraFareMultipliers[req.VehicleSlug]; ok && req.VehicleSlug != svcSlug {
+        serverFare = math.Round(serverFare * mult)
     }
+    if svcCategory == "truck" {
+        if req.LoadingAddon {
+            serverFare += truckAddonPrice
+        }
+        if req.UnloadingAddon {
+            serverFare += truckAddonPrice
+        }
+    }
+    // Coupon/discount amount is still client-reported (no promo_code
+    // validation exists server-side yet — flagged separately) but it
+    // can only ever reduce the fare, never invert it into a negative.
+    discount := req.DiscountAmt
+    if discount < 0 {
+        discount = 0
+    }
+    if discount > serverFare {
+        discount = serverFare
+    }
+    serverFare -= discount
+
+    expected := serverFare + outstandingFee
+    tolerance := math.Max(expected*0.05, 5.0)
+    if math.Abs(req.EstimatedFare-expected) > tolerance {
+        log.Printf("CreateBooking: fare mismatch rider=%s service=%s client_fare=%.2f server_fare=%.2f",
+            req.RiderID, req.ServiceTypeID, req.EstimatedFare, expected)
+        c.JSON(http.StatusBadRequest, gin.H{"error": "fare could not be verified — please go back and try booking again"})
+        return
+    }
+    finalFareEstimate := expected
 
     bookingID := uuid.New()
     n, _ := rand.Int(rand.Reader, big.NewInt(10000))
@@ -363,21 +361,22 @@ func CreateBooking(c *gin.Context) {
         return
     }
 
-    // Update ambulance-specific fields if present (uses IF EXISTS safe pattern)
+    // Update ambulance-specific fields if present (uses IF EXISTS safe pattern).
+    // is_free_ambulance is hardcoded false here — it's never set at creation
+    // time, only later by a staff waiver (WaiveAmbulanceFare).
     _, _ = pool.Exec(ctx, `
         UPDATE bookings
         SET hospital_id        = $1,
             hospital_name      = $2,
             ambulance_sub_type = $3,
-            is_free_ambulance  = $4,
-            purpose_type       = $5,
-            patient_name       = $6,
-            contact_phone      = $7,
-            medical_notes      = $8
-        WHERE id = $9
+            is_free_ambulance  = FALSE,
+            purpose_type       = $4,
+            patient_name       = $5,
+            contact_phone      = $6,
+            medical_notes      = $7
+        WHERE id = $8
     `, req.HospitalID, req.HospitalName, req.AmbulanceSubType,
-        req.IsFreeAmbulance, req.PurposeType,
-        req.PatientName, req.ContactPhone, req.MedicalNotes,
+        req.PurposeType, req.PatientName, req.ContactPhone, req.MedicalNotes,
         bookingID)
 
     log.Printf("CreateBooking success: %s (status=%s)", bookingID, status)
