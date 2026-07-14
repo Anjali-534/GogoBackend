@@ -103,6 +103,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogooPublic.GET("/ambulance/hospitals/nearby", handlers.GetNearbyHospitals)
 		gogooPublic.POST("/referral/validate",         handlers.ValidateReferralCode)
 		gogooPublic.GET("/stats/public",               handlers.GetPublicStats)
+		gogooPublic.GET("/reviews/platform/public",    handlers.GetPlatformReviewsPublic)
 	}
 
 	// ============================================================
@@ -151,6 +152,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.GET("/driver/active-booking", handlers.GetDriverActiveBooking)
 		gogoo.GET("/driver/bookings", handlers.ListDriverBookings)
         gogoo.GET("/driver/reviews", handlers.GetDriverReviews)
+        gogoo.POST("/reviews/platform", handlers.SubmitPlatformReview)
         gogoo.GET("/rider/profile", handlers.GetRiderProfile)
 		gogoo.GET("/rider/bookings", handlers.ListRiderBookings)
 		gogoo.GET("/rider/saved-places", handlers.GetSavedPlaces)
