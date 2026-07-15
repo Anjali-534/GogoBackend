@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/gin-gonic/gin"
 	"github.com/deploykit/backend/internal/auth"
+	"github.com/gin-gonic/gin"
 )
 
 // AuthMiddleware validates JWT tokens
@@ -97,6 +97,22 @@ func RequirePanel(panels ...string) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
+		c.Next()
+	}
+}
+
+// RequireTrackerCompany restricts a route to tracker-company panel tokens
+// and puts the JWT-derived company id into gin context as "company_id" —
+// handlers must scope every query off this value, never a client-supplied
+// path/query param (same defense-in-depth rule as GetHospitalBookings).
+func RequireTrackerCompany() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.GetString("panel") != "tracker_company" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "forbidden: insufficient panel access"})
+			c.Abort()
+			return
+		}
+		c.Set("company_id", c.GetString("user_id"))
 		c.Next()
 	}
 }

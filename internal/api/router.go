@@ -1,4 +1,4 @@
-﻿package api
+package api
 
 import (
 	"github.com/deploykit/backend/internal/api/handlers"
@@ -98,12 +98,18 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogooPublic.POST("/rider/signup", handlers.RiderSignup)
 		gogooPublic.POST("/driver/signup", handlers.DriverSignup)
 		gogooPublic.GET("/services", handlers.ListServiceTypes)
-		gogooPublic.POST("/panel-login",    handlers.PanelLogin)
+		gogooPublic.POST("/panel-login", handlers.PanelLogin)
 		gogooPublic.POST("/hospital-login", handlers.HospitalLogin)
 		gogooPublic.GET("/ambulance/hospitals/nearby", handlers.GetNearbyHospitals)
-		gogooPublic.POST("/referral/validate",         handlers.ValidateReferralCode)
-		gogooPublic.GET("/stats/public",               handlers.GetPublicStats)
-		gogooPublic.GET("/reviews/platform/public",    handlers.GetPlatformReviewsPublic)
+		gogooPublic.POST("/referral/validate", handlers.ValidateReferralCode)
+		gogooPublic.GET("/stats/public", handlers.GetPublicStats)
+		gogooPublic.GET("/reviews/platform/public", handlers.GetPlatformReviewsPublic)
+
+		// Bogie Tracker — company self-signup/login and the unauthenticated
+		// public tracking page (protected only by the unguessable token).
+		gogooPublic.POST("/tracker/signup", handlers.TrackerCompanySignup)
+		gogooPublic.POST("/tracker/login", handlers.TrackerCompanyLogin)
+		gogooPublic.GET("/public/tracker/orders/:token", handlers.GetPublicTrackerOrder)
 	}
 
 	// ============================================================
@@ -120,9 +126,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.GET("/bookings/:id/cancel-preview", handlers.GetCancelPreview)
 		gogoo.GET("/bookings/:id/messages", handlers.GetRideMessages)
 		gogoo.POST("/bookings/:id/messages", handlers.SendRideMessage)
-        gogoo.POST("/bookings/:id/rate", handlers.RateBooking)
-        gogoo.POST("/bookings/:id/accept", handlers.AcceptBooking)
-        gogoo.POST("/bookings/:id/verify-otp", handlers.VerifyRideOTP)
+		gogoo.POST("/bookings/:id/rate", handlers.RateBooking)
+		gogoo.POST("/bookings/:id/accept", handlers.AcceptBooking)
+		gogoo.POST("/bookings/:id/verify-otp", handlers.VerifyRideOTP)
 		gogoo.PATCH("/bookings/:id/status", handlers.UpdateBookingStatus)
 		gogoo.POST("/bookings/:id/waive-ambulance-fare", middleware.RequirePanel("ambulance", "support"), handlers.WaiveAmbulanceFare)
 
@@ -151,18 +157,18 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.GET("/driver/profile", handlers.GetDriverProfile)
 		gogoo.GET("/driver/active-booking", handlers.GetDriverActiveBooking)
 		gogoo.GET("/driver/bookings", handlers.ListDriverBookings)
-        gogoo.GET("/driver/reviews", handlers.GetDriverReviews)
-        gogoo.POST("/reviews/platform", handlers.SubmitPlatformReview)
-        gogoo.GET("/rider/profile", handlers.GetRiderProfile)
+		gogoo.GET("/driver/reviews", handlers.GetDriverReviews)
+		gogoo.POST("/reviews/platform", handlers.SubmitPlatformReview)
+		gogoo.GET("/rider/profile", handlers.GetRiderProfile)
 		gogoo.GET("/rider/bookings", handlers.ListRiderBookings)
 		gogoo.GET("/rider/saved-places", handlers.GetSavedPlaces)
 		gogoo.POST("/rider/saved-places", handlers.SavePlace)
 		gogoo.DELETE("/rider/saved-places/:label", handlers.DeleteSavedPlace)
 		// Driver ride history + block management (admin)
-		gogoo.GET("/drivers/:id/bookings",  handlers.ListDriverBookingsByID)
-		gogoo.PATCH("/drivers/:id/block",   middleware.RequirePanel("cab", "truck", "ambulance", "support"), handlers.ManageDriverBlock)
+		gogoo.GET("/drivers/:id/bookings", handlers.ListDriverBookingsByID)
+		gogoo.PATCH("/drivers/:id/block", middleware.RequirePanel("cab", "truck", "ambulance", "support"), handlers.ManageDriverBlock)
 		// Rider ride history (admin)
-		gogoo.GET("/riders/:id/bookings",   handlers.ListRiderBookingsByID)
+		gogoo.GET("/riders/:id/bookings", handlers.ListRiderBookingsByID)
 
 		// Documents — GET/POST/DELETE are the driver acting on their own
 		// documents (checked for ownership inside the handler) but panels also
@@ -177,77 +183,108 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.GET("/payments", handlers.ListPayments)
 
 		// Driver wallet / ledger / earnings
-		gogoo.GET("/driver/wallet",           handlers.GetDriverWallet)
-		gogoo.GET("/driver/ledger",           handlers.GetDriverLedger)
-		gogoo.GET("/driver/ledger/pdf",       handlers.GetDriverLedgerPDF)
+		gogoo.GET("/driver/wallet", handlers.GetDriverWallet)
+		gogoo.GET("/driver/ledger", handlers.GetDriverLedger)
+		gogoo.GET("/driver/ledger/pdf", handlers.GetDriverLedgerPDF)
 		gogoo.GET("/driver/earnings/summary", handlers.GetEarningsSummary)
 
 		// Admin driver payments
 		gogoo.GET("/admin/driver-payments", middleware.RequirePanel("support"), handlers.AdminDriverPayments)
 
 		// Analytics
-		gogoo.GET("/analytics",                  handlers.GetAnalytics)
-		gogoo.POST("/analytics/event",           handlers.RecordAnalyticsEvent)
-		gogoo.GET("/analytics/screen-times",     handlers.GetScreenTimes)
+		gogoo.GET("/analytics", handlers.GetAnalytics)
+		gogoo.POST("/analytics/event", handlers.RecordAnalyticsEvent)
+		gogoo.GET("/analytics/screen-times", handlers.GetScreenTimes)
 		gogoo.GET("/analytics/geo-distribution", handlers.GetGeoDistribution)
 		gogoo.GET("/analytics/device-breakdown", handlers.GetDeviceBreakdown)
-		gogoo.GET("/analytics/retention",        handlers.GetRetentionStats)
-		gogoo.GET("/analytics/sessions",         handlers.GetSessionStats)
-		gogoo.GET("/analytics/usage-heatmap",    handlers.GetUsageHeatmap)
-		gogoo.GET("/analytics/funnel",           handlers.GetFunnelData)
+		gogoo.GET("/analytics/retention", handlers.GetRetentionStats)
+		gogoo.GET("/analytics/sessions", handlers.GetSessionStats)
+		gogoo.GET("/analytics/usage-heatmap", handlers.GetUsageHeatmap)
+		gogoo.GET("/analytics/funnel", handlers.GetFunnelData)
 
 		// Notifications (riders)
-		gogoo.GET("/notifications",                       handlers.ListNotifications)
-		gogoo.GET("/notifications/unread-count",          handlers.GetNotificationUnreadCount)
-		gogoo.POST("/notifications/:id/read",             handlers.MarkNotificationRead)
+		gogoo.GET("/notifications", handlers.ListNotifications)
+		gogoo.GET("/notifications/unread-count", handlers.GetNotificationUnreadCount)
+		gogoo.POST("/notifications/:id/read", handlers.MarkNotificationRead)
 
 		// Notifications (drivers)
-		gogoo.GET("/driver/notifications",                handlers.ListDriverNotifications)
-		gogoo.GET("/driver/notifications/unread-count",   handlers.GetDriverNotificationUnreadCount)
-		gogoo.POST("/driver/notifications/:id/read",      handlers.MarkNotificationRead)
+		gogoo.GET("/driver/notifications", handlers.ListDriverNotifications)
+		gogoo.GET("/driver/notifications/unread-count", handlers.GetDriverNotificationUnreadCount)
+		gogoo.POST("/driver/notifications/:id/read", handlers.MarkNotificationRead)
 
 		// Push token registration (riders + drivers share same endpoint)
-		gogoo.POST("/push-token",                         handlers.RegisterPushToken)
+		gogoo.POST("/push-token", handlers.RegisterPushToken)
 
 		// Referrals (riders + drivers share same endpoints)
-		gogoo.GET("/referral/my-code",                    handlers.GetMyReferralCode)
-		gogoo.GET("/referral/my-referrals",                handlers.GetMyReferrals)
-		gogoo.GET("/referral/all",                        handlers.AdminListReferrals)
+		gogoo.GET("/referral/my-code", handlers.GetMyReferralCode)
+		gogoo.GET("/referral/my-referrals", handlers.GetMyReferrals)
+		gogoo.GET("/referral/all", handlers.AdminListReferrals)
 
 		// Broadcasts (admin) — every operating panel can send within its own
 		// category; scoping to that category is enforced inside the handlers.
-		gogoo.POST("/admin/notifications",                middleware.RequirePanel("cab", "truck", "ambulance", "support"), handlers.CreateNotification)
-		gogoo.GET("/admin/notifications",                 middleware.RequirePanel("cab", "truck", "ambulance", "support"), handlers.AdminListNotifications)
-		gogoo.DELETE("/admin/notifications/:id",          middleware.RequirePanel("cab", "truck", "ambulance", "support"), handlers.DeleteNotification)
+		gogoo.POST("/admin/notifications", middleware.RequirePanel("cab", "truck", "ambulance", "support"), handlers.CreateNotification)
+		gogoo.GET("/admin/notifications", middleware.RequirePanel("cab", "truck", "ambulance", "support"), handlers.AdminListNotifications)
+		gogoo.DELETE("/admin/notifications/:id", middleware.RequirePanel("cab", "truck", "ambulance", "support"), handlers.DeleteNotification)
 
 		// Notifications (hospitals) — in-portal inbox, no push mechanism
-		gogoo.GET("/ambulance/hospital/notifications",              middleware.RequirePanel("hospital"), handlers.ListHospitalNotifications)
+		gogoo.GET("/ambulance/hospital/notifications", middleware.RequirePanel("hospital"), handlers.ListHospitalNotifications)
 		gogoo.GET("/ambulance/hospital/notifications/unread-count", middleware.RequirePanel("hospital"), handlers.GetHospitalNotificationUnreadCount)
-		gogoo.POST("/ambulance/hospital/notifications/:id/read",    middleware.RequirePanel("hospital"), handlers.MarkNotificationRead)
+		gogoo.POST("/ambulance/hospital/notifications/:id/read", middleware.RequirePanel("hospital"), handlers.MarkNotificationRead)
 
 		// Panel access management (admin)
-		gogoo.GET("/admin/panel-access",                  middleware.RequirePanel(), handlers.GetPanelAccess)
-		gogoo.PATCH("/admin/panel-access/:id/password",   middleware.RequirePanel(), handlers.UpdatePanelPassword)
+		gogoo.GET("/admin/panel-access", middleware.RequirePanel(), handlers.GetPanelAccess)
+		gogoo.PATCH("/admin/panel-access/:id/password", middleware.RequirePanel(), handlers.UpdatePanelPassword)
 
 		// Ambulance — NGO management
-		gogoo.GET("/ambulance/ngos",                      middleware.RequirePanel("ambulance"), handlers.GetNGOs)
-		gogoo.POST("/ambulance/ngos",                     middleware.RequirePanel("ambulance"), handlers.CreateNGO)
-		gogoo.PATCH("/ambulance/ngos/:id",                middleware.RequirePanel("ambulance"), handlers.UpdateNGO)
-		gogoo.DELETE("/ambulance/ngos/:id",               middleware.RequirePanel("ambulance"), handlers.DeleteNGO)
+		gogoo.GET("/ambulance/ngos", middleware.RequirePanel("ambulance"), handlers.GetNGOs)
+		gogoo.POST("/ambulance/ngos", middleware.RequirePanel("ambulance"), handlers.CreateNGO)
+		gogoo.PATCH("/ambulance/ngos/:id", middleware.RequirePanel("ambulance"), handlers.UpdateNGO)
+		gogoo.DELETE("/ambulance/ngos/:id", middleware.RequirePanel("ambulance"), handlers.DeleteNGO)
 
 		// Ambulance — Hospital management
-		gogoo.GET("/ambulance/hospitals",                 middleware.RequirePanel("ambulance"), handlers.GetHospitals)
-		gogoo.GET("/ambulance/hospitals/:id",             middleware.RequirePanel("ambulance"), handlers.GetHospitalByID)
-		gogoo.POST("/ambulance/hospitals",                middleware.RequirePanel("ambulance"), handlers.CreateHospital)
-		gogoo.PATCH("/ambulance/hospitals/:id",           middleware.RequirePanel("ambulance"), handlers.UpdateHospital)
-		gogoo.DELETE("/ambulance/hospitals/:id",          middleware.RequirePanel("ambulance"), handlers.DeleteHospital)
-		gogoo.PATCH("/ambulance/hospitals/:id/password",  middleware.RequirePanel("ambulance"), handlers.ResetHospitalPassword)
+		gogoo.GET("/ambulance/hospitals", middleware.RequirePanel("ambulance"), handlers.GetHospitals)
+		gogoo.GET("/ambulance/hospitals/:id", middleware.RequirePanel("ambulance"), handlers.GetHospitalByID)
+		gogoo.POST("/ambulance/hospitals", middleware.RequirePanel("ambulance"), handlers.CreateHospital)
+		gogoo.PATCH("/ambulance/hospitals/:id", middleware.RequirePanel("ambulance"), handlers.UpdateHospital)
+		gogoo.DELETE("/ambulance/hospitals/:id", middleware.RequirePanel("ambulance"), handlers.DeleteHospital)
+		gogoo.PATCH("/ambulance/hospitals/:id/password", middleware.RequirePanel("ambulance"), handlers.ResetHospitalPassword)
+
+		// Bogie Tracker — dashboard (master admin) oversight of subscribed
+		// companies. Staff-only, unscoped across all companies by design —
+		// see the comment at the top of tracker_admin.go before reusing any
+		// of this against a company-facing route.
+		gogoo.GET("/dashboard/tracker/companies", middleware.RequirePanel(), handlers.ListTrackerCompanies)
+		gogoo.GET("/dashboard/tracker/companies/:id", middleware.RequirePanel(), handlers.GetTrackerCompany)
+		gogoo.POST("/dashboard/tracker/companies/:id/approve", middleware.RequirePanel(), handlers.ApproveTrackerCompany)
+		gogoo.POST("/dashboard/tracker/companies/:id/reject", middleware.RequirePanel(), handlers.RejectTrackerCompany)
+		gogoo.POST("/dashboard/tracker/companies/:id/suspend", middleware.RequirePanel(), handlers.SuspendTrackerCompany)
+		gogoo.GET("/dashboard/tracker/companies/:id/drivers", middleware.RequirePanel(), handlers.GetTrackerCompanyDrivers)
+		gogoo.GET("/dashboard/tracker/companies/:id/orders", middleware.RequirePanel(), handlers.GetTrackerCompanyOrders)
+		gogoo.GET("/dashboard/tracker/companies/:id/orders/:orderId", middleware.RequirePanel(), handlers.GetTrackerCompanyOrderDetail)
+
+		// Bogie Tracker — company-facing panel. Every route is scoped to the
+		// caller's own company_id (see comment at the top of tracker.go); this
+		// is the opposite scoping rule from the /dashboard/tracker/* admin
+		// routes above, which deliberately see across all companies.
+		gogoo.GET("/tracker/company/profile", middleware.RequireTrackerCompany(), handlers.GetTrackerCompanyProfile)
+		gogoo.PATCH("/tracker/company/profile", middleware.RequireTrackerCompany(), handlers.UpdateTrackerCompanyProfile)
+		gogoo.POST("/tracker/company/password", middleware.RequireTrackerCompany(), handlers.UpdateTrackerCompanyPassword)
+		gogoo.GET("/tracker/drivers", middleware.RequireTrackerCompany(), handlers.ListTrackerCompanyOwnDrivers)
+		gogoo.POST("/tracker/drivers", middleware.RequireTrackerCompany(), handlers.CreateTrackerCompanyDriver)
+		gogoo.PATCH("/tracker/drivers/:id", middleware.RequireTrackerCompany(), handlers.UpdateTrackerCompanyDriver)
+		gogoo.DELETE("/tracker/drivers/:id", middleware.RequireTrackerCompany(), handlers.DeactivateTrackerCompanyDriver)
+		gogoo.GET("/tracker/orders", middleware.RequireTrackerCompany(), handlers.ListTrackerCompanyOwnOrders)
+		gogoo.POST("/tracker/orders", middleware.RequireTrackerCompany(), handlers.CreateTrackerCompanyOrder)
+		gogoo.GET("/tracker/orders/:id", middleware.RequireTrackerCompany(), handlers.GetTrackerCompanyOwnOrder)
+		gogoo.PATCH("/tracker/orders/:id", middleware.RequireTrackerCompany(), handlers.UpdateTrackerCompanyOrderStatus)
+		gogoo.POST("/tracker/orders/:id/events", middleware.RequireTrackerCompany(), handlers.AddTrackerCompanyOrderEvent)
+		gogoo.POST("/tracker/orders/:id/eway-bill", middleware.RequireTrackerCompany(), handlers.UploadTrackerOrderEwayBill)
 
 		// Ambulance — Bookings
-		gogoo.GET("/ambulance/bookings/hospital",         middleware.RequirePanel("hospital", "ambulance"), handlers.GetHospitalBookings)
-		gogoo.POST("/ambulance/bookings/hospital",        middleware.RequirePanel("hospital"), handlers.CreateHospitalBooking)
+		gogoo.GET("/ambulance/bookings/hospital", middleware.RequirePanel("hospital", "ambulance"), handlers.GetHospitalBookings)
+		gogoo.POST("/ambulance/bookings/hospital", middleware.RequirePanel("hospital"), handlers.CreateHospitalBooking)
 		gogoo.PATCH("/ambulance/bookings/hospital/:id/status", middleware.RequirePanel("hospital", "ambulance"), handlers.UpdateHospitalBookingStatus)
-		gogoo.GET("/ambulance/all-bookings",              middleware.RequirePanel("ambulance"), handlers.GetAmbulanceAllBookings)
+		gogoo.GET("/ambulance/all-bookings", middleware.RequirePanel("ambulance"), handlers.GetAmbulanceAllBookings)
 
 		// Support panel — listing all tickets and reading arbitrary tickets'
 		// messages is support-staff-only (tickets carry names, phones, and SOS
@@ -255,34 +292,34 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		// path: /support/chat/my-tickets + /support/chat/:ticket_id/messages.
 		// PATCH stays ungated for now: the rider app calls it to mark its own
 		// ticket resolved (user-app support/chat.tsx).
-		gogoo.GET("/support/tickets",                     middleware.RequirePanel("support"), handlers.GetSupportTickets)
-		gogoo.POST("/support/tickets",                    handlers.CreateSupportTicket)
-		gogoo.PATCH("/support/tickets/:id",               handlers.UpdateSupportTicket)
+		gogoo.GET("/support/tickets", middleware.RequirePanel("support"), handlers.GetSupportTickets)
+		gogoo.POST("/support/tickets", handlers.CreateSupportTicket)
+		gogoo.PATCH("/support/tickets/:id", handlers.UpdateSupportTicket)
 		// Financial/account-altering staff actions — arbitrary-amount refunds,
 		// cancelling any booking, blocking any rider — were reachable by any
 		// authenticated rider/driver token with no panel check at all.
-		gogoo.POST("/support/tickets/:id/refund",         middleware.RequirePanel("support"), handlers.ProcessRefund)
-		gogoo.GET("/support/tickets/:id/messages",        middleware.RequirePanel("support"), handlers.GetTicketMessages)
-		gogoo.POST("/support/tickets/:id/messages",       handlers.SendTicketMessage)
-		gogoo.GET("/support/stats",                       handlers.GetSupportStats)
-		gogoo.POST("/support/cancel-booking/:id",         middleware.RequirePanel("support"), handlers.SupportCancelBooking)
-		gogoo.POST("/support/block-rider/:id",            middleware.RequirePanel("support"), handlers.SupportBlockRider)
+		gogoo.POST("/support/tickets/:id/refund", middleware.RequirePanel("support"), handlers.ProcessRefund)
+		gogoo.GET("/support/tickets/:id/messages", middleware.RequirePanel("support"), handlers.GetTicketMessages)
+		gogoo.POST("/support/tickets/:id/messages", handlers.SendTicketMessage)
+		gogoo.GET("/support/stats", handlers.GetSupportStats)
+		gogoo.POST("/support/cancel-booking/:id", middleware.RequirePanel("support"), handlers.SupportCancelBooking)
+		gogoo.POST("/support/block-rider/:id", middleware.RequirePanel("support"), handlers.SupportBlockRider)
 
 		// In-app chat (rider + driver apps)
-		gogoo.GET("/support/faq",                         handlers.GetFAQ)
-		gogoo.POST("/support/chat/start",                 handlers.StartSupportChat)
-		gogoo.GET("/support/chat/my-tickets",             handlers.GetMyTickets)
-		gogoo.GET("/support/chat/:ticket_id/messages",    handlers.GetChatMessages)
-		gogoo.POST("/support/chat/:ticket_id/messages",   handlers.SendChatMessage)
-		gogoo.POST("/support/chat/:ticket_id/escalate",   handlers.EscalateSupportChat)
-		gogoo.GET("/support/unread-count",                handlers.GetUnreadCount)
+		gogoo.GET("/support/faq", handlers.GetFAQ)
+		gogoo.POST("/support/chat/start", handlers.StartSupportChat)
+		gogoo.GET("/support/chat/my-tickets", handlers.GetMyTickets)
+		gogoo.GET("/support/chat/:ticket_id/messages", handlers.GetChatMessages)
+		gogoo.POST("/support/chat/:ticket_id/messages", handlers.SendChatMessage)
+		gogoo.POST("/support/chat/:ticket_id/escalate", handlers.EscalateSupportChat)
+		gogoo.GET("/support/unread-count", handlers.GetUnreadCount)
 
 		// Lost item reporting (rider app) — reuses the ticket/chat system
-		gogoo.POST("/support/lost-item/photo",            handlers.UploadLostItemPhoto)
-		gogoo.POST("/support/lost-item",                  handlers.ReportLostItem)
+		gogoo.POST("/support/lost-item/photo", handlers.UploadLostItemPhoto)
+		gogoo.POST("/support/lost-item", handlers.ReportLostItem)
 
 		// SOS emergency alert (riders + drivers share the same endpoint)
-		gogoo.POST("/sos",                                handlers.TriggerSOS)
+		gogoo.POST("/sos", handlers.TriggerSOS)
 	}
 
 	// ============================================================
@@ -306,6 +343,3 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 
 	return router
 }
-
-
-
