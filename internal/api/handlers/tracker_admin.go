@@ -15,8 +15,10 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/deploykit/backend/internal/config"
 	"github.com/deploykit/backend/internal/db"
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
 )
 
 // ─── Shared types ─────────────────────────────────────────────────────────────
@@ -155,30 +157,41 @@ func setTrackerCompanyStatus(c *gin.Context, status string, stampApproval bool) 
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 
-	var tag interface{ RowsAffected() int64 }
+	var companyName, contactEmail string
 	var err error
 	if stampApproval {
 		approvedBy := c.GetString("user_id")
-		tag, err = pool.Exec(ctx, `
+		err = pool.QueryRow(ctx, `
 			UPDATE tracker_companies
 			SET status = $1, approved_by = $2, approved_at = NOW(), updated_at = NOW()
 			WHERE id = $3
-		`, status, approvedBy, id)
+			RETURNING company_name, contact_email
+		`, status, approvedBy, id).Scan(&companyName, &contactEmail)
 	} else {
-		tag, err = pool.Exec(ctx, `
+		err = pool.QueryRow(ctx, `
 			UPDATE tracker_companies
 			SET status = $1, updated_at = NOW()
 			WHERE id = $2
-		`, status, id)
+			RETURNING company_name, contact_email
+		`, status, id).Scan(&companyName, &contactEmail)
 	}
 	if err != nil {
+		if err == pgx.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "tracker company not found"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "update failed: " + err.Error()})
 		return
 	}
-	if tag.RowsAffected() == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "tracker company not found"})
-		return
+
+	cfg := c.MustGet("config").(*config.Config)
+	switch status {
+	case "active":
+		sendTrackerApprovedEmail(cfg, companyName, contactEmail)
+	case "rejected":
+		sendTrackerRejectedEmail(cfg, companyName, contactEmail)
 	}
+
 	c.JSON(http.StatusOK, gin.H{"message": "Company " + status})
 }
 

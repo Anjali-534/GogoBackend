@@ -87,6 +87,9 @@ func TrackerCompanySignup(c *gin.Context) {
 		return
 	}
 
+	cfg := c.MustGet("config").(*config.Config)
+	sendTrackerSignupEmail(cfg, req.CompanyName, req.ContactEmail)
+
 	c.JSON(http.StatusCreated, gin.H{
 		"id":      id,
 		"message": "Signup received — your account is pending approval",

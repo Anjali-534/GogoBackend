@@ -68,6 +68,12 @@ type Config struct {
 	// not just the account owner's own address (sandbox mode's restriction).
 	ResendAPIKey    string
 	ResendFromEmail string
+
+	// TrackerPanelURL is the login link sent in the tracker company approval
+	// email. The bogie-tracker-panel frontend isn't deployed yet — this
+	// placeholder MUST be overridden with the real panel URL via
+	// TRACKER_PANEL_URL once it is.
+	TrackerPanelURL string
 }
 
 func Load() *Config {
@@ -116,6 +122,8 @@ func Load() *Config {
 
 		ResendAPIKey:    getString("RESEND_API_KEY", ""),
 		ResendFromEmail: getString("RESEND_FROM_EMAIL", "statements@bogie.in"),
+
+		TrackerPanelURL: getString("TRACKER_PANEL_URL", "https://tracker.bogie.in"),
 	}
 
 	return cfg
