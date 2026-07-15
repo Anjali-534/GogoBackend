@@ -71,6 +71,15 @@ type TrackerOrder struct {
 	Status               string    `json:"status"`
 	PublicTrackingToken  string    `json:"public_tracking_token"`
 	CreatedAt            time.Time `json:"created_at"`
+
+	// Dispatch details — from the real dispatch sheet, all optional. Existing
+	// orders predate these columns, so they come back null; render "—" on
+	// the frontend rather than coalescing to empty string here.
+	ConsigneeName     *string    `json:"consignee_name"`
+	Material          *string    `json:"material"`
+	Quantity          *string    `json:"quantity"`
+	DispatchDatetime  *time.Time `json:"dispatch_datetime"`
+	DocumentsEnclosed *string    `json:"documents_enclosed"`
 }
 
 type TrackerOrderEvent struct {
@@ -264,7 +273,8 @@ func GetTrackerCompanyOrders(c *gin.Context) {
 		       COALESCE(transporter_name,''), COALESCE(transporter_phone,''),
 		       driver_id::text, COALESCE(driver_name,''), COALESCE(driver_phone,''),
 		       vehicle_number, COALESCE(eway_bill_number,''), COALESCE(eway_bill_file_url,''),
-		       status, public_tracking_token, created_at
+		       status, public_tracking_token, created_at,
+		       consignee_name, material, quantity, dispatch_datetime, documents_enclosed
 		FROM tracker_orders
 		WHERE company_id = $1
 		ORDER BY created_at DESC
@@ -286,6 +296,7 @@ func GetTrackerCompanyOrders(c *gin.Context) {
 			&driverID, &o.DriverName, &o.DriverPhone,
 			&o.VehicleNumber, &o.EwayBillNumber, &o.EwayBillFileURL,
 			&o.Status, &o.PublicTrackingToken, &o.CreatedAt,
+			&o.ConsigneeName, &o.Material, &o.Quantity, &o.DispatchDatetime, &o.DocumentsEnclosed,
 		); err != nil {
 			continue
 		}
@@ -313,7 +324,8 @@ func GetTrackerCompanyOrderDetail(c *gin.Context) {
 		       COALESCE(transporter_name,''), COALESCE(transporter_phone,''),
 		       driver_id::text, COALESCE(driver_name,''), COALESCE(driver_phone,''),
 		       vehicle_number, COALESCE(eway_bill_number,''), COALESCE(eway_bill_file_url,''),
-		       status, public_tracking_token, created_at
+		       status, public_tracking_token, created_at,
+		       consignee_name, material, quantity, dispatch_datetime, documents_enclosed
 		FROM tracker_orders
 		WHERE id = $1 AND company_id = $2
 	`, orderID, companyID).Scan(
@@ -323,6 +335,7 @@ func GetTrackerCompanyOrderDetail(c *gin.Context) {
 		&driverID, &o.DriverName, &o.DriverPhone,
 		&o.VehicleNumber, &o.EwayBillNumber, &o.EwayBillFileURL,
 		&o.Status, &o.PublicTrackingToken, &o.CreatedAt,
+		&o.ConsigneeName, &o.Material, &o.Quantity, &o.DispatchDatetime, &o.DocumentsEnclosed,
 	)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})

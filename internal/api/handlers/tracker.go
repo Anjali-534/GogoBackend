@@ -401,7 +401,8 @@ func ListTrackerCompanyOwnOrders(c *gin.Context) {
 		       COALESCE(transporter_name,''), COALESCE(transporter_phone,''),
 		       driver_id::text, COALESCE(driver_name,''), COALESCE(driver_phone,''),
 		       vehicle_number, COALESCE(eway_bill_number,''), COALESCE(eway_bill_file_url,''),
-		       status, public_tracking_token, created_at
+		       status, public_tracking_token, created_at,
+		       consignee_name, material, quantity, dispatch_datetime, documents_enclosed
 		FROM tracker_orders
 		WHERE company_id = $1`
 	args := []interface{}{companyID}
@@ -429,6 +430,7 @@ func ListTrackerCompanyOwnOrders(c *gin.Context) {
 			&driverID, &o.DriverName, &o.DriverPhone,
 			&o.VehicleNumber, &o.EwayBillNumber, &o.EwayBillFileURL,
 			&o.Status, &o.PublicTrackingToken, &o.CreatedAt,
+			&o.ConsigneeName, &o.Material, &o.Quantity, &o.DispatchDatetime, &o.DocumentsEnclosed,
 		); err != nil {
 			continue
 		}
@@ -454,6 +456,13 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 		DriverID             *string `json:"driver_id"`
 		VehicleNumber        string  `json:"vehicle_number" binding:"required"`
 		EwayBillNumber       string  `json:"eway_bill_number"`
+
+		// Dispatch details — from the real dispatch sheet, all optional.
+		ConsigneeName     string     `json:"consignee_name"`
+		Material          string     `json:"material"`
+		Quantity          string     `json:"quantity"`
+		DispatchDatetime  *time.Time `json:"dispatch_datetime"`
+		DocumentsEnclosed string     `json:"documents_enclosed"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -498,12 +507,15 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 			(id, company_id, booked_for_company_name, booked_for_phone,
 			 dispatch_from, dispatch_to, transporter_name, transporter_phone,
 			 driver_id, driver_name, driver_phone, vehicle_number,
-			 eway_bill_number, status, public_tracking_token)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'created',$14)
+			 eway_bill_number, status, public_tracking_token,
+			 consignee_name, material, quantity, dispatch_datetime, documents_enclosed)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'created',$14,$15,$16,$17,$18,$19)
 	`, id, companyID, req.BookedForCompanyName, req.BookedForPhone,
 		req.DispatchFrom, req.DispatchTo, nullIfEmpty(req.TransporterName), nullIfEmpty(req.TransporterPhone),
 		req.DriverID, driverName, driverPhone, req.VehicleNumber,
-		nullIfEmpty(req.EwayBillNumber), token)
+		nullIfEmpty(req.EwayBillNumber), token,
+		nullIfEmpty(req.ConsigneeName), nullIfEmpty(req.Material), nullIfEmpty(req.Quantity),
+		req.DispatchDatetime, nullIfEmpty(req.DocumentsEnclosed))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create order: " + err.Error()})
 		return
@@ -542,7 +554,8 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 		       COALESCE(transporter_name,''), COALESCE(transporter_phone,''),
 		       driver_id::text, COALESCE(driver_name,''), COALESCE(driver_phone,''),
 		       vehicle_number, COALESCE(eway_bill_number,''), COALESCE(eway_bill_file_url,''),
-		       status, public_tracking_token, created_at
+		       status, public_tracking_token, created_at,
+		       consignee_name, material, quantity, dispatch_datetime, documents_enclosed
 		FROM tracker_orders
 		WHERE id = $1 AND company_id = $2
 	`, orderID, companyID).Scan(
@@ -552,6 +565,7 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 		&driverID, &o.DriverName, &o.DriverPhone,
 		&o.VehicleNumber, &o.EwayBillNumber, &o.EwayBillFileURL,
 		&o.Status, &o.PublicTrackingToken, &o.CreatedAt,
+		&o.ConsigneeName, &o.Material, &o.Quantity, &o.DispatchDatetime, &o.DocumentsEnclosed,
 	)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
@@ -789,12 +803,16 @@ func GetPublicTrackerOrder(c *gin.Context) {
 
 	var status, dispatchFrom, dispatchTo, vehicleNumber string
 	var transporterName, transporterPhone, driverName, driverPhone *string
+	var consigneeName, material, quantity *string
+	var dispatchDatetime *time.Time
 	err := pool.QueryRow(ctx, `
 		SELECT status, dispatch_from, dispatch_to, vehicle_number,
-		       transporter_name, transporter_phone, driver_name, driver_phone
+		       transporter_name, transporter_phone, driver_name, driver_phone,
+		       consignee_name, material, quantity, dispatch_datetime
 		FROM tracker_orders WHERE public_tracking_token = $1
 	`, token).Scan(&status, &dispatchFrom, &dispatchTo, &vehicleNumber,
-		&transporterName, &transporterPhone, &driverName, &driverPhone)
+		&transporterName, &transporterPhone, &driverName, &driverPhone,
+		&consigneeName, &material, &quantity, &dispatchDatetime)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "tracking link not found"})
 		return
@@ -840,6 +858,10 @@ func GetPublicTrackerOrder(c *gin.Context) {
 		"transporter_phone": transporterPhone,
 		"driver_name":       driverName,
 		"driver_phone":      driverPhone,
+		"consignee_name":    consigneeName,
+		"material":          material,
+		"quantity":          quantity,
+		"dispatch_datetime": dispatchDatetime,
 		"events":            events,
 	})
 }
