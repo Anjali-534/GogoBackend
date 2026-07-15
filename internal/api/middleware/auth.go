@@ -1,10 +1,12 @@
 package middleware
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
 	"github.com/deploykit/backend/internal/auth"
+	"github.com/deploykit/backend/internal/db"
 	"github.com/gin-gonic/gin"
 )
 
@@ -105,6 +107,12 @@ func RequirePanel(panels ...string) gin.HandlerFunc {
 // and puts the JWT-derived company id into gin context as "company_id" —
 // handlers must scope every query off this value, never a client-supplied
 // path/query param (same defense-in-depth rule as GetHospitalBookings).
+//
+// It also re-checks the company's live status on every request (one indexed
+// PK lookup) rather than trusting the JWT alone — otherwise suspending a
+// company wouldn't cut off an already-issued token until it expires. The
+// 403 body matches login's shape ({error, status}) so the frontend can
+// route both cases to the same blocked-screen handling.
 func RequireTrackerCompany() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c.GetString("panel") != "tracker_company" {
@@ -112,7 +120,24 @@ func RequireTrackerCompany() gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		c.Set("company_id", c.GetString("user_id"))
+
+		companyID := c.GetString("user_id")
+		var status string
+		err := db.GetDB().GetPool().QueryRow(context.Background(),
+			`SELECT status FROM tracker_companies WHERE id=$1`, companyID,
+		).Scan(&status)
+		if err != nil {
+			c.JSON(http.StatusForbidden, gin.H{"error": "account not found"})
+			c.Abort()
+			return
+		}
+		if status != "active" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "account " + status, "status": status})
+			c.Abort()
+			return
+		}
+
+		c.Set("company_id", companyID)
 		c.Next()
 	}
 }
