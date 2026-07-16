@@ -1024,3 +1024,13 @@ CREATE TABLE IF NOT EXISTS tracker_location_pings (
 
 CREATE INDEX IF NOT EXISTS idx_tracker_location_pings_order_id_created_at
     ON tracker_location_pings(order_id, created_at);
+
+-- ============================================================
+-- Migration 026 — Bogie Tracker: optional lat/lng for dispatch_from
+-- and dispatch_to addresses (Ola Places autocomplete / current location).
+-- ============================================================
+ALTER TABLE tracker_orders
+    ADD COLUMN IF NOT EXISTS dispatch_from_lat DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS dispatch_from_lng DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS dispatch_to_lat   DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS dispatch_to_lng   DOUBLE PRECISION;

@@ -60,6 +60,10 @@ type TrackerOrder struct {
 	BookedForPhone       string    `json:"booked_for_phone"`
 	DispatchFrom         string    `json:"dispatch_from"`
 	DispatchTo           string    `json:"dispatch_to"`
+	DispatchFromLat      *float64  `json:"dispatch_from_lat"`
+	DispatchFromLng      *float64  `json:"dispatch_from_lng"`
+	DispatchToLat        *float64  `json:"dispatch_to_lat"`
+	DispatchToLng        *float64  `json:"dispatch_to_lng"`
 	TransporterName      string    `json:"transporter_name"`
 	TransporterPhone     string    `json:"transporter_phone"`
 	DriverID             *string   `json:"driver_id"`
