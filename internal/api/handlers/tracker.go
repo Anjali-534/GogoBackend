@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/deploykit/backend/internal/config"
@@ -584,11 +585,24 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"id": id, "public_tracking_token": token, "message": "order created"})
 }
 
+// routeFetchInFlight dedupes concurrent cacheTrackerOrderRoute calls per
+// order — the order detail page polls every 15s, and without this a
+// persistently-failing route fetch (e.g. unroutable coords) would fire a
+// fresh Ola call on every poll tick.
+var routeFetchInFlight sync.Map
+
 // cacheTrackerOrderRoute fetches the Ola driving route between the dispatch
 // endpoints once and stores it on the order — the single directions call this
 // order will ever cost. Runs detached from the create request; on failure the
 // route columns just stay NULL and the maps skip the planned-route line.
+// Also fired lazily from GetTrackerCompanyOwnOrder as self-healing when a
+// create-time fetch failed.
 func cacheTrackerOrderRoute(orderID string, fromLat, fromLng, toLat, toLng float64) {
+	if _, alreadyRunning := routeFetchInFlight.LoadOrStore(orderID, true); alreadyRunning {
+		return
+	}
+	defer routeFetchInFlight.Delete(orderID)
+
 	from := fmt.Sprintf("%f,%f", fromLat, fromLng)
 	to := fmt.Sprintf("%f,%f", toLat, toLng)
 	polyline, distanceKm, durationMins, err := fetchOlaDirections(from, to)
@@ -653,6 +667,17 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 		return
 	}
 	o.DriverID = driverID
+
+	// Lazy backfill: if the create-time route fetch failed (or the order
+	// predates route caching) but we have both coordinate pairs, retry in the
+	// background. This response returns without the route; it shows up on the
+	// page's next poll once stored.
+	if o.RoutePolyline == nil &&
+		o.DispatchFromLat != nil && o.DispatchFromLng != nil &&
+		o.DispatchToLat != nil && o.DispatchToLng != nil {
+		go cacheTrackerOrderRoute(o.ID,
+			*o.DispatchFromLat, *o.DispatchFromLng, *o.DispatchToLat, *o.DispatchToLng)
+	}
 
 	rows, err := pool.Query(ctx, `
 		SELECT id, order_id, status, COALESCE(note,''), COALESCE(location,''), created_at
