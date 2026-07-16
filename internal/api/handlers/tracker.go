@@ -14,6 +14,8 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -24,6 +26,7 @@ import (
 	"github.com/deploykit/backend/internal/db"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -606,7 +609,12 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 		&o.DispatchFromLat, &o.DispatchFromLng, &o.DispatchToLat, &o.DispatchToLng,
 	)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
+		if errors.Is(err, pgx.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
+		} else {
+			log.Printf("GetTrackerCompanyOwnOrder: scan failed for order=%s company=%s: %v", orderID, companyID, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "db error: " + err.Error()})
+		}
 		return
 	}
 	o.DriverID = driverID
