@@ -80,6 +80,21 @@ type TrackerOrder struct {
 	Quantity          *string    `json:"quantity"`
 	DispatchDatetime  *time.Time `json:"dispatch_datetime"`
 	DocumentsEnclosed *string    `json:"documents_enclosed"`
+
+	// Live driver location tracking — null until the order first moves to
+	// 'dispatched' (that's when DriverTrackingToken is generated) and until
+	// the driver's share page sends its first location ping.
+	DriverTrackingToken *string    `json:"driver_tracking_token"`
+	LastLat             *float64   `json:"last_lat"`
+	LastLng             *float64   `json:"last_lng"`
+	LastLocationAt      *time.Time `json:"last_location_at"`
+}
+
+// TrackerLocationPing is one point on an order's route trail.
+type TrackerLocationPing struct {
+	Lat       float64   `json:"lat"`
+	Lng       float64   `json:"lng"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type TrackerOrderEvent struct {

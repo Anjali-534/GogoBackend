@@ -24,6 +24,7 @@ import (
 	"github.com/deploykit/backend/internal/db"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -35,6 +36,8 @@ var terminalOrderStatuses = map[string]bool{
 
 var validOrderStatuses = map[string]bool{
 	"created":    true,
+	"loading":    true,
+	"loaded":     true,
 	"dispatched": true,
 	"in_transit": true,
 	"delivered":  true,
@@ -387,6 +390,31 @@ func generateTrackingToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
+// fetchLocationPings returns an order's route trail, oldest first, for
+// drawing the polyline on the map.
+func fetchLocationPings(ctx context.Context, pool *pgxpool.Pool, orderID string) ([]TrackerLocationPing, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT lat, lng, created_at
+		FROM tracker_location_pings
+		WHERE order_id = $1
+		ORDER BY created_at ASC
+	`, orderID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	pings := []TrackerLocationPing{}
+	for rows.Next() {
+		var p TrackerLocationPing
+		if err := rows.Scan(&p.Lat, &p.Lng, &p.CreatedAt); err != nil {
+			continue
+		}
+		pings = append(pings, p)
+	}
+	return pings, nil
+}
+
 // GET /gogoo/tracker/orders
 func ListTrackerCompanyOwnOrders(c *gin.Context) {
 	companyID := c.GetString("company_id")
@@ -555,7 +583,8 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 		       driver_id::text, COALESCE(driver_name,''), COALESCE(driver_phone,''),
 		       vehicle_number, COALESCE(eway_bill_number,''), COALESCE(eway_bill_file_url,''),
 		       status, public_tracking_token, created_at,
-		       consignee_name, material, quantity, dispatch_datetime, documents_enclosed
+		       consignee_name, material, quantity, dispatch_datetime, documents_enclosed,
+		       driver_tracking_token, last_lat, last_lng, last_location_at
 		FROM tracker_orders
 		WHERE id = $1 AND company_id = $2
 	`, orderID, companyID).Scan(
@@ -566,6 +595,7 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 		&o.VehicleNumber, &o.EwayBillNumber, &o.EwayBillFileURL,
 		&o.Status, &o.PublicTrackingToken, &o.CreatedAt,
 		&o.ConsigneeName, &o.Material, &o.Quantity, &o.DispatchDatetime, &o.DocumentsEnclosed,
+		&o.DriverTrackingToken, &o.LastLat, &o.LastLng, &o.LastLocationAt,
 	)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
@@ -597,7 +627,13 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 		events = []TrackerOrderEvent{}
 	}
 
-	c.JSON(http.StatusOK, gin.H{"order": o, "events": events})
+	pings, err := fetchLocationPings(ctx, pool, orderID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"order": o, "events": events, "location_pings": pings})
 }
 
 // PATCH /gogoo/tracker/orders/:id — status transition + event log entry.
@@ -623,15 +659,29 @@ func UpdateTrackerCompanyOrderStatus(c *gin.Context) {
 	pool := db.GetDB().GetPool()
 
 	var currentStatus string
+	var driverTrackingToken *string
 	if err := pool.QueryRow(ctx, `
-		SELECT status FROM tracker_orders WHERE id=$1 AND company_id=$2
-	`, orderID, companyID).Scan(&currentStatus); err != nil {
+		SELECT status, driver_tracking_token FROM tracker_orders WHERE id=$1 AND company_id=$2
+	`, orderID, companyID).Scan(&currentStatus, &driverTrackingToken); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
 		return
 	}
 	if terminalOrderStatuses[currentStatus] {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "order is in a terminal state (" + currentStatus + ") and cannot be updated"})
 		return
+	}
+
+	// The driver's share-link token is generated the first time an order
+	// moves to 'dispatched' — that's the point the driver actually needs a
+	// link to send from. Never regenerated on later transitions.
+	newDriverToken := ""
+	if req.Status == "dispatched" && driverTrackingToken == nil {
+		token, err := generateTrackingToken()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate driver tracking token"})
+			return
+		}
+		newDriverToken = token
 	}
 
 	tx, err := pool.Begin(ctx)
@@ -641,9 +691,16 @@ func UpdateTrackerCompanyOrderStatus(c *gin.Context) {
 	}
 	defer tx.Rollback(ctx)
 
-	tag, err := tx.Exec(ctx, `
-		UPDATE tracker_orders SET status=$1, updated_at=NOW() WHERE id=$2 AND company_id=$3
-	`, req.Status, orderID, companyID)
+	var tag interface{ RowsAffected() int64 }
+	if newDriverToken != "" {
+		tag, err = tx.Exec(ctx, `
+			UPDATE tracker_orders SET status=$1, driver_tracking_token=$2, updated_at=NOW() WHERE id=$3 AND company_id=$4
+		`, req.Status, newDriverToken, orderID, companyID)
+	} else {
+		tag, err = tx.Exec(ctx, `
+			UPDATE tracker_orders SET status=$1, updated_at=NOW() WHERE id=$2 AND company_id=$3
+		`, req.Status, orderID, companyID)
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "update failed"})
 		return
@@ -667,7 +724,11 @@ func UpdateTrackerCompanyOrderStatus(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "status updated"})
+	resp := gin.H{"message": "status updated"}
+	if newDriverToken != "" {
+		resp["driver_tracking_token"] = newDriverToken
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // POST /gogoo/tracker/orders/:id/events — add a note/location event without
@@ -801,18 +862,22 @@ func GetPublicTrackerOrder(c *gin.Context) {
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 
-	var status, dispatchFrom, dispatchTo, vehicleNumber string
+	var orderID, status, dispatchFrom, dispatchTo, vehicleNumber string
 	var transporterName, transporterPhone, driverName, driverPhone *string
 	var consigneeName, material, quantity *string
 	var dispatchDatetime *time.Time
+	var lastLat, lastLng *float64
+	var lastLocationAt *time.Time
 	err := pool.QueryRow(ctx, `
-		SELECT status, dispatch_from, dispatch_to, vehicle_number,
+		SELECT id, status, dispatch_from, dispatch_to, vehicle_number,
 		       transporter_name, transporter_phone, driver_name, driver_phone,
-		       consignee_name, material, quantity, dispatch_datetime
+		       consignee_name, material, quantity, dispatch_datetime,
+		       last_lat, last_lng, last_location_at
 		FROM tracker_orders WHERE public_tracking_token = $1
-	`, token).Scan(&status, &dispatchFrom, &dispatchTo, &vehicleNumber,
+	`, token).Scan(&orderID, &status, &dispatchFrom, &dispatchTo, &vehicleNumber,
 		&transporterName, &transporterPhone, &driverName, &driverPhone,
-		&consigneeName, &material, &quantity, &dispatchDatetime)
+		&consigneeName, &material, &quantity, &dispatchDatetime,
+		&lastLat, &lastLng, &lastLocationAt)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "tracking link not found"})
 		return
@@ -849,6 +914,12 @@ func GetPublicTrackerOrder(c *gin.Context) {
 		events = []publicEvent{}
 	}
 
+	pings, err := fetchLocationPings(ctx, pool, orderID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"status":            status,
 		"dispatch_from":     dispatchFrom,
@@ -863,5 +934,106 @@ func GetPublicTrackerOrder(c *gin.Context) {
 		"quantity":          quantity,
 		"dispatch_datetime": dispatchDatetime,
 		"events":            events,
+		"last_lat":          lastLat,
+		"last_lng":          lastLng,
+		"last_location_at":  lastLocationAt,
+		"location_pings":    pings,
 	})
+}
+
+// ─── Driver share-link (public, token-gated) ───────────────────────────────
+
+// GET /gogoo/public/tracker/driver/:driver_token — unauthenticated. Returns
+// the route summary + status the driver's share page needs to render itself.
+// No customer/company financial or contact fields — the driver already
+// knows who they are, this is just enough context to confirm the right
+// order and show the route while they share their location.
+func GetTrackerDriverOrder(c *gin.Context) {
+	driverToken := c.Param("driver_token")
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+
+	var status, dispatchFrom, dispatchTo, vehicleNumber string
+	err := pool.QueryRow(ctx, `
+		SELECT status, dispatch_from, dispatch_to, vehicle_number
+		FROM tracker_orders WHERE driver_tracking_token = $1
+	`, driverToken).Scan(&status, &dispatchFrom, &dispatchTo, &vehicleNumber)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "tracking link not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":         status,
+		"dispatch_from":  dispatchFrom,
+		"dispatch_to":    dispatchTo,
+		"vehicle_number": vehicleNumber,
+		"is_terminal":    terminalOrderStatuses[status],
+	})
+}
+
+// POST /gogoo/public/tracker/driver/:driver_token/location — unauthenticated,
+// token-gated. Updates the order's last-known location and appends to the
+// route trail. Rejects once the order has reached a terminal state — the
+// driver's page should stop sending once the trip is over.
+func PostTrackerDriverLocation(c *gin.Context) {
+	driverToken := c.Param("driver_token")
+	var req struct {
+		Lat *float64 `json:"lat" binding:"required"`
+		Lng *float64 `json:"lng" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if *req.Lat < -90 || *req.Lat > 90 || *req.Lng < -180 || *req.Lng > 180 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "lat/lng out of range"})
+		return
+	}
+
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+
+	var orderID, status string
+	if err := pool.QueryRow(ctx, `
+		SELECT id, status FROM tracker_orders WHERE driver_tracking_token = $1
+	`, driverToken).Scan(&orderID, &status); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "tracking link not found"})
+		return
+	}
+	if terminalOrderStatuses[status] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "order is in a terminal state (" + status + ") and is no longer tracked"})
+		return
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, `
+		UPDATE tracker_orders SET last_lat=$1, last_lng=$2, last_location_at=NOW() WHERE id=$3
+	`, *req.Lat, *req.Lng, orderID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "update failed"})
+		return
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO tracker_location_pings (id, order_id, lat, lng)
+		VALUES ($1,$2,$3,$4)
+	`, uuid.New(), orderID, *req.Lat, *req.Lng)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to log ping"})
+		return
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "location updated"})
 }

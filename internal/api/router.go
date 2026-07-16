@@ -110,6 +110,11 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogooPublic.POST("/tracker/signup", handlers.TrackerCompanySignup)
 		gogooPublic.POST("/tracker/login", handlers.TrackerCompanyLogin)
 		gogooPublic.GET("/public/tracker/orders/:token", handlers.GetPublicTrackerOrder)
+
+		// Bogie Tracker — driver share-link (live location), protected only
+		// by the unguessable driver_tracking_token, same model as above.
+		gogooPublic.GET("/public/tracker/driver/:driver_token", handlers.GetTrackerDriverOrder)
+		gogooPublic.POST("/public/tracker/driver/:driver_token/location", handlers.PostTrackerDriverLocation)
 	}
 
 	// ============================================================

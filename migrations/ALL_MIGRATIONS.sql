@@ -954,3 +954,73 @@ WHERE NOT EXISTS (
 ALTER TABLE bookings
   ADD COLUMN IF NOT EXISTS receiver_name  TEXT,
   ADD COLUMN IF NOT EXISTS receiver_phone TEXT;
+
+-- ============================================================
+-- Migration 025 — Bogie Tracker: expanded status flow + live driver
+-- location tracking.
+-- ============================================================
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'tracker_orders_status_check'
+        AND conrelid = 'tracker_orders'::regclass
+    ) THEN
+        ALTER TABLE tracker_orders DROP CONSTRAINT tracker_orders_status_check;
+    END IF;
+EXCEPTION WHEN OTHERS THEN
+    NULL;
+END $$;
+
+ALTER TABLE tracker_orders
+    ADD CONSTRAINT tracker_orders_status_check
+    CHECK (status IN ('created', 'loading', 'loaded', 'dispatched', 'in_transit', 'delivered', 'cancelled'));
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'tracker_order_events_status_check'
+        AND conrelid = 'tracker_order_events'::regclass
+    ) THEN
+        ALTER TABLE tracker_order_events DROP CONSTRAINT tracker_order_events_status_check;
+    END IF;
+EXCEPTION WHEN OTHERS THEN
+    NULL;
+END $$;
+
+ALTER TABLE tracker_order_events
+    ADD CONSTRAINT tracker_order_events_status_check
+    CHECK (status IN ('created', 'loading', 'loaded', 'dispatched', 'in_transit', 'delivered', 'cancelled'));
+
+ALTER TABLE tracker_orders
+    ADD COLUMN IF NOT EXISTS driver_tracking_token TEXT,
+    ADD COLUMN IF NOT EXISTS last_lat               DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS last_lng               DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS last_location_at        TIMESTAMPTZ;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'tracker_orders_driver_tracking_token_key'
+        AND conrelid = 'tracker_orders'::regclass
+    ) THEN
+        ALTER TABLE tracker_orders
+            ADD CONSTRAINT tracker_orders_driver_tracking_token_key UNIQUE (driver_tracking_token);
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_tracker_orders_driver_tracking_token
+    ON tracker_orders(driver_tracking_token);
+
+CREATE TABLE IF NOT EXISTS tracker_location_pings (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    order_id    UUID NOT NULL REFERENCES tracker_orders(id) ON DELETE CASCADE,
+    lat         DOUBLE PRECISION NOT NULL,
+    lng         DOUBLE PRECISION NOT NULL,
+    created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_tracker_location_pings_order_id_created_at
+    ON tracker_location_pings(order_id, created_at);
