@@ -1038,25 +1038,31 @@ func GetPublicTrackerOrder(c *gin.Context) {
 // the route summary + status the driver's share page needs to render itself.
 // No customer/company financial or contact fields — the driver already
 // knows who they are, this is just enough context to confirm the right
-// order and show the route while they share their location.
+// order and show the route while they share their location. company_name
+// (only — no email/phone/GSTIN) is included so the page can be branded
+// with who the driver is dispatched for.
 func GetTrackerDriverOrder(c *gin.Context) {
 	driverToken := c.Param("driver_token")
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 
-	var status, dispatchFrom, dispatchTo, vehicleNumber string
+	var status, dispatchFrom, dispatchTo, vehicleNumber, companyName string
 	var fromLat, fromLng, toLat, toLng *float64
 	var routePolyline *string
 	var routeDistanceKm *float64
 	var routeDurationMins *int
 	err := pool.QueryRow(ctx, `
-		SELECT status, dispatch_from, dispatch_to, vehicle_number,
-		       dispatch_from_lat, dispatch_from_lng, dispatch_to_lat, dispatch_to_lng,
-		       route_polyline, route_distance_km, route_duration_mins
-		FROM tracker_orders WHERE driver_tracking_token = $1
+		SELECT o.status, o.dispatch_from, o.dispatch_to, o.vehicle_number,
+		       o.dispatch_from_lat, o.dispatch_from_lng, o.dispatch_to_lat, o.dispatch_to_lng,
+		       o.route_polyline, o.route_distance_km, o.route_duration_mins,
+		       c.company_name
+		FROM tracker_orders o
+		JOIN tracker_companies c ON c.id = o.company_id
+		WHERE o.driver_tracking_token = $1
 	`, driverToken).Scan(&status, &dispatchFrom, &dispatchTo, &vehicleNumber,
 		&fromLat, &fromLng, &toLat, &toLng,
-		&routePolyline, &routeDistanceKm, &routeDurationMins)
+		&routePolyline, &routeDistanceKm, &routeDurationMins,
+		&companyName)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "tracking link not found"})
 		return
@@ -1067,6 +1073,7 @@ func GetTrackerDriverOrder(c *gin.Context) {
 		"dispatch_from":       dispatchFrom,
 		"dispatch_to":         dispatchTo,
 		"vehicle_number":      vehicleNumber,
+		"company_name":        companyName,
 		"is_terminal":         terminalOrderStatuses[status],
 		"dispatch_from_lat":   fromLat,
 		"dispatch_from_lng":   fromLng,
