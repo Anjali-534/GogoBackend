@@ -92,6 +92,12 @@ type TrackerOrder struct {
 	LastLat             *float64   `json:"last_lat"`
 	LastLng             *float64   `json:"last_lng"`
 	LastLocationAt      *time.Time `json:"last_location_at"`
+
+	// Planned route (Ola Directions), computed once at order creation when
+	// both dispatch coordinate pairs exist — see cacheTrackerOrderRoute.
+	RoutePolyline     *string  `json:"route_polyline"`
+	RouteDistanceKm   *float64 `json:"route_distance_km"`
+	RouteDurationMins *int     `json:"route_duration_mins"`
 }
 
 // TrackerLocationPing is one point on an order's route trail.

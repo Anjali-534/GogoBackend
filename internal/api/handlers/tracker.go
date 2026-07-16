@@ -15,6 +15,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -572,7 +573,39 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 		return
 	}
 
+	// Route caching is fire-and-forget: the order is already committed and
+	// creation must not block on (or fail with) the Ola directions call.
+	// The tracking pages just render without a planned route until it lands.
+	if req.DispatchFromLat != nil && req.DispatchFromLng != nil && req.DispatchToLat != nil && req.DispatchToLng != nil {
+		go cacheTrackerOrderRoute(id.String(),
+			*req.DispatchFromLat, *req.DispatchFromLng, *req.DispatchToLat, *req.DispatchToLng)
+	}
+
 	c.JSON(http.StatusCreated, gin.H{"id": id, "public_tracking_token": token, "message": "order created"})
+}
+
+// cacheTrackerOrderRoute fetches the Ola driving route between the dispatch
+// endpoints once and stores it on the order — the single directions call this
+// order will ever cost. Runs detached from the create request; on failure the
+// route columns just stay NULL and the maps skip the planned-route line.
+func cacheTrackerOrderRoute(orderID string, fromLat, fromLng, toLat, toLng float64) {
+	from := fmt.Sprintf("%f,%f", fromLat, fromLng)
+	to := fmt.Sprintf("%f,%f", toLat, toLng)
+	polyline, distanceKm, durationMins, err := fetchOlaDirections(from, to)
+	if err != nil || polyline == "" {
+		log.Printf("cacheTrackerOrderRoute: directions fetch failed for order=%s: %v", orderID, err)
+		return
+	}
+
+	pool := db.GetDB().GetPool()
+	_, err = pool.Exec(context.Background(), `
+		UPDATE tracker_orders
+		SET route_polyline=$1, route_distance_km=$2, route_duration_mins=$3, updated_at=NOW()
+		WHERE id=$4
+	`, polyline, distanceKm, durationMins, orderID)
+	if err != nil {
+		log.Printf("cacheTrackerOrderRoute: store failed for order=%s: %v", orderID, err)
+	}
 }
 
 // GET /gogoo/tracker/orders/:id
@@ -594,7 +627,8 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 		       status, public_tracking_token, created_at,
 		       consignee_name, material, quantity, dispatch_datetime, documents_enclosed,
 		       driver_tracking_token, last_lat, last_lng, last_location_at,
-		       dispatch_from_lat, dispatch_from_lng, dispatch_to_lat, dispatch_to_lng
+		       dispatch_from_lat, dispatch_from_lng, dispatch_to_lat, dispatch_to_lng,
+		       route_polyline, route_distance_km, route_duration_mins
 		FROM tracker_orders
 		WHERE id = $1 AND company_id = $2
 	`, orderID, companyID).Scan(
@@ -607,6 +641,7 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 		&o.ConsigneeName, &o.Material, &o.Quantity, &o.DispatchDatetime, &o.DocumentsEnclosed,
 		&o.DriverTrackingToken, &o.LastLat, &o.LastLng, &o.LastLocationAt,
 		&o.DispatchFromLat, &o.DispatchFromLng, &o.DispatchToLat, &o.DispatchToLng,
+		&o.RoutePolyline, &o.RouteDistanceKm, &o.RouteDurationMins,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -885,18 +920,23 @@ func GetPublicTrackerOrder(c *gin.Context) {
 	var lastLat, lastLng *float64
 	var lastLocationAt *time.Time
 	var dispatchFromLat, dispatchFromLng, dispatchToLat, dispatchToLng *float64
+	var routePolyline *string
+	var routeDistanceKm *float64
+	var routeDurationMins *int
 	err := pool.QueryRow(ctx, `
 		SELECT id, status, dispatch_from, dispatch_to, vehicle_number,
 		       transporter_name, transporter_phone, driver_name, driver_phone,
 		       consignee_name, material, quantity, dispatch_datetime,
 		       last_lat, last_lng, last_location_at,
-		       dispatch_from_lat, dispatch_from_lng, dispatch_to_lat, dispatch_to_lng
+		       dispatch_from_lat, dispatch_from_lng, dispatch_to_lat, dispatch_to_lng,
+		       route_polyline, route_distance_km, route_duration_mins
 		FROM tracker_orders WHERE public_tracking_token = $1
 	`, token).Scan(&orderID, &status, &dispatchFrom, &dispatchTo, &vehicleNumber,
 		&transporterName, &transporterPhone, &driverName, &driverPhone,
 		&consigneeName, &material, &quantity, &dispatchDatetime,
 		&lastLat, &lastLng, &lastLocationAt,
-		&dispatchFromLat, &dispatchFromLng, &dispatchToLat, &dispatchToLng)
+		&dispatchFromLat, &dispatchFromLng, &dispatchToLat, &dispatchToLng,
+		&routePolyline, &routeDistanceKm, &routeDurationMins)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "tracking link not found"})
 		return
@@ -940,27 +980,30 @@ func GetPublicTrackerOrder(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"status":            status,
-		"dispatch_from":     dispatchFrom,
-		"dispatch_to":       dispatchTo,
-		"vehicle_number":    vehicleNumber,
-		"transporter_name":  transporterName,
-		"transporter_phone": transporterPhone,
-		"driver_name":       driverName,
-		"driver_phone":      driverPhone,
-		"consignee_name":    consigneeName,
-		"material":          material,
-		"quantity":          quantity,
-		"dispatch_datetime": dispatchDatetime,
-		"events":            events,
-		"last_lat":          lastLat,
-		"last_lng":          lastLng,
-		"last_location_at":  lastLocationAt,
-		"location_pings":    pings,
-		"dispatch_from_lat": dispatchFromLat,
-		"dispatch_from_lng": dispatchFromLng,
-		"dispatch_to_lat":   dispatchToLat,
-		"dispatch_to_lng":   dispatchToLng,
+		"status":              status,
+		"dispatch_from":       dispatchFrom,
+		"dispatch_to":         dispatchTo,
+		"vehicle_number":      vehicleNumber,
+		"transporter_name":    transporterName,
+		"transporter_phone":   transporterPhone,
+		"driver_name":         driverName,
+		"driver_phone":        driverPhone,
+		"consignee_name":      consigneeName,
+		"material":            material,
+		"quantity":            quantity,
+		"dispatch_datetime":   dispatchDatetime,
+		"events":              events,
+		"last_lat":            lastLat,
+		"last_lng":            lastLng,
+		"last_location_at":    lastLocationAt,
+		"location_pings":      pings,
+		"dispatch_from_lat":   dispatchFromLat,
+		"dispatch_from_lng":   dispatchFromLng,
+		"dispatch_to_lat":     dispatchToLat,
+		"dispatch_to_lng":     dispatchToLng,
+		"route_polyline":      routePolyline,
+		"route_distance_km":   routeDistanceKm,
+		"route_duration_mins": routeDurationMins,
 	})
 }
 
@@ -977,21 +1020,36 @@ func GetTrackerDriverOrder(c *gin.Context) {
 	pool := db.GetDB().GetPool()
 
 	var status, dispatchFrom, dispatchTo, vehicleNumber string
+	var fromLat, fromLng, toLat, toLng *float64
+	var routePolyline *string
+	var routeDistanceKm *float64
+	var routeDurationMins *int
 	err := pool.QueryRow(ctx, `
-		SELECT status, dispatch_from, dispatch_to, vehicle_number
+		SELECT status, dispatch_from, dispatch_to, vehicle_number,
+		       dispatch_from_lat, dispatch_from_lng, dispatch_to_lat, dispatch_to_lng,
+		       route_polyline, route_distance_km, route_duration_mins
 		FROM tracker_orders WHERE driver_tracking_token = $1
-	`, driverToken).Scan(&status, &dispatchFrom, &dispatchTo, &vehicleNumber)
+	`, driverToken).Scan(&status, &dispatchFrom, &dispatchTo, &vehicleNumber,
+		&fromLat, &fromLng, &toLat, &toLng,
+		&routePolyline, &routeDistanceKm, &routeDurationMins)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "tracking link not found"})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"status":         status,
-		"dispatch_from":  dispatchFrom,
-		"dispatch_to":    dispatchTo,
-		"vehicle_number": vehicleNumber,
-		"is_terminal":    terminalOrderStatuses[status],
+		"status":              status,
+		"dispatch_from":       dispatchFrom,
+		"dispatch_to":         dispatchTo,
+		"vehicle_number":      vehicleNumber,
+		"is_terminal":         terminalOrderStatuses[status],
+		"dispatch_from_lat":   fromLat,
+		"dispatch_from_lng":   fromLng,
+		"dispatch_to_lat":     toLat,
+		"dispatch_to_lng":     toLng,
+		"route_polyline":      routePolyline,
+		"route_distance_km":   routeDistanceKm,
+		"route_duration_mins": routeDurationMins,
 	})
 }
 

@@ -1034,3 +1034,12 @@ ALTER TABLE tracker_orders
     ADD COLUMN IF NOT EXISTS dispatch_from_lng DOUBLE PRECISION,
     ADD COLUMN IF NOT EXISTS dispatch_to_lat   DOUBLE PRECISION,
     ADD COLUMN IF NOT EXISTS dispatch_to_lng   DOUBLE PRECISION;
+
+-- ============================================================
+-- Migration 027 — Bogie Tracker: planned-route cache (Ola Directions,
+-- fetched once at order creation when both coordinate pairs exist).
+-- ============================================================
+ALTER TABLE tracker_orders
+    ADD COLUMN IF NOT EXISTS route_polyline      TEXT,
+    ADD COLUMN IF NOT EXISTS route_distance_km   DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS route_duration_mins INTEGER;

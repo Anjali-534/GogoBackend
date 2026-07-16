@@ -159,24 +159,19 @@ func ListLiveBookings(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"bookings": out})
 }
 
-// GET /gogoo/route?from=lat,lng&to=lat,lng
-// Server-side proxy to Ola Maps directions so the Ola key never reaches panel frontends.
-// Always returns 200 — degrades to an empty polyline on any failure so callers can
-// fall back to a straight line without treating this as an error.
-func ProxyOlaRoute(c *gin.Context) {
-	empty := gin.H{"polyline": "", "distance_km": 0.0, "duration_mins": 0}
-
-	from := c.Query("from")
-	to := c.Query("to")
+// fetchOlaDirections calls Ola Maps directions server-side (OLA_MAPS_KEY) and
+// returns the encoded overview polyline plus distance/duration. Shared by the
+// ProxyOlaRoute endpoint and the tracker's route-cache-on-create (tracker.go),
+// which stores the result on the order so the unauthenticated tracking pages
+// never need a directions call of their own.
+func fetchOlaDirections(from, to string) (polyline string, distanceKm float64, durationMins int, err error) {
 	if from == "" || to == "" || !isLatLng(from) || !isLatLng(to) {
-		c.JSON(http.StatusOK, empty)
-		return
+		return "", 0, 0, fmt.Errorf("invalid from/to coordinates")
 	}
 
 	apiKey := os.Getenv("OLA_MAPS_KEY")
 	if apiKey == "" {
-		c.JSON(http.StatusOK, empty)
-		return
+		return "", 0, 0, fmt.Errorf("OLA_MAPS_KEY not set")
 	}
 
 	url := "https://api.olamaps.io/routing/v1/directions?origin=" + from +
@@ -185,14 +180,12 @@ func ProxyOlaRoute(c *gin.Context) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Post(url, "application/json", bytes.NewBuffer(nil))
 	if err != nil {
-		c.JSON(http.StatusOK, empty)
-		return
+		return "", 0, 0, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		c.JSON(http.StatusOK, empty)
-		return
+		return "", 0, 0, fmt.Errorf("ola directions returned status %d", resp.StatusCode)
 	}
 
 	var result struct {
@@ -204,20 +197,33 @@ func ProxyOlaRoute(c *gin.Context) {
 			} `json:"legs"`
 		} `json:"routes"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || len(result.Routes) == 0 {
-		c.JSON(http.StatusOK, empty)
-		return
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", 0, 0, err
+	}
+	if len(result.Routes) == 0 {
+		return "", 0, 0, fmt.Errorf("ola directions returned no routes")
 	}
 
 	route := result.Routes[0]
-	distanceKm, durationMins := 0.0, 0
 	if len(route.Legs) > 0 {
 		distanceKm = route.Legs[0].Distance / 1000
 		durationMins = int(route.Legs[0].Duration / 60)
 	}
+	return route.OverviewPolyline, distanceKm, durationMins, nil
+}
 
+// GET /gogoo/route?from=lat,lng&to=lat,lng
+// Server-side proxy to Ola Maps directions so the Ola key never reaches panel frontends.
+// Always returns 200 — degrades to an empty polyline on any failure so callers can
+// fall back to a straight line without treating this as an error.
+func ProxyOlaRoute(c *gin.Context) {
+	polyline, distanceKm, durationMins, err := fetchOlaDirections(c.Query("from"), c.Query("to"))
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"polyline": "", "distance_km": 0.0, "duration_mins": 0})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
-		"polyline":      route.OverviewPolyline,
+		"polyline":      polyline,
 		"distance_km":   distanceKm,
 		"duration_mins": durationMins,
 	})
