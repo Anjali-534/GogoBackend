@@ -98,6 +98,11 @@ type TrackerOrder struct {
 	RoutePolyline     *string  `json:"route_polyline"`
 	RouteDistanceKm   *float64 `json:"route_distance_km"`
 	RouteDurationMins *int     `json:"route_duration_mins"`
+
+	// Proof-of-delivery signature — set once by the driver-token-gated
+	// signature upload after a 'delivery_claimed' event; the company still
+	// confirms the actual 'delivered' status transition in the panel.
+	SignatureURL *string `json:"signature_url"`
 }
 
 // TrackerLocationPing is one point on an order's route trail.
@@ -114,6 +119,13 @@ type TrackerOrderEvent struct {
 	Note      string    `json:"note"`
 	Location  string    `json:"location"`
 	CreatedAt time.Time `json:"created_at"`
+
+	// ReportedBy is 'company' (default, ordinary status-change events) or
+	// 'driver' (a quick-status tap from the drive page — not a status
+	// transition, just a note at the order's current status). EventKind
+	// carries which quick-status button was pressed; empty for company events.
+	ReportedBy string `json:"reported_by"`
+	EventKind  string `json:"event_kind"`
 }
 
 // ─── Companies ────────────────────────────────────────────────────────────────
@@ -350,7 +362,8 @@ func GetTrackerCompanyOrderDetail(c *gin.Context) {
 		       driver_id::text, COALESCE(driver_name,''), COALESCE(driver_phone,''),
 		       vehicle_number, COALESCE(eway_bill_number,''), COALESCE(eway_bill_file_url,''),
 		       status, public_tracking_token, created_at,
-		       consignee_name, material, quantity, dispatch_datetime, documents_enclosed
+		       consignee_name, material, quantity, dispatch_datetime, documents_enclosed,
+		       signature_url
 		FROM tracker_orders
 		WHERE id = $1 AND company_id = $2
 	`, orderID, companyID).Scan(
@@ -361,6 +374,7 @@ func GetTrackerCompanyOrderDetail(c *gin.Context) {
 		&o.VehicleNumber, &o.EwayBillNumber, &o.EwayBillFileURL,
 		&o.Status, &o.PublicTrackingToken, &o.CreatedAt,
 		&o.ConsigneeName, &o.Material, &o.Quantity, &o.DispatchDatetime, &o.DocumentsEnclosed,
+		&o.SignatureURL,
 	)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
@@ -369,7 +383,8 @@ func GetTrackerCompanyOrderDetail(c *gin.Context) {
 	o.DriverID = driverID
 
 	rows, err := pool.Query(ctx, `
-		SELECT id, order_id, status, COALESCE(note,''), COALESCE(location,''), created_at
+		SELECT id, order_id, status, COALESCE(note,''), COALESCE(location,''), created_at,
+		       reported_by, COALESCE(event_kind,'')
 		FROM tracker_order_events
 		WHERE order_id = $1
 		ORDER BY created_at ASC
@@ -383,7 +398,7 @@ func GetTrackerCompanyOrderDetail(c *gin.Context) {
 	var events []TrackerOrderEvent
 	for rows.Next() {
 		var e TrackerOrderEvent
-		if err := rows.Scan(&e.ID, &e.OrderID, &e.Status, &e.Note, &e.Location, &e.CreatedAt); err != nil {
+		if err := rows.Scan(&e.ID, &e.OrderID, &e.Status, &e.Note, &e.Location, &e.CreatedAt, &e.ReportedBy, &e.EventKind); err != nil {
 			continue
 		}
 		events = append(events, e)

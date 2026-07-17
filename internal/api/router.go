@@ -115,6 +115,11 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		// by the unguessable driver_tracking_token, same model as above.
 		gogooPublic.GET("/public/tracker/driver/:driver_token", handlers.GetTrackerDriverOrder)
 		gogooPublic.POST("/public/tracker/driver/:driver_token/location", handlers.PostTrackerDriverLocation)
+		// Driver quick-status events, proof-of-delivery signature, and the
+		// company->driver message feed — same unguessable-token-only model.
+		gogooPublic.POST("/public/tracker/driver/:driver_token/event", handlers.PostTrackerDriverEvent)
+		gogooPublic.POST("/public/tracker/driver/:driver_token/signature", handlers.UploadTrackerDriverSignature)
+		gogooPublic.GET("/public/tracker/driver/:driver_token/messages", handlers.GetTrackerDriverMessages)
 	}
 
 	// ============================================================
@@ -284,6 +289,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.PATCH("/tracker/orders/:id", middleware.RequireTrackerCompany(), handlers.UpdateTrackerCompanyOrderStatus)
 		gogoo.POST("/tracker/orders/:id/events", middleware.RequireTrackerCompany(), handlers.AddTrackerCompanyOrderEvent)
 		gogoo.POST("/tracker/orders/:id/eway-bill", middleware.RequireTrackerCompany(), handlers.UploadTrackerOrderEwayBill)
+		gogoo.POST("/tracker/orders/:id/messages", middleware.RequireTrackerCompany(), handlers.SendTrackerOrderMessage)
 
 		// Ambulance — Bookings
 		gogoo.GET("/ambulance/bookings/hospital", middleware.RequirePanel("hospital", "ambulance"), handlers.GetHospitalBookings)

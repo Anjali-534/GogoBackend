@@ -49,6 +49,20 @@ var validOrderStatuses = map[string]bool{
 	"cancelled":  true,
 }
 
+// validDriverEventKinds are the driver-reported quick-status taps from the
+// drive page — notes at the order's CURRENT status, never a status
+// transition. Must match the CHECK constraint added in migration 028.
+// 'delivery_claimed' is the special one: paired with an uploaded signature
+// (see UploadTrackerDriverSignature), it's what prompts the company to run
+// the actual 'delivered' transition via the normal status-update endpoint.
+var validDriverEventKinds = map[string]bool{
+	"on_break":         true,
+	"about_to_reach":   true,
+	"reached":          true,
+	"unloading":        true,
+	"delivery_claimed": true,
+}
+
 // ─── Auth ───────────────────────────────────────────────────────────────────
 
 // POST /gogoo/tracker/signup
@@ -642,7 +656,8 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 		       consignee_name, material, quantity, dispatch_datetime, documents_enclosed,
 		       driver_tracking_token, last_lat, last_lng, last_location_at,
 		       dispatch_from_lat, dispatch_from_lng, dispatch_to_lat, dispatch_to_lng,
-		       route_polyline, route_distance_km, route_duration_mins
+		       route_polyline, route_distance_km, route_duration_mins,
+		       signature_url
 		FROM tracker_orders
 		WHERE id = $1 AND company_id = $2
 	`, orderID, companyID).Scan(
@@ -656,6 +671,7 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 		&o.DriverTrackingToken, &o.LastLat, &o.LastLng, &o.LastLocationAt,
 		&o.DispatchFromLat, &o.DispatchFromLng, &o.DispatchToLat, &o.DispatchToLng,
 		&o.RoutePolyline, &o.RouteDistanceKm, &o.RouteDurationMins,
+		&o.SignatureURL,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -680,7 +696,8 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 	}
 
 	rows, err := pool.Query(ctx, `
-		SELECT id, order_id, status, COALESCE(note,''), COALESCE(location,''), created_at
+		SELECT id, order_id, status, COALESCE(note,''), COALESCE(location,''), created_at,
+		       reported_by, COALESCE(event_kind,'')
 		FROM tracker_order_events
 		WHERE order_id = $1
 		ORDER BY created_at ASC
@@ -694,7 +711,7 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 	var events []TrackerOrderEvent
 	for rows.Next() {
 		var e TrackerOrderEvent
-		if err := rows.Scan(&e.ID, &e.OrderID, &e.Status, &e.Note, &e.Location, &e.CreatedAt); err != nil {
+		if err := rows.Scan(&e.ID, &e.OrderID, &e.Status, &e.Note, &e.Location, &e.CreatedAt, &e.ReportedBy, &e.EventKind); err != nil {
 			continue
 		}
 		events = append(events, e)
@@ -948,27 +965,31 @@ func GetPublicTrackerOrder(c *gin.Context) {
 	var routePolyline *string
 	var routeDistanceKm *float64
 	var routeDurationMins *int
+	var signatureURL *string
 	err := pool.QueryRow(ctx, `
 		SELECT id, status, dispatch_from, dispatch_to, vehicle_number,
 		       transporter_name, transporter_phone, driver_name, driver_phone,
 		       consignee_name, material, quantity, dispatch_datetime,
 		       last_lat, last_lng, last_location_at,
 		       dispatch_from_lat, dispatch_from_lng, dispatch_to_lat, dispatch_to_lng,
-		       route_polyline, route_distance_km, route_duration_mins
+		       route_polyline, route_distance_km, route_duration_mins,
+		       signature_url
 		FROM tracker_orders WHERE public_tracking_token = $1
 	`, token).Scan(&orderID, &status, &dispatchFrom, &dispatchTo, &vehicleNumber,
 		&transporterName, &transporterPhone, &driverName, &driverPhone,
 		&consigneeName, &material, &quantity, &dispatchDatetime,
 		&lastLat, &lastLng, &lastLocationAt,
 		&dispatchFromLat, &dispatchFromLng, &dispatchToLat, &dispatchToLng,
-		&routePolyline, &routeDistanceKm, &routeDurationMins)
+		&routePolyline, &routeDistanceKm, &routeDurationMins,
+		&signatureURL)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "tracking link not found"})
 		return
 	}
 
 	rows, err := pool.Query(ctx, `
-		SELECT e.status, COALESCE(e.note,''), COALESCE(e.location,''), e.created_at
+		SELECT e.status, COALESCE(e.note,''), COALESCE(e.location,''), e.created_at,
+		       e.reported_by, COALESCE(e.event_kind,'')
 		FROM tracker_order_events e
 		JOIN tracker_orders o ON o.id = e.order_id
 		WHERE o.public_tracking_token = $1
@@ -980,16 +1001,20 @@ func GetPublicTrackerOrder(c *gin.Context) {
 	}
 	defer rows.Close()
 
+	// signature_url itself is intentionally never sent to the public page —
+	// only whether the delivery is signed. The image stays panel/admin-only.
 	type publicEvent struct {
-		Status    string    `json:"status"`
-		Note      string    `json:"note"`
-		Location  string    `json:"location"`
-		CreatedAt time.Time `json:"created_at"`
+		Status     string    `json:"status"`
+		Note       string    `json:"note"`
+		Location   string    `json:"location"`
+		CreatedAt  time.Time `json:"created_at"`
+		ReportedBy string    `json:"reported_by"`
+		EventKind  string    `json:"event_kind"`
 	}
 	var events []publicEvent
 	for rows.Next() {
 		var e publicEvent
-		if err := rows.Scan(&e.Status, &e.Note, &e.Location, &e.CreatedAt); err != nil {
+		if err := rows.Scan(&e.Status, &e.Note, &e.Location, &e.CreatedAt, &e.ReportedBy, &e.EventKind); err != nil {
 			continue
 		}
 		events = append(events, e)
@@ -1017,6 +1042,7 @@ func GetPublicTrackerOrder(c *gin.Context) {
 		"material":            material,
 		"quantity":            quantity,
 		"dispatch_datetime":   dispatchDatetime,
+		"signed":              signatureURL != nil,
 		"events":              events,
 		"last_lat":            lastLat,
 		"last_lng":            lastLng,
@@ -1149,4 +1175,249 @@ func PostTrackerDriverLocation(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "location updated"})
+}
+
+// POST /gogoo/public/tracker/driver/:driver_token/event — unauthenticated,
+// token-gated. Records a driver-reported quick-status tap (On Break / About
+// to Reach / Reached / Unloading / Delivered) as an event at the order's
+// CURRENT status — this is never a status transition. 'delivery_claimed' is
+// the special kind for the Delivered tap: paired with the signature upload
+// below, it's what prompts the company to run the real 'delivered'
+// transition themselves via the existing status-update endpoint. The
+// company remains the sole authority over tracker_orders.status; this
+// handler only ever writes to tracker_order_events.
+func PostTrackerDriverEvent(c *gin.Context) {
+	driverToken := c.Param("driver_token")
+	var req struct {
+		Kind string `json:"kind" binding:"required"`
+		Note string `json:"note"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !validDriverEventKinds[req.Kind] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid kind"})
+		return
+	}
+
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+
+	var orderID, status string
+	if err := pool.QueryRow(ctx, `
+		SELECT id, status FROM tracker_orders WHERE driver_tracking_token = $1
+	`, driverToken).Scan(&orderID, &status); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "tracking link not found"})
+		return
+	}
+	if terminalOrderStatuses[status] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "order is in a terminal state (" + status + ") and is no longer tracked"})
+		return
+	}
+
+	_, err := pool.Exec(ctx, `
+		INSERT INTO tracker_order_events (id, order_id, status, note, reported_by, event_kind)
+		VALUES ($1,$2,$3,$4,'driver',$5)
+	`, uuid.New(), orderID, status, nullIfEmpty(req.Note), req.Kind)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to add event"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"message": "event recorded"})
+}
+
+// POST /gogoo/public/tracker/driver/:driver_token/signature
+// (multipart/form-data, field "file") — unauthenticated, token-gated.
+// Uploads the builty signature captured on the drive page's canvas pad and
+// stores it as the order's proof-of-delivery image. Reuses the same
+// Cloudinary/local-disk pattern as UploadTrackerOrderEwayBill. Never flips
+// the order's status — the company still confirms the 'delivered' transition
+// in the panel, prompted once a 'delivery_claimed' event and this signature
+// both exist on the order.
+func UploadTrackerDriverSignature(c *gin.Context) {
+	driverToken := c.Param("driver_token")
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+
+	var orderID, companyID, status string
+	if err := pool.QueryRow(ctx, `
+		SELECT id, company_id, status FROM tracker_orders WHERE driver_tracking_token = $1
+	`, driverToken).Scan(&orderID, &companyID, &status); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "tracking link not found"})
+		return
+	}
+	if terminalOrderStatuses[status] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "order is in a terminal state (" + status + ") and is no longer tracked"})
+		return
+	}
+
+	if err := c.Request.ParseMultipartForm(maxFileSize); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file too large — max 10MB allowed"})
+		return
+	}
+
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file is required"})
+		return
+	}
+	defer file.Close()
+
+	mimeType := header.Header.Get("Content-Type")
+	if idx := strings.Index(mimeType, ";"); idx > 0 {
+		mimeType = strings.TrimSpace(mimeType[:idx])
+	}
+	ext, allowed := allowedMimeTypes[mimeType]
+	if !allowed {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "only JPG, PNG and PDF files allowed"})
+		return
+	}
+	if header.Size > maxFileSize {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file must be under 10MB"})
+		return
+	}
+
+	var fileURL string
+	if os.Getenv("CLOUDINARY_CLOUD_NAME") != "" {
+		secureURL, err := uploadToCloudinary(ctx, file, header.Filename, "signature", orderID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "cloud storage error: " + err.Error()})
+			return
+		}
+		fileURL = secureURL
+	} else {
+		uploadDir := filepath.Join("uploads", "tracker", companyID)
+		if err := os.MkdirAll(uploadDir, 0755); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "storage error"})
+			return
+		}
+		localName := "signature_" + orderID + "_" + uuid.New().String()[:8] + ext
+		filePath := filepath.Join(uploadDir, localName)
+		dst, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save file"})
+			return
+		}
+		_, err = dst.ReadFrom(file)
+		dst.Close()
+		if err != nil {
+			os.Remove(filePath)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to write file"})
+			return
+		}
+		fileURL = "/uploads/tracker/" + companyID + "/" + localName
+	}
+
+	_, err = pool.Exec(ctx, `
+		UPDATE tracker_orders SET signature_url=$1, updated_at=NOW() WHERE id=$2
+	`, fileURL, orderID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"signature_url": fileURL, "message": "signature uploaded"})
+}
+
+// ─── Company → driver messages ─────────────────────────────────────────────
+
+// POST /gogoo/tracker/orders/:id/messages — company sends a one-way message
+// to the driver; the drive page picks it up on its next poll. The driver's
+// reverse channel is the quick-status events above — there's no
+// driver-to-company reply in v1.
+func SendTrackerOrderMessage(c *gin.Context) {
+	companyID := c.GetString("company_id")
+	orderID := c.Param("id")
+	var req struct {
+		Body string `json:"body" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+
+	var exists bool
+	if err := pool.QueryRow(ctx, `
+		SELECT EXISTS(SELECT 1 FROM tracker_orders WHERE id=$1 AND company_id=$2)
+	`, orderID, companyID).Scan(&exists); err != nil || !exists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
+		return
+	}
+
+	id := uuid.New()
+	_, err := pool.Exec(ctx, `
+		INSERT INTO tracker_driver_messages (id, order_id, body)
+		VALUES ($1,$2,$3)
+	`, id, orderID, req.Body)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to send message"})
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"id": id, "message": "message sent"})
+}
+
+// GET /gogoo/public/tracker/driver/:driver_token/messages — unauthenticated,
+// token-gated. Returns the full message feed and marks any currently-unread
+// messages as read as a side effect of this fetch — the drive page's poll IS
+// the read receipt, there's no separate driver tap to dismiss a message.
+// is_new reflects whether a message was unread BEFORE this call, so the
+// frontend can banner only what just arrived and fold the rest into the feed.
+func GetTrackerDriverMessages(c *gin.Context) {
+	driverToken := c.Param("driver_token")
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+
+	var orderID string
+	if err := pool.QueryRow(ctx, `
+		SELECT id FROM tracker_orders WHERE driver_tracking_token = $1
+	`, driverToken).Scan(&orderID); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "tracking link not found"})
+		return
+	}
+
+	rows, err := pool.Query(ctx, `
+		SELECT id, body, created_at, read_at
+		FROM tracker_driver_messages
+		WHERE order_id = $1
+		ORDER BY created_at ASC
+	`, orderID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	defer rows.Close()
+
+	type driverMessage struct {
+		ID        string    `json:"id"`
+		Body      string    `json:"body"`
+		CreatedAt time.Time `json:"created_at"`
+		IsNew     bool      `json:"is_new"`
+	}
+	var messages []driverMessage
+	for rows.Next() {
+		var m driverMessage
+		var readAt *time.Time
+		if err := rows.Scan(&m.ID, &m.Body, &m.CreatedAt, &readAt); err != nil {
+			continue
+		}
+		m.IsNew = readAt == nil
+		messages = append(messages, m)
+	}
+	if messages == nil {
+		messages = []driverMessage{}
+	}
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE tracker_driver_messages SET read_at = NOW()
+		WHERE order_id = $1 AND read_at IS NULL
+	`, orderID); err != nil {
+		log.Printf("GetTrackerDriverMessages: mark-read failed for order=%s: %v", orderID, err)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"messages": messages})
 }
