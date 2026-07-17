@@ -187,11 +187,13 @@ func GetTrackerCompanyProfile(c *gin.Context) {
 	var approvedBy *string
 	err := pool.QueryRow(ctx, `
 		SELECT id, company_name, contact_phone, contact_email,
-		       COALESCE(gstin,''), status, approved_by::text, approved_at, created_at
+		       COALESCE(gstin,''), status, approved_by::text, approved_at, created_at,
+		       notification_email
 		FROM tracker_companies WHERE id = $1
 	`, companyID).Scan(
 		&comp.ID, &comp.CompanyName, &comp.ContactPhone, &comp.ContactEmail,
 		&comp.GSTIN, &comp.Status, &approvedBy, &comp.ApprovedAt, &comp.CreatedAt,
+		&comp.NotificationEmail,
 	)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "company not found"})
@@ -205,9 +207,10 @@ func GetTrackerCompanyProfile(c *gin.Context) {
 func UpdateTrackerCompanyProfile(c *gin.Context) {
 	companyID := c.GetString("company_id")
 	var req struct {
-		CompanyName  string `json:"company_name" binding:"required"`
-		ContactPhone string `json:"contact_phone" binding:"required"`
-		GSTIN        string `json:"gstin"`
+		CompanyName       string `json:"company_name" binding:"required"`
+		ContactPhone      string `json:"contact_phone" binding:"required"`
+		GSTIN             string `json:"gstin"`
+		NotificationEmail string `json:"notification_email" binding:"omitempty,email"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -218,9 +221,9 @@ func UpdateTrackerCompanyProfile(c *gin.Context) {
 	pool := db.GetDB().GetPool()
 	_, err := pool.Exec(ctx, `
 		UPDATE tracker_companies
-		SET company_name=$1, contact_phone=$2, gstin=$3, updated_at=NOW()
-		WHERE id=$4
-	`, req.CompanyName, req.ContactPhone, nullIfEmpty(req.GSTIN), companyID)
+		SET company_name=$1, contact_phone=$2, gstin=$3, notification_email=$4, updated_at=NOW()
+		WHERE id=$5
+	`, req.CompanyName, req.ContactPhone, nullIfEmpty(req.GSTIN), nullIfEmpty(req.NotificationEmail), companyID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "update failed"})
 		return
@@ -514,6 +517,11 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 		Quantity          string     `json:"quantity"`
 		DispatchDatetime  *time.Time `json:"dispatch_datetime"`
 		DocumentsEnclosed string     `json:"documents_enclosed"`
+
+		// Dispatch notification email recipients, all optional.
+		BookedForEmail   string `json:"booked_for_email" binding:"omitempty,email"`
+		ConsigneeEmail   string `json:"consignee_email" binding:"omitempty,email"`
+		TransporterEmail string `json:"transporter_email" binding:"omitempty,email"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -560,15 +568,17 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 			 dispatch_to_lat, dispatch_to_lng, transporter_name, transporter_phone,
 			 driver_id, driver_name, driver_phone, vehicle_number,
 			 eway_bill_number, status, public_tracking_token,
-			 consignee_name, material, quantity, dispatch_datetime, documents_enclosed)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'created',$18,$19,$20,$21,$22,$23)
+			 consignee_name, material, quantity, dispatch_datetime, documents_enclosed,
+			 booked_for_email, consignee_email, transporter_email)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'created',$18,$19,$20,$21,$22,$23,$24,$25,$26)
 	`, id, companyID, req.BookedForCompanyName, req.BookedForPhone,
 		req.DispatchFrom, req.DispatchTo, req.DispatchFromLat, req.DispatchFromLng,
 		req.DispatchToLat, req.DispatchToLng, nullIfEmpty(req.TransporterName), nullIfEmpty(req.TransporterPhone),
 		req.DriverID, driverName, driverPhone, req.VehicleNumber,
 		nullIfEmpty(req.EwayBillNumber), token,
 		nullIfEmpty(req.ConsigneeName), nullIfEmpty(req.Material), nullIfEmpty(req.Quantity),
-		req.DispatchDatetime, nullIfEmpty(req.DocumentsEnclosed))
+		req.DispatchDatetime, nullIfEmpty(req.DocumentsEnclosed),
+		nullIfEmpty(req.BookedForEmail), nullIfEmpty(req.ConsigneeEmail), nullIfEmpty(req.TransporterEmail))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create order: " + err.Error()})
 		return
@@ -657,7 +667,7 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 		       driver_tracking_token, last_lat, last_lng, last_location_at,
 		       dispatch_from_lat, dispatch_from_lng, dispatch_to_lat, dispatch_to_lng,
 		       route_polyline, route_distance_km, route_duration_mins,
-		       signature_url
+		       signature_url, booked_for_email, consignee_email, transporter_email
 		FROM tracker_orders
 		WHERE id = $1 AND company_id = $2
 	`, orderID, companyID).Scan(
@@ -671,7 +681,7 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 		&o.DriverTrackingToken, &o.LastLat, &o.LastLng, &o.LastLocationAt,
 		&o.DispatchFromLat, &o.DispatchFromLng, &o.DispatchToLat, &o.DispatchToLng,
 		&o.RoutePolyline, &o.RouteDistanceKm, &o.RouteDurationMins,
-		&o.SignatureURL,
+		&o.SignatureURL, &o.BookedForEmail, &o.ConsigneeEmail, &o.TransporterEmail,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -727,6 +737,74 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"order": o, "events": events, "location_pings": pings})
+}
+
+// PATCH /gogoo/tracker/orders/:id/details — edits the dispatch-sheet fields
+// (everything CreateTrackerCompanyOrder accepts except driver reassignment
+// and coordinates, which have route-caching side effects best left to
+// create-time). Status, tokens, and signature are untouched here — this is
+// purely the "fix a typo on the dispatch sheet" endpoint, most importantly
+// the notification email fields added after an order was already created.
+func UpdateTrackerCompanyOrderDetails(c *gin.Context) {
+	companyID := c.GetString("company_id")
+	orderID := c.Param("id")
+	var req struct {
+		BookedForCompanyName string `json:"booked_for_company_name" binding:"required"`
+		BookedForPhone       string `json:"booked_for_phone" binding:"required"`
+		DispatchFrom         string `json:"dispatch_from" binding:"required"`
+		DispatchTo           string `json:"dispatch_to" binding:"required"`
+		TransporterName      string `json:"transporter_name"`
+		TransporterPhone     string `json:"transporter_phone"`
+		VehicleNumber        string `json:"vehicle_number" binding:"required"`
+		EwayBillNumber       string `json:"eway_bill_number"`
+
+		ConsigneeName     string     `json:"consignee_name"`
+		Material          string     `json:"material"`
+		Quantity          string     `json:"quantity"`
+		DispatchDatetime  *time.Time `json:"dispatch_datetime"`
+		DocumentsEnclosed string     `json:"documents_enclosed"`
+
+		BookedForEmail   string `json:"booked_for_email" binding:"omitempty,email"`
+		ConsigneeEmail   string `json:"consignee_email" binding:"omitempty,email"`
+		TransporterEmail string `json:"transporter_email" binding:"omitempty,email"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+
+	tag, err := pool.Exec(ctx, `
+		UPDATE tracker_orders SET
+			booked_for_company_name=$1, booked_for_phone=$2,
+			dispatch_from=$3, dispatch_to=$4,
+			transporter_name=$5, transporter_phone=$6,
+			vehicle_number=$7, eway_bill_number=$8,
+			consignee_name=$9, material=$10, quantity=$11,
+			dispatch_datetime=$12, documents_enclosed=$13,
+			booked_for_email=$14, consignee_email=$15, transporter_email=$16,
+			updated_at=NOW()
+		WHERE id=$17 AND company_id=$18
+	`, req.BookedForCompanyName, req.BookedForPhone,
+		req.DispatchFrom, req.DispatchTo,
+		nullIfEmpty(req.TransporterName), nullIfEmpty(req.TransporterPhone),
+		req.VehicleNumber, nullIfEmpty(req.EwayBillNumber),
+		nullIfEmpty(req.ConsigneeName), nullIfEmpty(req.Material), nullIfEmpty(req.Quantity),
+		req.DispatchDatetime, nullIfEmpty(req.DocumentsEnclosed),
+		nullIfEmpty(req.BookedForEmail), nullIfEmpty(req.ConsigneeEmail), nullIfEmpty(req.TransporterEmail),
+		orderID, companyID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "update failed: " + err.Error()})
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "order details updated"})
 }
 
 // PATCH /gogoo/tracker/orders/:id — status transition + event log entry.

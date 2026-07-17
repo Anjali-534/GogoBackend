@@ -1094,3 +1094,14 @@ CREATE TABLE IF NOT EXISTS tracker_driver_messages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_tracker_driver_messages_order_id ON tracker_driver_messages(order_id);
+
+-- ============================================================
+-- Migration 029 — Bogie Tracker: dispatch notification emails.
+-- ============================================================
+ALTER TABLE tracker_companies
+    ADD COLUMN IF NOT EXISTS notification_email TEXT;
+
+ALTER TABLE tracker_orders
+    ADD COLUMN IF NOT EXISTS booked_for_email  TEXT,
+    ADD COLUMN IF NOT EXISTS consignee_email   TEXT,
+    ADD COLUMN IF NOT EXISTS transporter_email TEXT;

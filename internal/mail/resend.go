@@ -34,6 +34,17 @@ type Message struct {
 	Subject     string
 	Body        string
 	Attachments []Attachment
+
+	// FromName overrides cfg.SMTPFromName for this send only — e.g. dispatch
+	// emails go out as "<company name> via Bogie Tracker" so the recipient
+	// knows which company booked the shipment, while the underlying address
+	// stays cfg.ResendFromEmail (SPF/DKIM verified; we never send as the
+	// client's own domain).
+	FromName string
+
+	// ReplyTo, when set, routes recipient replies to that address instead of
+	// cfg.ResendFromEmail — e.g. a company's notification_email.
+	ReplyTo string
 }
 
 // IsConfigured reports whether enough settings are present to attempt
@@ -53,6 +64,7 @@ type resendPayload struct {
 	To          []string           `json:"to"`
 	Subject     string             `json:"subject"`
 	Text        string             `json:"text"`
+	ReplyTo     string             `json:"reply_to,omitempty"`
 	Attachments []resendAttachment `json:"attachments,omitempty"`
 }
 
@@ -65,9 +77,13 @@ func Send(cfg *config.Config, msg Message) error {
 		return fmt.Errorf("resend not configured (RESEND_API_KEY/RESEND_FROM_EMAIL missing)")
 	}
 
+	fromName := cfg.SMTPFromName
+	if msg.FromName != "" {
+		fromName = msg.FromName
+	}
 	from := cfg.ResendFromEmail
-	if cfg.SMTPFromName != "" {
-		from = fmt.Sprintf("%s <%s>", cfg.SMTPFromName, cfg.ResendFromEmail)
+	if fromName != "" {
+		from = fmt.Sprintf("%s <%s>", fromName, cfg.ResendFromEmail)
 	}
 
 	payload := resendPayload{
@@ -75,6 +91,7 @@ func Send(cfg *config.Config, msg Message) error {
 		To:      strings.Split(msg.To, ","),
 		Subject: msg.Subject,
 		Text:    msg.Body,
+		ReplyTo: msg.ReplyTo,
 	}
 	for _, a := range msg.Attachments {
 		payload.Attachments = append(payload.Attachments, resendAttachment{

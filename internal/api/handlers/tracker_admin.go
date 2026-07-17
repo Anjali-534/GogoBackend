@@ -33,6 +33,10 @@ type TrackerCompany struct {
 	ApprovedBy   *string    `json:"approved_by"`
 	ApprovedAt   *time.Time `json:"approved_at"`
 	CreatedAt    time.Time  `json:"created_at"`
+
+	// NotificationEmail is the "send as" reply-to address for dispatch
+	// emails. Nullable — falls back to ContactEmail when unset.
+	NotificationEmail *string `json:"notification_email"`
 }
 
 type TrackerCompanyListItem struct {
@@ -84,6 +88,13 @@ type TrackerOrder struct {
 	Quantity          *string    `json:"quantity"`
 	DispatchDatetime  *time.Time `json:"dispatch_datetime"`
 	DocumentsEnclosed *string    `json:"documents_enclosed"`
+
+	// Dispatch notification email recipients — all optional, nullable. The
+	// driver deliberately has no email field (they get the WhatsApp
+	// tracking link instead); see notify.go.
+	BookedForEmail   *string `json:"booked_for_email"`
+	ConsigneeEmail   *string `json:"consignee_email"`
+	TransporterEmail *string `json:"transporter_email"`
 
 	// Live driver location tracking — null until the order first moves to
 	// 'dispatched' (that's when DriverTrackingToken is generated) and until
