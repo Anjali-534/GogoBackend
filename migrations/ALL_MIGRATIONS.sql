@@ -1127,3 +1127,10 @@ ALTER TABLE tracker_order_events
 ALTER TABLE tracker_orders
     ADD COLUMN IF NOT EXISTS consignee_gstin   TEXT,
     ADD COLUMN IF NOT EXISTS booked_for_gstin  TEXT;
+
+-- ============================================================
+-- Migration 031 — Bogie Tracker: persist booked-for/consignee state.
+-- ============================================================
+ALTER TABLE tracker_orders
+    ADD COLUMN IF NOT EXISTS booked_for_state  TEXT,
+    ADD COLUMN IF NOT EXISTS consignee_state   TEXT;

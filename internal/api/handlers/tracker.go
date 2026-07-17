@@ -527,6 +527,11 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 		// Format/checksum is validated client-side only (GSTInput component).
 		ConsigneeGstin string `json:"consignee_gstin"`
 		BookedForGstin string `json:"booked_for_gstin"`
+
+		// State, auto-filled client-side from the GSTIN's state code but
+		// always a plain editable field — manual entry/override always works.
+		ConsigneeState string `json:"consignee_state"`
+		BookedForState string `json:"booked_for_state"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -558,6 +563,16 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 		return
 	}
 
+	// The receipt-confirmation token is generated up front, same as the
+	// public tracking token — the dispatch email always has a working link,
+	// and the confirm ACTION itself (not the link) is what's gated on the
+	// order actually reaching 'delivered' (see ConfirmTrackerReceipt).
+	receiptToken, err := generateTrackingToken()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate receipt token"})
+		return
+	}
+
 	id := uuid.New()
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -575,8 +590,9 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 			 eway_bill_number, status, public_tracking_token,
 			 consignee_name, material, quantity, dispatch_datetime, documents_enclosed,
 			 booked_for_email, consignee_email, transporter_email,
-			 consignee_gstin, booked_for_gstin)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'created',$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
+			 consignee_gstin, booked_for_gstin, consignee_state, booked_for_state,
+			 received_confirmation_token)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'created',$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)
 	`, id, companyID, req.BookedForCompanyName, req.BookedForPhone,
 		req.DispatchFrom, req.DispatchTo, req.DispatchFromLat, req.DispatchFromLng,
 		req.DispatchToLat, req.DispatchToLng, nullIfEmpty(req.TransporterName), nullIfEmpty(req.TransporterPhone),
@@ -585,7 +601,8 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 		nullIfEmpty(req.ConsigneeName), nullIfEmpty(req.Material), nullIfEmpty(req.Quantity),
 		req.DispatchDatetime, nullIfEmpty(req.DocumentsEnclosed),
 		nullIfEmpty(req.BookedForEmail), nullIfEmpty(req.ConsigneeEmail), nullIfEmpty(req.TransporterEmail),
-		nullIfEmpty(req.ConsigneeGstin), nullIfEmpty(req.BookedForGstin))
+		nullIfEmpty(req.ConsigneeGstin), nullIfEmpty(req.BookedForGstin),
+		nullIfEmpty(req.ConsigneeState), nullIfEmpty(req.BookedForState), receiptToken)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create order: " + err.Error()})
 		return
@@ -676,7 +693,7 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 		       route_polyline, route_distance_km, route_duration_mins,
 		       signature_url, booked_for_email, consignee_email, transporter_email,
 		       received_confirmation_token, received_confirmed_at,
-		       consignee_gstin, booked_for_gstin
+		       consignee_gstin, booked_for_gstin, consignee_state, booked_for_state
 		FROM tracker_orders
 		WHERE id = $1 AND company_id = $2
 	`, orderID, companyID).Scan(
@@ -692,7 +709,7 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 		&o.RoutePolyline, &o.RouteDistanceKm, &o.RouteDurationMins,
 		&o.SignatureURL, &o.BookedForEmail, &o.ConsigneeEmail, &o.TransporterEmail,
 		&o.ReceivedConfirmationToken, &o.ReceivedConfirmedAt,
-		&o.ConsigneeGstin, &o.BookedForGstin,
+		&o.ConsigneeGstin, &o.BookedForGstin, &o.ConsigneeState, &o.BookedForState,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -781,6 +798,9 @@ func UpdateTrackerCompanyOrderDetails(c *gin.Context) {
 
 		ConsigneeGstin string `json:"consignee_gstin"`
 		BookedForGstin string `json:"booked_for_gstin"`
+
+		ConsigneeState string `json:"consignee_state"`
+		BookedForState string `json:"booked_for_state"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -800,8 +820,9 @@ func UpdateTrackerCompanyOrderDetails(c *gin.Context) {
 			dispatch_datetime=$12, documents_enclosed=$13,
 			booked_for_email=$14, consignee_email=$15, transporter_email=$16,
 			consignee_gstin=$17, booked_for_gstin=$18,
+			consignee_state=$19, booked_for_state=$20,
 			updated_at=NOW()
-		WHERE id=$19 AND company_id=$20
+		WHERE id=$21 AND company_id=$22
 	`, req.BookedForCompanyName, req.BookedForPhone,
 		req.DispatchFrom, req.DispatchTo,
 		nullIfEmpty(req.TransporterName), nullIfEmpty(req.TransporterPhone),
@@ -810,6 +831,7 @@ func UpdateTrackerCompanyOrderDetails(c *gin.Context) {
 		req.DispatchDatetime, nullIfEmpty(req.DocumentsEnclosed),
 		nullIfEmpty(req.BookedForEmail), nullIfEmpty(req.ConsigneeEmail), nullIfEmpty(req.TransporterEmail),
 		nullIfEmpty(req.ConsigneeGstin), nullIfEmpty(req.BookedForGstin),
+		nullIfEmpty(req.ConsigneeState), nullIfEmpty(req.BookedForState),
 		orderID, companyID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "update failed: " + err.Error()})
@@ -847,10 +869,9 @@ func UpdateTrackerCompanyOrderStatus(c *gin.Context) {
 
 	var currentStatus string
 	var driverTrackingToken *string
-	var receiptToken *string
 	if err := pool.QueryRow(ctx, `
-		SELECT status, driver_tracking_token, received_confirmation_token FROM tracker_orders WHERE id=$1 AND company_id=$2
-	`, orderID, companyID).Scan(&currentStatus, &driverTrackingToken, &receiptToken); err != nil {
+		SELECT status, driver_tracking_token FROM tracker_orders WHERE id=$1 AND company_id=$2
+	`, orderID, companyID).Scan(&currentStatus, &driverTrackingToken); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
 		return
 	}
@@ -872,19 +893,6 @@ func UpdateTrackerCompanyOrderStatus(c *gin.Context) {
 		newDriverToken = token
 	}
 
-	// The consignee's receipt-confirmation token is generated the first time
-	// an order moves to 'delivered' — that's the earliest point receiving
-	// goods can actually be confirmed. Never regenerated on later re-sends.
-	newReceiptToken := ""
-	if req.Status == "delivered" && receiptToken == nil {
-		token, err := generateTrackingToken()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate receipt token"})
-			return
-		}
-		newReceiptToken = token
-	}
-
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
@@ -892,20 +900,12 @@ func UpdateTrackerCompanyOrderStatus(c *gin.Context) {
 	}
 	defer tx.Rollback(ctx)
 
-	// newDriverToken and newReceiptToken are mutually exclusive — the former
-	// only fires for req.Status == "dispatched", the latter only for
-	// "delivered", and req.Status is a single value.
 	var tag interface{ RowsAffected() int64 }
-	switch {
-	case newDriverToken != "":
+	if newDriverToken != "" {
 		tag, err = tx.Exec(ctx, `
 			UPDATE tracker_orders SET status=$1, driver_tracking_token=$2, updated_at=NOW() WHERE id=$3 AND company_id=$4
 		`, req.Status, newDriverToken, orderID, companyID)
-	case newReceiptToken != "":
-		tag, err = tx.Exec(ctx, `
-			UPDATE tracker_orders SET status=$1, received_confirmation_token=$2, updated_at=NOW() WHERE id=$3 AND company_id=$4
-		`, req.Status, newReceiptToken, orderID, companyID)
-	default:
+	} else {
 		tag, err = tx.Exec(ctx, `
 			UPDATE tracker_orders SET status=$1, updated_at=NOW() WHERE id=$2 AND company_id=$3
 		`, req.Status, orderID, companyID)
@@ -936,9 +936,6 @@ func UpdateTrackerCompanyOrderStatus(c *gin.Context) {
 	resp := gin.H{"message": "status updated"}
 	if newDriverToken != "" {
 		resp["driver_tracking_token"] = newDriverToken
-	}
-	if newReceiptToken != "" {
-		resp["received_confirmation_token"] = newReceiptToken
 	}
 	c.JSON(http.StatusOK, resp)
 }

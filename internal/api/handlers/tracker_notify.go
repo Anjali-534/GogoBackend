@@ -67,6 +67,7 @@ func NotifyTrackerOrderStakeholders(c *gin.Context) {
 		       o.vehicle_number, o.status, o.public_tracking_token,
 		       o.consignee_name, o.consignee_email, o.material, o.quantity,
 		       o.dispatch_datetime, o.documents_enclosed, o.received_confirmation_token,
+		       o.booked_for_state, o.consignee_state,
 		       c.company_name, c.contact_email, c.notification_email
 		FROM tracker_orders o
 		JOIN tracker_companies c ON c.id = o.company_id
@@ -79,6 +80,7 @@ func NotifyTrackerOrderStakeholders(c *gin.Context) {
 		&o.VehicleNumber, &o.Status, &o.PublicTrackingToken,
 		&o.ConsigneeName, &o.ConsigneeEmail, &o.Material, &o.Quantity,
 		&o.DispatchDatetime, &o.DocumentsEnclosed, &o.ReceivedConfirmationToken,
+		&o.BookedForState, &o.ConsigneeState,
 		&companyName, &contactEmail, &notificationEmail,
 	)
 	if err != nil {
@@ -88,15 +90,28 @@ func NotifyTrackerOrderStakeholders(c *gin.Context) {
 
 	cfg := c.MustGet("config").(*config.Config)
 	trackingLink := strings.TrimRight(cfg.TrackerPanelURL, "/") + "/track/" + o.PublicTrackingToken
-	// The receipt link only exists once the order has actually reached
-	// 'delivered' (ReceivedConfirmationToken is generated there — see
-	// UpdateTrackerCompanyOrderStatus). Sending the dispatch email before
-	// that just omits the line rather than including a dead link; companies
-	// can re-send this email after marking delivered to include it.
-	receiptLink := ""
-	if o.ReceivedConfirmationToken != nil && *o.ReceivedConfirmationToken != "" {
-		receiptLink = strings.TrimRight(cfg.TrackerPanelURL, "/") + "/receipt/" + *o.ReceivedConfirmationToken
+
+	// The receipt token is generated up front at order creation for every
+	// order created after this feature shipped (see CreateTrackerCompanyOrder)
+	// — but orders created before it predate the column and still have NULL
+	// here. Lazy-backfill on first notify send so old orders get a working
+	// receipt link too, same self-healing pattern as cacheTrackerOrderRoute.
+	if o.ReceivedConfirmationToken == nil {
+		token, err := generateTrackingToken()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate receipt token"})
+			return
+		}
+		if _, err := pool.Exec(ctx, `
+			UPDATE tracker_orders SET received_confirmation_token = $1, updated_at = NOW() WHERE id = $2
+		`, token, orderID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to backfill receipt token"})
+			return
+		}
+		o.ReceivedConfirmationToken = &token
 	}
+	receiptLink := strings.TrimRight(cfg.TrackerPanelURL, "/") + "/receipt/" + *o.ReceivedConfirmationToken
+
 	subject := fmt.Sprintf("Dispatch Details — %s (Truck %s)", o.BookedForCompanyName, o.VehicleNumber)
 	// Only consignee/booked_for get the receipt-confirmation line — the
 	// transporter isn't the one confirming goods were received.
@@ -184,12 +199,19 @@ func NotifyTrackerOrderStakeholders(c *gin.Context) {
 // SR NO / HEADS / DESCRIPTION table — as plain text, matching the rest of
 // the mail package (Resend's Text field, no HTML templating). receiptLink
 // is only passed for the consignee/booked_for recipients — empty omits the
-// "confirm receipt" line entirely (transporter emails, or any send before
-// the order reaches 'delivered' and a receipt token exists).
+// "confirm receipt" line entirely (transporter emails never get it).
 func buildDispatchEmailBody(o TrackerOrder, trackingLink, receiptLink string) string {
+	bookedForState := "—"
+	if o.BookedForState != nil && *o.BookedForState != "" {
+		bookedForState = *o.BookedForState
+	}
 	consignee := "—"
 	if o.ConsigneeName != nil && *o.ConsigneeName != "" {
 		consignee = *o.ConsigneeName
+	}
+	consigneeState := "—"
+	if o.ConsigneeState != nil && *o.ConsigneeState != "" {
+		consigneeState = *o.ConsigneeState
 	}
 	material := "—"
 	if o.Material != nil && *o.Material != "" {
@@ -221,7 +243,9 @@ func buildDispatchEmailBody(o TrackerOrder, trackingLink, receiptLink string) st
 
 	rows := [][2]string{
 		{"Party Name", o.BookedForCompanyName},
+		{"Party State", bookedForState},
 		{"Consignee", consignee},
+		{"Consignee State", consigneeState},
 		{"Route", o.DispatchFrom + " -> " + o.DispatchTo},
 		{"Material", material},
 		{"Quantity", quantity},
@@ -243,7 +267,7 @@ func buildDispatchEmailBody(o TrackerOrder, trackingLink, receiptLink string) st
 	b.WriteString("\n")
 	b.WriteString(fmt.Sprintf("Track this shipment live: %s\n\n", trackingLink))
 	if receiptLink != "" {
-		b.WriteString(fmt.Sprintf("Once goods arrive, confirm receipt here: %s\n\n", receiptLink))
+		b.WriteString(fmt.Sprintf("Once your goods arrive, confirm receipt here: %s\n\n", receiptLink))
 	}
 	b.WriteString("This is an automated dispatch notification sent via Bogie Tracker.\n")
 

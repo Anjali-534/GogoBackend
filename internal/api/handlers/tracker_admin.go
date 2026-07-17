@@ -126,6 +126,11 @@ type TrackerOrder struct {
 	// checksum validated client-side only, never enforced server-side.
 	ConsigneeGstin *string `json:"consignee_gstin"`
 	BookedForGstin *string `json:"booked_for_gstin"`
+
+	// State — auto-filled client-side from the GSTIN's state code, but a
+	// normal editable field; manual entry/override always works.
+	ConsigneeState *string `json:"consignee_state"`
+	BookedForState *string `json:"booked_for_state"`
 }
 
 // TrackerLocationPing is one point on an order's route trail.
