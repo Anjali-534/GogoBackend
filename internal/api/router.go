@@ -120,6 +120,13 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogooPublic.POST("/public/tracker/driver/:driver_token/event", handlers.PostTrackerDriverEvent)
 		gogooPublic.POST("/public/tracker/driver/:driver_token/signature", handlers.UploadTrackerDriverSignature)
 		gogooPublic.GET("/public/tracker/driver/:driver_token/messages", handlers.GetTrackerDriverMessages)
+
+		// Bogie Tracker — consignee goods-received receipt confirmation,
+		// protected only by the unguessable received_confirmation_token
+		// (deliberately separate from the public tracking token — see
+		// tracker_receipt.go).
+		gogooPublic.GET("/public/tracker/receipt/:token", handlers.GetTrackerReceiptOrder)
+		gogooPublic.POST("/public/tracker/receipt/:token/confirm", handlers.ConfirmTrackerReceipt)
 	}
 
 	// ============================================================

@@ -114,6 +114,18 @@ type TrackerOrder struct {
 	// signature upload after a 'delivery_claimed' event; the company still
 	// confirms the actual 'delivered' status transition in the panel.
 	SignatureURL *string `json:"signature_url"`
+
+	// Goods-received confirmation — ReceivedConfirmationToken is generated
+	// the first time the order reaches 'delivered' (see
+	// UpdateTrackerCompanyOrderStatus); ReceivedConfirmedAt is set once by
+	// the consignee via the public receipt page and never cleared.
+	ReceivedConfirmationToken *string    `json:"received_confirmation_token"`
+	ReceivedConfirmedAt       *time.Time `json:"received_confirmed_at"`
+
+	// GSTIN for the two other dispatch-sheet parties — optional, format/
+	// checksum validated client-side only, never enforced server-side.
+	ConsigneeGstin *string `json:"consignee_gstin"`
+	BookedForGstin *string `json:"booked_for_gstin"`
 }
 
 // TrackerLocationPing is one point on an order's route trail.

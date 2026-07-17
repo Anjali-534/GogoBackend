@@ -522,6 +522,11 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 		BookedForEmail   string `json:"booked_for_email" binding:"omitempty,email"`
 		ConsigneeEmail   string `json:"consignee_email" binding:"omitempty,email"`
 		TransporterEmail string `json:"transporter_email" binding:"omitempty,email"`
+
+		// GSTIN for the two other dispatch-sheet parties, all optional.
+		// Format/checksum is validated client-side only (GSTInput component).
+		ConsigneeGstin string `json:"consignee_gstin"`
+		BookedForGstin string `json:"booked_for_gstin"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -569,8 +574,9 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 			 driver_id, driver_name, driver_phone, vehicle_number,
 			 eway_bill_number, status, public_tracking_token,
 			 consignee_name, material, quantity, dispatch_datetime, documents_enclosed,
-			 booked_for_email, consignee_email, transporter_email)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'created',$18,$19,$20,$21,$22,$23,$24,$25,$26)
+			 booked_for_email, consignee_email, transporter_email,
+			 consignee_gstin, booked_for_gstin)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'created',$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
 	`, id, companyID, req.BookedForCompanyName, req.BookedForPhone,
 		req.DispatchFrom, req.DispatchTo, req.DispatchFromLat, req.DispatchFromLng,
 		req.DispatchToLat, req.DispatchToLng, nullIfEmpty(req.TransporterName), nullIfEmpty(req.TransporterPhone),
@@ -578,7 +584,8 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 		nullIfEmpty(req.EwayBillNumber), token,
 		nullIfEmpty(req.ConsigneeName), nullIfEmpty(req.Material), nullIfEmpty(req.Quantity),
 		req.DispatchDatetime, nullIfEmpty(req.DocumentsEnclosed),
-		nullIfEmpty(req.BookedForEmail), nullIfEmpty(req.ConsigneeEmail), nullIfEmpty(req.TransporterEmail))
+		nullIfEmpty(req.BookedForEmail), nullIfEmpty(req.ConsigneeEmail), nullIfEmpty(req.TransporterEmail),
+		nullIfEmpty(req.ConsigneeGstin), nullIfEmpty(req.BookedForGstin))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create order: " + err.Error()})
 		return
@@ -667,7 +674,9 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 		       driver_tracking_token, last_lat, last_lng, last_location_at,
 		       dispatch_from_lat, dispatch_from_lng, dispatch_to_lat, dispatch_to_lng,
 		       route_polyline, route_distance_km, route_duration_mins,
-		       signature_url, booked_for_email, consignee_email, transporter_email
+		       signature_url, booked_for_email, consignee_email, transporter_email,
+		       received_confirmation_token, received_confirmed_at,
+		       consignee_gstin, booked_for_gstin
 		FROM tracker_orders
 		WHERE id = $1 AND company_id = $2
 	`, orderID, companyID).Scan(
@@ -682,6 +691,8 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 		&o.DispatchFromLat, &o.DispatchFromLng, &o.DispatchToLat, &o.DispatchToLng,
 		&o.RoutePolyline, &o.RouteDistanceKm, &o.RouteDurationMins,
 		&o.SignatureURL, &o.BookedForEmail, &o.ConsigneeEmail, &o.TransporterEmail,
+		&o.ReceivedConfirmationToken, &o.ReceivedConfirmedAt,
+		&o.ConsigneeGstin, &o.BookedForGstin,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -767,6 +778,9 @@ func UpdateTrackerCompanyOrderDetails(c *gin.Context) {
 		BookedForEmail   string `json:"booked_for_email" binding:"omitempty,email"`
 		ConsigneeEmail   string `json:"consignee_email" binding:"omitempty,email"`
 		TransporterEmail string `json:"transporter_email" binding:"omitempty,email"`
+
+		ConsigneeGstin string `json:"consignee_gstin"`
+		BookedForGstin string `json:"booked_for_gstin"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -785,8 +799,9 @@ func UpdateTrackerCompanyOrderDetails(c *gin.Context) {
 			consignee_name=$9, material=$10, quantity=$11,
 			dispatch_datetime=$12, documents_enclosed=$13,
 			booked_for_email=$14, consignee_email=$15, transporter_email=$16,
+			consignee_gstin=$17, booked_for_gstin=$18,
 			updated_at=NOW()
-		WHERE id=$17 AND company_id=$18
+		WHERE id=$19 AND company_id=$20
 	`, req.BookedForCompanyName, req.BookedForPhone,
 		req.DispatchFrom, req.DispatchTo,
 		nullIfEmpty(req.TransporterName), nullIfEmpty(req.TransporterPhone),
@@ -794,6 +809,7 @@ func UpdateTrackerCompanyOrderDetails(c *gin.Context) {
 		nullIfEmpty(req.ConsigneeName), nullIfEmpty(req.Material), nullIfEmpty(req.Quantity),
 		req.DispatchDatetime, nullIfEmpty(req.DocumentsEnclosed),
 		nullIfEmpty(req.BookedForEmail), nullIfEmpty(req.ConsigneeEmail), nullIfEmpty(req.TransporterEmail),
+		nullIfEmpty(req.ConsigneeGstin), nullIfEmpty(req.BookedForGstin),
 		orderID, companyID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "update failed: " + err.Error()})
@@ -831,9 +847,10 @@ func UpdateTrackerCompanyOrderStatus(c *gin.Context) {
 
 	var currentStatus string
 	var driverTrackingToken *string
+	var receiptToken *string
 	if err := pool.QueryRow(ctx, `
-		SELECT status, driver_tracking_token FROM tracker_orders WHERE id=$1 AND company_id=$2
-	`, orderID, companyID).Scan(&currentStatus, &driverTrackingToken); err != nil {
+		SELECT status, driver_tracking_token, received_confirmation_token FROM tracker_orders WHERE id=$1 AND company_id=$2
+	`, orderID, companyID).Scan(&currentStatus, &driverTrackingToken, &receiptToken); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
 		return
 	}
@@ -855,6 +872,19 @@ func UpdateTrackerCompanyOrderStatus(c *gin.Context) {
 		newDriverToken = token
 	}
 
+	// The consignee's receipt-confirmation token is generated the first time
+	// an order moves to 'delivered' — that's the earliest point receiving
+	// goods can actually be confirmed. Never regenerated on later re-sends.
+	newReceiptToken := ""
+	if req.Status == "delivered" && receiptToken == nil {
+		token, err := generateTrackingToken()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate receipt token"})
+			return
+		}
+		newReceiptToken = token
+	}
+
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
@@ -862,12 +892,20 @@ func UpdateTrackerCompanyOrderStatus(c *gin.Context) {
 	}
 	defer tx.Rollback(ctx)
 
+	// newDriverToken and newReceiptToken are mutually exclusive — the former
+	// only fires for req.Status == "dispatched", the latter only for
+	// "delivered", and req.Status is a single value.
 	var tag interface{ RowsAffected() int64 }
-	if newDriverToken != "" {
+	switch {
+	case newDriverToken != "":
 		tag, err = tx.Exec(ctx, `
 			UPDATE tracker_orders SET status=$1, driver_tracking_token=$2, updated_at=NOW() WHERE id=$3 AND company_id=$4
 		`, req.Status, newDriverToken, orderID, companyID)
-	} else {
+	case newReceiptToken != "":
+		tag, err = tx.Exec(ctx, `
+			UPDATE tracker_orders SET status=$1, received_confirmation_token=$2, updated_at=NOW() WHERE id=$3 AND company_id=$4
+		`, req.Status, newReceiptToken, orderID, companyID)
+	default:
 		tag, err = tx.Exec(ctx, `
 			UPDATE tracker_orders SET status=$1, updated_at=NOW() WHERE id=$2 AND company_id=$3
 		`, req.Status, orderID, companyID)
@@ -898,6 +936,9 @@ func UpdateTrackerCompanyOrderStatus(c *gin.Context) {
 	resp := gin.H{"message": "status updated"}
 	if newDriverToken != "" {
 		resp["driver_tracking_token"] = newDriverToken
+	}
+	if newReceiptToken != "" {
+		resp["received_confirmation_token"] = newReceiptToken
 	}
 	c.JSON(http.StatusOK, resp)
 }
@@ -1044,6 +1085,7 @@ func GetPublicTrackerOrder(c *gin.Context) {
 	var routeDistanceKm *float64
 	var routeDurationMins *int
 	var signatureURL *string
+	var receivedConfirmedAt *time.Time
 	err := pool.QueryRow(ctx, `
 		SELECT id, status, dispatch_from, dispatch_to, vehicle_number,
 		       transporter_name, transporter_phone, driver_name, driver_phone,
@@ -1051,7 +1093,7 @@ func GetPublicTrackerOrder(c *gin.Context) {
 		       last_lat, last_lng, last_location_at,
 		       dispatch_from_lat, dispatch_from_lng, dispatch_to_lat, dispatch_to_lng,
 		       route_polyline, route_distance_km, route_duration_mins,
-		       signature_url
+		       signature_url, received_confirmed_at
 		FROM tracker_orders WHERE public_tracking_token = $1
 	`, token).Scan(&orderID, &status, &dispatchFrom, &dispatchTo, &vehicleNumber,
 		&transporterName, &transporterPhone, &driverName, &driverPhone,
@@ -1059,7 +1101,7 @@ func GetPublicTrackerOrder(c *gin.Context) {
 		&lastLat, &lastLng, &lastLocationAt,
 		&dispatchFromLat, &dispatchFromLng, &dispatchToLat, &dispatchToLng,
 		&routePolyline, &routeDistanceKm, &routeDurationMins,
-		&signatureURL)
+		&signatureURL, &receivedConfirmedAt)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "tracking link not found"})
 		return
@@ -1108,31 +1150,32 @@ func GetPublicTrackerOrder(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"status":              status,
-		"dispatch_from":       dispatchFrom,
-		"dispatch_to":         dispatchTo,
-		"vehicle_number":      vehicleNumber,
-		"transporter_name":    transporterName,
-		"transporter_phone":   transporterPhone,
-		"driver_name":         driverName,
-		"driver_phone":        driverPhone,
-		"consignee_name":      consigneeName,
-		"material":            material,
-		"quantity":            quantity,
-		"dispatch_datetime":   dispatchDatetime,
-		"signed":              signatureURL != nil,
-		"events":              events,
-		"last_lat":            lastLat,
-		"last_lng":            lastLng,
-		"last_location_at":    lastLocationAt,
-		"location_pings":      pings,
-		"dispatch_from_lat":   dispatchFromLat,
-		"dispatch_from_lng":   dispatchFromLng,
-		"dispatch_to_lat":     dispatchToLat,
-		"dispatch_to_lng":     dispatchToLng,
-		"route_polyline":      routePolyline,
-		"route_distance_km":   routeDistanceKm,
-		"route_duration_mins": routeDurationMins,
+		"status":                status,
+		"dispatch_from":         dispatchFrom,
+		"dispatch_to":           dispatchTo,
+		"vehicle_number":        vehicleNumber,
+		"transporter_name":      transporterName,
+		"transporter_phone":     transporterPhone,
+		"driver_name":           driverName,
+		"driver_phone":          driverPhone,
+		"consignee_name":        consigneeName,
+		"material":              material,
+		"quantity":              quantity,
+		"dispatch_datetime":     dispatchDatetime,
+		"signed":                signatureURL != nil,
+		"events":                events,
+		"last_lat":              lastLat,
+		"last_lng":              lastLng,
+		"last_location_at":      lastLocationAt,
+		"location_pings":        pings,
+		"dispatch_from_lat":     dispatchFromLat,
+		"dispatch_from_lng":     dispatchFromLng,
+		"dispatch_to_lat":       dispatchToLat,
+		"dispatch_to_lng":       dispatchToLng,
+		"route_polyline":        routePolyline,
+		"route_distance_km":     routeDistanceKm,
+		"route_duration_mins":   routeDurationMins,
+		"received_confirmed_at": receivedConfirmedAt,
 	})
 }
 
