@@ -278,6 +278,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.GET("/dashboard/tracker/companies/:id/drivers", middleware.RequirePanel(), handlers.GetTrackerCompanyDrivers)
 		gogoo.GET("/dashboard/tracker/companies/:id/orders", middleware.RequirePanel(), handlers.GetTrackerCompanyOrders)
 		gogoo.GET("/dashboard/tracker/companies/:id/orders/:orderId", middleware.RequirePanel(), handlers.GetTrackerCompanyOrderDetail)
+		gogoo.GET("/dashboard/tracker/companies/:id/plan-orders", middleware.RequirePanel(), handlers.GetTrackerCompanyPlanOrders)
 		gogoo.POST("/dashboard/tracker/plan-orders/:id/mark-paid", middleware.RequirePanel(), handlers.MarkTrackerPlanOrderPaid)
 
 		// Bogie Tracker — company-facing panel. Every route is scoped to the

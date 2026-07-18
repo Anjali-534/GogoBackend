@@ -7,10 +7,16 @@
       "Bash(gofmt -l -w internal/services/trackerbilling internal/api/handlers/tracker_plan.go internal/api/handlers/tracker_plan_admin.go internal/api/router.go)",
       "Bash(cd \"/c/Users/ADMIN/OneDrive/Desktop/gogoo/backend\" && go build ./... 2>&1)",
       "Bash(rm \"/c/Users/ADMIN/OneDrive/Desktop/gogoo/backend/internal/api/handlers/tracker_plan_orders_test.go\")",
-      "Bash(cd \"/c/Users/ADMIN/OneDrive/Desktop/gogoo/backend\" && go build ./... && go vet ./internal/services/trackerbilling/... ./internal/api/... 2>&1)"
+      "Bash(cd \"/c/Users/ADMIN/OneDrive/Desktop/gogoo/backend\" && go build ./... && go vet ./internal/services/trackerbilling/... ./internal/api/... 2>&1)",
+      "Bash(ls \"c:/Users/ADMIN/OneDrive/Desktop/gogoo/dashboard\" 2>&1 | head -30)",
+      "Read(//c/Users/ADMIN/OneDrive/Desktop/gogoo/dashboard/**)",
+      "Read(//c/Users/ADMIN/OneDrive/Desktop/gogoo/dashboard/app/dashboard/tracker-companies/\\\\[id\\\\]/**)",
+      "Bash(gofmt -l -w internal/api/handlers/tracker_plan.go internal/api/router.go)",
+      "Bash(cd \"c:/Users/ADMIN/OneDrive/Desktop/gogoo/dashboard\" && npx tsc --noEmit -p tsconfig.json 2>&1 | grep -i \"tracker-companies/\\\\[id\\\\]/page\" )"
     ],
     "additionalDirectories": [
-      "C:\\Users\\ADMIN\\OneDrive\\Desktop\\gogoo\\backend\\internal\\api\\handlers"
+      "C:\\Users\\ADMIN\\OneDrive\\Desktop\\gogoo\\backend\\internal\\api\\handlers",
+      "c:\\Users\\ADMIN\\OneDrive\\Desktop\\gogoo\\dashboard\\app\\dashboard\\tracker-companies\\[id]"
     ]
   }
 }

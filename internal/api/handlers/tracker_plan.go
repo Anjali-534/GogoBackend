@@ -161,6 +161,47 @@ func ListTrackerPlanOrders(c *gin.Context) {
 	c.JSON(http.StatusOK, orders)
 }
 
+// GET /gogoo/dashboard/tracker/companies/:id/plan-orders — staff view of a
+// single company's plan orders (unscoped by JWT, :id comes from the URL since
+// staff can look up any company).
+func GetTrackerCompanyPlanOrders(c *gin.Context) {
+	companyID := c.Param("id")
+
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+
+	rows, err := pool.Query(ctx, `
+		SELECT id, company_id, plan, billing_duration, base_amount, gst_amount, total_amount,
+		       billing_name, billing_address_line, billing_city, billing_state, billing_pincode, gstin,
+		       invoice_number, status, payment_gateway_ref, created_at, paid_at
+		FROM tracker_plan_orders
+		WHERE company_id = $1
+		ORDER BY created_at DESC
+	`, companyID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error: " + err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	var orders []TrackerPlanOrder
+	for rows.Next() {
+		var o TrackerPlanOrder
+		if err := rows.Scan(
+			&o.ID, &o.CompanyID, &o.Plan, &o.BillingDuration, &o.BaseAmount, &o.GSTAmount, &o.TotalAmount,
+			&o.BillingName, &o.BillingAddressLine, &o.BillingCity, &o.BillingState, &o.BillingPincode, &o.GSTIN,
+			&o.InvoiceNumber, &o.Status, &o.PaymentGatewayRef, &o.CreatedAt, &o.PaidAt,
+		); err != nil {
+			continue
+		}
+		orders = append(orders, o)
+	}
+	if orders == nil {
+		orders = []TrackerPlanOrder{}
+	}
+	c.JSON(http.StatusOK, orders)
+}
+
 // GET /gogoo/tracker/plan-orders/:id/invoice — regenerates the invoice PDF
 // on demand from the order's stored columns rather than persisting a blob.
 // Only available once paid: invoice_number is nil until MarkTrackerPlanOrderPaid
