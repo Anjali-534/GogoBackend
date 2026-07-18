@@ -225,6 +225,7 @@ func MarkTrackerPlanOrderPaid(c *gin.Context) {
 		"paid_at":           paidAt,
 		"email":             emailStatus,
 		"company_activated": activated,
+		"first_activation":  firstActivation,
 	})
 }
 
