@@ -278,6 +278,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.GET("/dashboard/tracker/companies/:id/drivers", middleware.RequirePanel(), handlers.GetTrackerCompanyDrivers)
 		gogoo.GET("/dashboard/tracker/companies/:id/orders", middleware.RequirePanel(), handlers.GetTrackerCompanyOrders)
 		gogoo.GET("/dashboard/tracker/companies/:id/orders/:orderId", middleware.RequirePanel(), handlers.GetTrackerCompanyOrderDetail)
+		gogoo.POST("/dashboard/tracker/plan-orders/:id/mark-paid", middleware.RequirePanel(), handlers.MarkTrackerPlanOrderPaid)
 
 		// Bogie Tracker — company-facing panel. Every route is scoped to the
 		// caller's own company_id (see comment at the top of tracker.go); this
@@ -299,6 +300,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.POST("/tracker/orders/:id/eway-bill", middleware.RequireTrackerCompany(), handlers.UploadTrackerOrderEwayBill)
 		gogoo.POST("/tracker/orders/:id/messages", middleware.RequireTrackerCompany(), handlers.SendTrackerOrderMessage)
 		gogoo.POST("/tracker/orders/:id/notify", middleware.RequireTrackerCompany(), handlers.NotifyTrackerOrderStakeholders)
+		gogoo.POST("/tracker/plan-orders", middleware.RequireTrackerCompany(), handlers.CreateTrackerPlanOrder)
+		gogoo.GET("/tracker/plan-orders", middleware.RequireTrackerCompany(), handlers.ListTrackerPlanOrders)
+		gogoo.GET("/tracker/plan-orders/:id/invoice", middleware.RequireTrackerCompany(), handlers.GetTrackerPlanOrderInvoice)
 
 		// Ambulance — Bookings
 		gogoo.GET("/ambulance/bookings/hospital", middleware.RequirePanel("hospital", "ambulance"), handlers.GetHospitalBookings)
