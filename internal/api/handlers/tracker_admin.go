@@ -164,7 +164,7 @@ func ListTrackerCompanies(c *gin.Context) {
 	pool := db.GetDB().GetPool()
 
 	rows, err := pool.Query(ctx, `
-		SELECT tc.id, tc.company_name, tc.contact_phone, tc.contact_email,
+		SELECT tc.id, tc.company_name, COALESCE(tc.contact_phone,''), tc.contact_email,
 		       COALESCE(tc.gstin,''), tc.status, tc.approved_by::text, tc.approved_at,
 		       tc.created_at,
 		       (SELECT COUNT(*) FROM tracker_drivers td WHERE td.company_id = tc.id) AS driver_count,
@@ -207,7 +207,7 @@ func GetTrackerCompany(c *gin.Context) {
 	var comp TrackerCompany
 	var approvedBy *string
 	err := pool.QueryRow(ctx, `
-		SELECT id, company_name, contact_phone, contact_email,
+		SELECT id, company_name, COALESCE(contact_phone,''), contact_email,
 		       COALESCE(gstin,''), status, approved_by::text, approved_at, created_at
 		FROM tracker_companies WHERE id = $1
 	`, id).Scan(

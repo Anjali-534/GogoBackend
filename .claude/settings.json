@@ -12,11 +12,29 @@
       "Read(//c/Users/ADMIN/OneDrive/Desktop/gogoo/dashboard/**)",
       "Read(//c/Users/ADMIN/OneDrive/Desktop/gogoo/dashboard/app/dashboard/tracker-companies/\\\\[id\\\\]/**)",
       "Bash(gofmt -l -w internal/api/handlers/tracker_plan.go internal/api/router.go)",
-      "Bash(cd \"c:/Users/ADMIN/OneDrive/Desktop/gogoo/dashboard\" && npx tsc --noEmit -p tsconfig.json 2>&1 | grep -i \"tracker-companies/\\\\[id\\\\]/page\" )"
+      "Bash(cd \"c:/Users/ADMIN/OneDrive/Desktop/gogoo/dashboard\" && npx tsc --noEmit -p tsconfig.json 2>&1 | grep -i \"tracker-companies/\\\\[id\\\\]/page\" )",
+      "Bash(ls \"c:/Users/ADMIN/OneDrive/Desktop/gogoo/bogie-tracker-panel\" 2>&1 | head -40)",
+      "Read(//c/Users/ADMIN/OneDrive/Desktop/gogoo/bogie-tracker-panel/**)",
+      "Bash(cd \"c:\\\\Users\\\\ADMIN\\\\OneDrive\\\\Desktop\\\\gogoo\\\\bogie-tracker-panel\" && find app -maxdepth 4 -type d 2>/dev/null; echo \"---FILES---\"; find app -maxdepth 5 -name \"*.tsx\" -o -maxdepth 5 -name \"*.ts\" 2>/dev/null | head -100)",
+      "Bash(cd \"c:\\\\Users\\\\ADMIN\\\\OneDrive\\\\Desktop\\\\gogoo\\\\bogie-tracker-panel\" && cat package.json)",
+      "Read(//c/Users/ADMIN/OneDrive/Desktop/gogoo/bogie-tracker-panel/app/tracker/**)",
+      "Read(//c/Users/ADMIN/OneDrive/Desktop/gogoo/bogie-tracker-panel/app/tracker/orders/**)",
+      "Read(//c/Users/ADMIN/OneDrive/Desktop/gogoo/bogie-tracker-panel/app/tracker/settings/**)",
+      "Read(//c/Users/ADMIN/OneDrive/Desktop/gogoo/bogie-tracker-panel/lib/**)",
+      "Read(//c/Users/ADMIN/OneDrive/Desktop/gogoo/bogie-tracker-panel/components/**)",
+      "Read(//c/Users/ADMIN/OneDrive/Desktop/gogoo/bogie-tracker-panel/app/tracker/orders/new/**)",
+      "Bash(cd \"c:\\\\Users\\\\ADMIN\\\\OneDrive\\\\Desktop\\\\gogoo\\\\bogie-tracker-panel\" && ls -la .env* 2>/dev/null; find . -maxdepth 1 -name \".env*\")",
+      "Bash(cd \"c:\\\\Users\\\\ADMIN\\\\OneDrive\\\\Desktop\\\\gogoo\\\\bogie-tracker-panel\" && cat .env.example)",
+      "Bash(cd \"c:/Users/ADMIN/OneDrive/Desktop/gogoo/bogie-tracker-panel\" && npx tsc --noEmit -p tsconfig.json 2>&1 | head -60)",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(npx eslint *)",
+      "Bash(npx next *)"
     ],
     "additionalDirectories": [
       "C:\\Users\\ADMIN\\OneDrive\\Desktop\\gogoo\\backend\\internal\\api\\handlers",
-      "c:\\Users\\ADMIN\\OneDrive\\Desktop\\gogoo\\dashboard\\app\\dashboard\\tracker-companies\\[id]"
+      "c:\\Users\\ADMIN\\OneDrive\\Desktop\\gogoo\\dashboard\\app\\dashboard\\tracker-companies\\[id]",
+      "c:\\Users\\ADMIN\\OneDrive\\Desktop\\gogoo\\bogie-tracker-panel\\lib",
+      "c:\\Users\\ADMIN\\OneDrive\\Desktop\\gogoo\\bogie-tracker-panel\\app\\tracker"
     ]
   }
 }

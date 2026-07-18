@@ -69,7 +69,7 @@ var validDriverEventKinds = map[string]bool{
 func TrackerCompanySignup(c *gin.Context) {
 	var req struct {
 		CompanyName  string `json:"company_name" binding:"required"`
-		ContactPhone string `json:"contact_phone" binding:"required"`
+		ContactPhone string `json:"contact_phone"`
 		ContactEmail string `json:"contact_email" binding:"required,email"`
 		Password     string `json:"password" binding:"required,min=8"`
 		GSTIN        string `json:"gstin"`
@@ -99,7 +99,7 @@ func TrackerCompanySignup(c *gin.Context) {
 	_, err = pool.Exec(ctx, `
 		INSERT INTO tracker_companies (id, company_name, contact_phone, contact_email, password_hash, gstin)
 		VALUES ($1,$2,$3,$4,$5,$6)
-	`, id, req.CompanyName, req.ContactPhone, req.ContactEmail, string(hash), nullIfEmpty(req.GSTIN))
+	`, id, req.CompanyName, nullIfEmpty(req.ContactPhone), req.ContactEmail, string(hash), nullIfEmpty(req.GSTIN))
 	if err != nil {
 		if strings.Contains(err.Error(), "duplicate key") || strings.Contains(err.Error(), "23505") {
 			c.JSON(http.StatusConflict, gin.H{"error": "an account with this email already exists"})
@@ -186,7 +186,7 @@ func GetTrackerCompanyProfile(c *gin.Context) {
 	var comp TrackerCompany
 	var approvedBy *string
 	err := pool.QueryRow(ctx, `
-		SELECT id, company_name, contact_phone, contact_email,
+		SELECT id, company_name, COALESCE(contact_phone,''), contact_email,
 		       COALESCE(gstin,''), status, approved_by::text, approved_at, created_at,
 		       notification_email
 		FROM tracker_companies WHERE id = $1
