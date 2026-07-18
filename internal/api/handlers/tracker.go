@@ -131,23 +131,9 @@ func TrackerCompanySignup(c *gin.Context) {
 	cfg := c.MustGet("config").(*config.Config)
 	sendTrackerSignupEmail(cfg, req.CompanyName, req.ContactEmail)
 
-	code, err := generateOTPCode()
-	if err != nil {
-		log.Printf("tracker signup: OTP generation failed for %s: %v", req.ContactEmail, err)
-	} else {
-		_, err = pool.Exec(ctx, `
-			UPDATE tracker_companies SET email_otp_code=$1, email_otp_expires_at=$2 WHERE id=$3
-		`, code, time.Now().Add(otpTTL), id)
-		if err != nil {
-			log.Printf("tracker signup: failed to store OTP for %s: %v", req.ContactEmail, err)
-		} else {
-			sendTrackerOTPEmail(cfg, req.CompanyName, req.ContactEmail, code)
-		}
-	}
-
 	c.JSON(http.StatusCreated, gin.H{
 		"id":      id,
-		"message": "Signup received — check your email for a verification code",
+		"message": "Signup received — your account is pending approval",
 	})
 }
 
@@ -267,22 +253,16 @@ func TrackerCompanyLogin(c *gin.Context) {
 	pool := db.GetDB().GetPool()
 
 	var id, companyName, passwordHash, status string
-	var emailVerified bool
 	err := pool.QueryRow(ctx, `
-		SELECT id, company_name, password_hash, status, email_verified
+		SELECT id, company_name, password_hash, status
 		FROM tracker_companies WHERE contact_email=$1
-	`, req.Email).Scan(&id, &companyName, &passwordHash, &status, &emailVerified)
+	`, req.Email).Scan(&id, &companyName, &passwordHash, &status)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		return
 	}
 	if bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)) != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
-		return
-	}
-
-	if !emailVerified {
-		c.JSON(http.StatusForbidden, gin.H{"error": "please verify your email before logging in", "email_verified": false})
 		return
 	}
 
