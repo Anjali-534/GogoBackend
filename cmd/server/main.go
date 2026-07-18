@@ -13,6 +13,7 @@ import (
 	"github.com/deploykit/backend/internal/config"
 	"github.com/deploykit/backend/internal/db"
 	"github.com/deploykit/backend/internal/services/ledger"
+	"github.com/deploykit/backend/internal/services/trackersub"
 	"github.com/joho/godotenv"
 )
 
@@ -78,6 +79,11 @@ func main() {
 	// Monthly driver earnings statement emailer — ticks daily, sends on the 1st.
 	go ledger.StartMonthlyStatementMailer(cfg)
 	log.Println("✓ Monthly statement mailer running")
+
+	// Bogie Tracker subscription renewal reminders — ticks daily, emails
+	// companies expiring in 7 or 1 days.
+	go trackersub.StartSubscriptionReminderMailer(cfg)
+	log.Println("✓ Tracker subscription reminder mailer running")
 
 	// Setup API router
 	router := api.SetupRouter(cfg)
