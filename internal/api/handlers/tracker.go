@@ -1315,6 +1315,35 @@ func UploadTrackerCompanyLogo(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"logo_url": logoURL, "message": "logo uploaded"})
 }
 
+// DELETE /gogoo/tracker/logo — clears the company's logo without uploading a
+// replacement. Best-effort Cloudinary cleanup, same as the replace path in
+// UploadTrackerCompanyLogo.
+func DeleteTrackerCompanyLogo(c *gin.Context) {
+	companyID := c.GetString("company_id")
+
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+
+	var oldLogoURL *string
+	if err := pool.QueryRow(ctx, `SELECT logo_url FROM tracker_companies WHERE id = $1`, companyID).Scan(&oldLogoURL); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "company not found"})
+		return
+	}
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE tracker_companies SET logo_url = NULL, updated_at = NOW() WHERE id = $1
+	`, companyID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+
+	if oldLogoURL != nil && *oldLogoURL != "" {
+		deleteFromCloudinary(*oldLogoURL)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "logo removed"})
+}
+
 // TrackerPartner is the shape returned by GET /gogoo/public/tracker/partners —
 // intentionally minimal (no contact/financial fields) since it's unauthenticated.
 type TrackerPartner struct {
