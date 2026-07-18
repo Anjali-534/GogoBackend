@@ -345,12 +345,12 @@ func GetTrackerCompanyProfile(c *gin.Context) {
 	err := pool.QueryRow(ctx, `
 		SELECT id, company_name, COALESCE(contact_phone,''), contact_email,
 		       COALESCE(gstin,''), status, approved_by::text, approved_at, created_at,
-		       notification_email
+		       notification_email, logo_url
 		FROM tracker_companies WHERE id = $1
 	`, companyID).Scan(
 		&comp.ID, &comp.CompanyName, &comp.ContactPhone, &comp.ContactEmail,
 		&comp.GSTIN, &comp.Status, &approvedBy, &comp.ApprovedAt, &comp.CreatedAt,
-		&comp.NotificationEmail,
+		&comp.NotificationEmail, &comp.LogoURL,
 	)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "company not found"})
@@ -1217,6 +1217,139 @@ func UploadTrackerOrderEwayBill(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"file_url": fileURL, "message": "e-way bill uploaded"})
+}
+
+// allowedLogoMimeTypes restricts logo uploads to images only — unlike KYC
+// documents and e-way bills, a PDF doesn't make sense as a company logo.
+var allowedLogoMimeTypes = map[string]string{
+	"image/jpeg": ".jpg",
+	"image/jpg":  ".jpg",
+	"image/png":  ".png",
+	"image/webp": ".webp",
+}
+
+const maxLogoFileSize = 2 * 1024 * 1024
+
+// POST /gogoo/tracker/logo  (multipart/form-data, field "file")
+func UploadTrackerCompanyLogo(c *gin.Context) {
+	companyID := c.GetString("company_id")
+
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+
+	if err := c.Request.ParseMultipartForm(maxLogoFileSize); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file too large — max 2MB allowed"})
+		return
+	}
+
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file is required"})
+		return
+	}
+	defer file.Close()
+
+	mimeType := header.Header.Get("Content-Type")
+	if idx := strings.Index(mimeType, ";"); idx > 0 {
+		mimeType = strings.TrimSpace(mimeType[:idx])
+	}
+	ext, allowed := allowedLogoMimeTypes[mimeType]
+	if !allowed {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "only JPG, PNG and WEBP images allowed"})
+		return
+	}
+	if header.Size > maxLogoFileSize {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file must be under 2MB"})
+		return
+	}
+
+	var oldLogoURL *string
+	if err := pool.QueryRow(ctx, `SELECT logo_url FROM tracker_companies WHERE id = $1`, companyID).Scan(&oldLogoURL); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "company not found"})
+		return
+	}
+
+	var logoURL string
+	if os.Getenv("CLOUDINARY_CLOUD_NAME") != "" {
+		publicID := fmt.Sprintf("gogoo/tracker-companies/%s/logo_%s", companyID, uuid.New().String()[:8])
+		secureURL, err := uploadToCloudinaryWithPublicID(ctx, file, header.Filename, publicID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "cloud storage error: " + err.Error()})
+			return
+		}
+		logoURL = secureURL
+	} else {
+		uploadDir := filepath.Join("uploads", "tracker-companies", companyID)
+		if err := os.MkdirAll(uploadDir, 0755); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "storage error"})
+			return
+		}
+		localName := "logo_" + uuid.New().String()[:8] + ext
+		filePath := filepath.Join(uploadDir, localName)
+		dst, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save file"})
+			return
+		}
+		_, err = dst.ReadFrom(file)
+		dst.Close()
+		if err != nil {
+			os.Remove(filePath)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to write file"})
+			return
+		}
+		logoURL = "/uploads/tracker-companies/" + companyID + "/" + localName
+	}
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE tracker_companies SET logo_url = $1, updated_at = NOW() WHERE id = $2
+	`, logoURL, companyID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+
+	if oldLogoURL != nil && *oldLogoURL != "" {
+		deleteFromCloudinary(*oldLogoURL)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"logo_url": logoURL, "message": "logo uploaded"})
+}
+
+// TrackerPartner is the shape returned by GET /gogoo/public/tracker/partners —
+// intentionally minimal (no contact/financial fields) since it's unauthenticated.
+type TrackerPartner struct {
+	CompanyName string `json:"company_name"`
+	LogoURL     string `json:"logo_url"`
+}
+
+// GET /gogoo/public/tracker/partners — unauthenticated. Returns active
+// companies that have uploaded a logo, for the marketing site's "Our
+// Partners" section. Companies without a logo are omitted entirely rather
+// than returned with a blank/placeholder logo_url.
+func GetTrackerPartnersPublic(c *gin.Context) {
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+
+	rows, err := pool.Query(ctx, `
+		SELECT company_name, logo_url FROM tracker_companies
+		WHERE status = 'active' AND logo_url IS NOT NULL
+		ORDER BY approved_at ASC
+	`)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error: " + err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	partners := []TrackerPartner{}
+	for rows.Next() {
+		var p TrackerPartner
+		if err := rows.Scan(&p.CompanyName, &p.LogoURL); err != nil {
+			continue
+		}
+		partners = append(partners, p)
+	}
+	c.JSON(http.StatusOK, partners)
 }
 
 // ─── Public tracking ────────────────────────────────────────────────────────

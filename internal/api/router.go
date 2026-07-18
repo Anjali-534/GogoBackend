@@ -129,6 +129,10 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		// tracker_receipt.go).
 		gogooPublic.GET("/public/tracker/receipt/:token", handlers.GetTrackerReceiptOrder)
 		gogooPublic.POST("/public/tracker/receipt/:token/confirm", handlers.ConfirmTrackerReceipt)
+
+		// Bogie Tracker — public partner logos for the marketing site's
+		// "Our Partners" section. No auth: only company_name + logo_url.
+		gogooPublic.GET("/public/tracker/partners", handlers.GetTrackerPartnersPublic)
 	}
 
 	// ============================================================
@@ -301,6 +305,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.PATCH("/tracker/orders/:id/details", middleware.RequireTrackerCompany(), handlers.UpdateTrackerCompanyOrderDetails)
 		gogoo.POST("/tracker/orders/:id/events", middleware.RequireTrackerCompany(), handlers.AddTrackerCompanyOrderEvent)
 		gogoo.POST("/tracker/orders/:id/eway-bill", middleware.RequireTrackerCompany(), handlers.UploadTrackerOrderEwayBill)
+		gogoo.POST("/tracker/logo", middleware.RequireTrackerCompany(), handlers.UploadTrackerCompanyLogo)
 		gogoo.POST("/tracker/orders/:id/messages", middleware.RequireTrackerCompany(), handlers.SendTrackerOrderMessage)
 		gogoo.POST("/tracker/orders/:id/notify", middleware.RequireTrackerCompany(), handlers.NotifyTrackerOrderStakeholders)
 		gogoo.POST("/tracker/plan-orders", middleware.RequireTrackerCompany(), handlers.CreateTrackerPlanOrder)

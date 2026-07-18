@@ -120,12 +120,20 @@ func getVehicleCategory(vehicleType string) string {
 // Returns the permanent secure_url. Requires CLOUDINARY_CLOUD_NAME,
 // CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET environment variables.
 func uploadToCloudinary(ctx context.Context, reader io.Reader, origName, docType, driverID string) (string, error) {
+	publicID := fmt.Sprintf("gogoo/drivers/%s/%s_%s", driverID, docType, uuid.New().String()[:8])
+	return uploadToCloudinaryWithPublicID(ctx, reader, origName, publicID)
+}
+
+// uploadToCloudinaryWithPublicID is the shared upload core behind
+// uploadToCloudinary — factored out so callers whose public_id doesn't fit
+// the drivers/<id>/<docType>_<uuid> shape (e.g. company logos) can supply
+// their own folder path instead of being forced into "gogoo/drivers/...".
+func uploadToCloudinaryWithPublicID(ctx context.Context, reader io.Reader, origName, publicID string) (string, error) {
 	cloudName := os.Getenv("CLOUDINARY_CLOUD_NAME")
 	apiKey := os.Getenv("CLOUDINARY_API_KEY")
 	apiSecret := os.Getenv("CLOUDINARY_API_SECRET")
 
 	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
-	publicID := fmt.Sprintf("gogoo/drivers/%s/%s_%s", driverID, docType, uuid.New().String()[:8])
 
 	// Cloudinary signature: SHA-1("public_id=...&timestamp=...{api_secret}")
 	sigStr := fmt.Sprintf("public_id=%s&timestamp=%s%s", publicID, timestamp, apiSecret)

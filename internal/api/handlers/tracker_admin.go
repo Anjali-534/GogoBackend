@@ -38,6 +38,10 @@ type TrackerCompany struct {
 	// NotificationEmail is the "send as" reply-to address for dispatch
 	// emails. Nullable — falls back to ContactEmail when unset.
 	NotificationEmail *string `json:"notification_email"`
+
+	// LogoURL is nil when the company hasn't uploaded one — the panel/
+	// marketing site both fall back to the generic Bogie logo in that case.
+	LogoURL *string `json:"logo_url"`
 }
 
 type TrackerCompanyListItem struct {
