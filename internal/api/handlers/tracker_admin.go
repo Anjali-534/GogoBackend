@@ -33,6 +33,7 @@ type TrackerCompany struct {
 	ApprovedBy   *string    `json:"approved_by"`
 	ApprovedAt   *time.Time `json:"approved_at"`
 	CreatedAt    time.Time  `json:"created_at"`
+	LicenseKey   string     `json:"license_key"`
 
 	// NotificationEmail is the "send as" reply-to address for dispatch
 	// emails. Nullable — falls back to ContactEmail when unset.
@@ -208,11 +209,13 @@ func GetTrackerCompany(c *gin.Context) {
 	var approvedBy *string
 	err := pool.QueryRow(ctx, `
 		SELECT id, company_name, COALESCE(contact_phone,''), contact_email,
-		       COALESCE(gstin,''), status, approved_by::text, approved_at, created_at
+		       COALESCE(gstin,''), status, approved_by::text, approved_at, created_at,
+		       COALESCE(license_key,'')
 		FROM tracker_companies WHERE id = $1
 	`, id).Scan(
 		&comp.ID, &comp.CompanyName, &comp.ContactPhone, &comp.ContactEmail,
 		&comp.GSTIN, &comp.Status, &approvedBy, &comp.ApprovedAt, &comp.CreatedAt,
+		&comp.LicenseKey,
 	)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "tracker company not found"})
