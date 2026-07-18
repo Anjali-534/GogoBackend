@@ -31,6 +31,18 @@ var validTrackerBillingDurations = map[string]bool{
 	"monthly": true, "quarterly": true, "halfYearly": true, "yearly": true, "onetime": true,
 }
 
+// trackerSubscriptionExtension maps a paid order's billing_duration to the
+// number of months its subscription_expires_at should be extended by.
+// 'onetime' (lifetime plans only, enforced by trackerbilling.Lookup) has no
+// entry — those never expire, so MarkTrackerPlanOrderPaid's `ok` check skips
+// expiry stacking entirely for them.
+var trackerSubscriptionExtension = map[string]int{
+	"monthly":    1,
+	"quarterly":  3,
+	"halfYearly": 6,
+	"yearly":     12,
+}
+
 // TrackerPlanOrder mirrors the tracker_plan_orders row shape returned to the
 // company panel (list/detail) — payment_gateway_ref and invoice_number stay
 // nil until MarkTrackerPlanOrderPaid stamps them in.

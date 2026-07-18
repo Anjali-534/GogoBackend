@@ -114,20 +114,30 @@ func MarkTrackerPlanOrderPaid(c *gin.Context) {
 
 	// Payment is now the account-activation trigger: a company still sitting
 	// in 'pending' gets its license key + a fresh system password on this
-	// transition. Already-'active' companies are left untouched (no password
-	// rotation on a repeat/renewal order), and 'suspended'/'rejected' stay
-	// exactly that — payment does not override a staff decision.
+	// transition. A company auto-suspended for a lapsed subscription
+	// (suspension_reason='expired') reactivates on payment too, but reuses
+	// its existing license_key/password_hash rather than regenerating them —
+	// only a genuine first-time 'pending' activation mints new credentials.
+	// Already-'active' companies are left untouched by this block (handled
+	// by the expiry-stacking logic below instead), and a staff-cause
+	// suspension (suspension_reason IS NULL) or 'rejected' status is never
+	// touched here — payment must never override a deliberate staff decision.
 	var companyStatus string
+	var suspensionReason *string
+	var currentExpiresAt *time.Time
 	if err := tx.QueryRow(ctx, `
-		SELECT status FROM tracker_companies WHERE id = $1
-	`, o.CompanyID).Scan(&companyStatus); err != nil {
+		SELECT status, suspension_reason, subscription_expires_at FROM tracker_companies WHERE id = $1
+	`, o.CompanyID).Scan(&companyStatus, &suspensionReason, &currentExpiresAt); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load company: " + err.Error()})
 		return
 	}
 
+	firstActivation := companyStatus == "pending"
+	lapsedReactivation := companyStatus == "suspended" && suspensionReason != nil && *suspensionReason == "expired"
+	activated := firstActivation || lapsedReactivation
+
 	var licenseKey, newPassword string
-	activated := companyStatus == "pending"
-	if activated {
+	if firstActivation {
 		licenseKey, err = generateTrackerLicenseKey()
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate license key"})
@@ -153,6 +163,36 @@ func MarkTrackerPlanOrderPaid(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to activate company: " + err.Error()})
 			return
 		}
+	} else if lapsedReactivation {
+		approvedBy := c.GetString("user_id")
+		if _, err := tx.Exec(ctx, `
+			UPDATE tracker_companies
+			SET status = 'active', suspension_reason = NULL,
+			    approved_by = $1, approved_at = NOW(), updated_at = NOW()
+			WHERE id = $2
+		`, approvedBy, o.CompanyID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to reactivate company: " + err.Error()})
+			return
+		}
+	}
+
+	// Expiry stacking runs on every successful paid order regardless of the
+	// activation branch above — a renewal on an already-active company must
+	// still extend its expiry even though the activation block above is a
+	// no-op for it. Lifetime plans (only ever billing_duration='onetime')
+	// never expire, so subscription_expires_at stays untouched (NULL).
+	if extension, ok := trackerSubscriptionExtension[o.BillingDuration]; ok {
+		base := paidAt
+		if currentExpiresAt != nil && currentExpiresAt.After(paidAt) {
+			base = *currentExpiresAt
+		}
+		newExpiresAt := base.AddDate(0, extension, 0)
+		if _, err := tx.Exec(ctx, `
+			UPDATE tracker_companies SET subscription_expires_at = $1, updated_at = NOW() WHERE id = $2
+		`, newExpiresAt, o.CompanyID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update subscription expiry: " + err.Error()})
+			return
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -164,7 +204,10 @@ func MarkTrackerPlanOrderPaid(c *gin.Context) {
 	// PDF/email failures are reported back but never undo the paid status.
 	emailStatus := sendTrackerPlanInvoiceEmail(c, &o, invoiceNumber, paidAt)
 
-	if activated {
+	// Credentials email only on a genuine first-time activation — a lapsed
+	// reactivation reuses the existing license_key/password_hash, so there
+	// are no new credentials to send.
+	if firstActivation {
 		cfg := c.MustGet("config").(*config.Config)
 		var companyName, contactEmail string
 		if err := pool.QueryRow(ctx, `
