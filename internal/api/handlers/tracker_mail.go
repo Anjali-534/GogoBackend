@@ -47,6 +47,36 @@ func sendTrackerSignupEmail(cfg *config.Config, companyName, toEmail string) {
 	}()
 }
 
+func sendTrackerOTPEmail(cfg *config.Config, companyName, toEmail, code string) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("tracker OTP email: recovered from panic: %v", r)
+			}
+		}()
+		if !mail.IsConfigured(cfg) {
+			return
+		}
+
+		body := fmt.Sprintf(
+			"Hi %s,\n\n"+
+				"Your Bogie Tracker verification code is: %s\n\n"+
+				"This code expires in 10 minutes. Enter it to verify your email and continue setting up your account.\n\n"+
+				"If you didn't request this, you can safely ignore this email.\n\n"+
+				"Warm regards,\nTeam Bogie\nbogie.in",
+			companyName, code,
+		)
+
+		if err := mail.Send(cfg, mail.Message{
+			To:      toEmail,
+			Subject: "Your Bogie Tracker verification code",
+			Body:    body,
+		}); err != nil {
+			log.Printf("tracker OTP email: send failed for %s: %v", toEmail, err)
+		}
+	}()
+}
+
 func sendTrackerApprovedEmail(cfg *config.Config, companyName, toEmail string) {
 	go func() {
 		defer func() {

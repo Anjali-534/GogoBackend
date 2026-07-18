@@ -14,6 +14,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log"
@@ -65,6 +66,24 @@ var validDriverEventKinds = map[string]bool{
 
 // ─── Auth ───────────────────────────────────────────────────────────────────
 
+// otpTTL is how long an email OTP stays valid after being (re)issued.
+// otpResendCooldown gates /resend-otp: if more than otpTTL-otpResendCooldown
+// remains on the current code's expiry, one was just sent — this is a
+// cheap, stateless rate limit (no extra column, derived from the existing
+// expiry) rather than a real per-IP/per-account limiter.
+const otpTTL = 10 * time.Minute
+const otpResendCooldown = 30 * time.Second
+
+// generateOTPCode returns a crypto-random 6-digit numeric code, zero-padded.
+func generateOTPCode() (string, error) {
+	buf := make([]byte, 4)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	n := binary.BigEndian.Uint32(buf) % 1000000
+	return fmt.Sprintf("%06d", n), nil
+}
+
 // POST /gogoo/tracker/signup
 func TrackerCompanySignup(c *gin.Context) {
 	var req struct {
@@ -112,10 +131,125 @@ func TrackerCompanySignup(c *gin.Context) {
 	cfg := c.MustGet("config").(*config.Config)
 	sendTrackerSignupEmail(cfg, req.CompanyName, req.ContactEmail)
 
+	code, err := generateOTPCode()
+	if err != nil {
+		log.Printf("tracker signup: OTP generation failed for %s: %v", req.ContactEmail, err)
+	} else {
+		_, err = pool.Exec(ctx, `
+			UPDATE tracker_companies SET email_otp_code=$1, email_otp_expires_at=$2 WHERE id=$3
+		`, code, time.Now().Add(otpTTL), id)
+		if err != nil {
+			log.Printf("tracker signup: failed to store OTP for %s: %v", req.ContactEmail, err)
+		} else {
+			sendTrackerOTPEmail(cfg, req.CompanyName, req.ContactEmail, code)
+		}
+	}
+
 	c.JSON(http.StatusCreated, gin.H{
 		"id":      id,
-		"message": "Signup received — your account is pending approval",
+		"message": "Signup received — check your email for a verification code",
 	})
+}
+
+// POST /gogoo/tracker/verify-email
+func VerifyTrackerCompanyEmail(c *gin.Context) {
+	var req struct {
+		Email string `json:"email" binding:"required,email"`
+		Code  string `json:"code" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+
+	var id, storedCode string
+	var expiresAt *time.Time
+	var alreadyVerified bool
+	err := pool.QueryRow(ctx, `
+		SELECT id, COALESCE(email_otp_code,''), email_otp_expires_at, email_verified
+		FROM tracker_companies WHERE contact_email=$1
+	`, req.Email).Scan(&id, &storedCode, &expiresAt, &alreadyVerified)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "no account found with this email"})
+		return
+	}
+	if alreadyVerified {
+		c.JSON(http.StatusOK, gin.H{"message": "email already verified"})
+		return
+	}
+	if storedCode == "" || expiresAt == nil || time.Now().After(*expiresAt) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "code expired — request a new one"})
+		return
+	}
+	if req.Code != storedCode {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "incorrect code"})
+		return
+	}
+
+	_, err = pool.Exec(ctx, `
+		UPDATE tracker_companies
+		SET email_verified=true, email_otp_code=NULL, email_otp_expires_at=NULL
+		WHERE id=$1
+	`, id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "verification failed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "email verified"})
+}
+
+// POST /gogoo/tracker/resend-otp
+func ResendTrackerCompanyOTP(c *gin.Context) {
+	var req struct {
+		Email string `json:"email" binding:"required,email"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+
+	var id, companyName string
+	var expiresAt *time.Time
+	var verified bool
+	err := pool.QueryRow(ctx, `
+		SELECT id, company_name, email_otp_expires_at, email_verified
+		FROM tracker_companies WHERE contact_email=$1
+	`, req.Email).Scan(&id, &companyName, &expiresAt, &verified)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "no account found with this email"})
+		return
+	}
+	if verified {
+		c.JSON(http.StatusOK, gin.H{"message": "email already verified"})
+		return
+	}
+	if expiresAt != nil && time.Until(*expiresAt) > otpTTL-otpResendCooldown {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "please wait a moment before requesting another code"})
+		return
+	}
+
+	code, err := generateOTPCode()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate code"})
+		return
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE tracker_companies SET email_otp_code=$1, email_otp_expires_at=$2 WHERE id=$3
+	`, code, time.Now().Add(otpTTL), id); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to resend code"})
+		return
+	}
+
+	cfg := c.MustGet("config").(*config.Config)
+	sendTrackerOTPEmail(cfg, companyName, req.Email, code)
+
+	c.JSON(http.StatusOK, gin.H{"message": "verification code resent"})
 }
 
 // POST /gogoo/tracker/login
@@ -133,16 +267,22 @@ func TrackerCompanyLogin(c *gin.Context) {
 	pool := db.GetDB().GetPool()
 
 	var id, companyName, passwordHash, status string
+	var emailVerified bool
 	err := pool.QueryRow(ctx, `
-		SELECT id, company_name, password_hash, status
+		SELECT id, company_name, password_hash, status, email_verified
 		FROM tracker_companies WHERE contact_email=$1
-	`, req.Email).Scan(&id, &companyName, &passwordHash, &status)
+	`, req.Email).Scan(&id, &companyName, &passwordHash, &status, &emailVerified)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		return
 	}
 	if bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)) != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
+		return
+	}
+
+	if !emailVerified {
+		c.JSON(http.StatusForbidden, gin.H{"error": "please verify your email before logging in", "email_verified": false})
 		return
 	}
 

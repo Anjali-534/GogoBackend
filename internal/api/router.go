@@ -108,6 +108,8 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		// Bogie Tracker — company self-signup/login and the unauthenticated
 		// public tracking page (protected only by the unguessable token).
 		gogooPublic.POST("/tracker/signup", handlers.TrackerCompanySignup)
+		gogooPublic.POST("/tracker/verify-email", handlers.VerifyTrackerCompanyEmail)
+		gogooPublic.POST("/tracker/resend-otp", handlers.ResendTrackerCompanyOTP)
 		gogooPublic.POST("/tracker/login", handlers.TrackerCompanyLogin)
 		gogooPublic.GET("/public/tracker/orders/:token", handlers.GetPublicTrackerOrder)
 
