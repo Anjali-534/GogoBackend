@@ -112,6 +112,51 @@ func sendTrackerApprovedEmail(cfg *config.Config, companyName, toEmail string) {
 	}()
 }
 
+// sendTrackerLicenseEmail notifies a company that its plan payment has been
+// received and its account is now active, delivering the license key and
+// system-generated password it needs to log in (see MarkTrackerPlanOrderPaid
+// — payment is now the activation trigger, replacing the manual
+// sendTrackerApprovedEmail on this path).
+func sendTrackerLicenseEmail(cfg *config.Config, companyName, toEmail, licenseKey, loginEmail, newPassword string) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("tracker license email: recovered from panic: %v", r)
+			}
+		}()
+		if !mail.IsConfigured(cfg) {
+			return
+		}
+
+		body := fmt.Sprintf(
+			"Hi %s,\n\n"+
+				"Your payment has been received and your Bogie Tracker account is now active!\n\n"+
+				"Here are your login credentials:\n"+
+				"License Key: %s\n"+
+				"Login Email: %s\n"+
+				"Password: %s\n\n"+
+				"Log in here: %s\n\n"+
+				"For security, we recommend changing this password after your first login (Settings > Change Password).\n\n"+
+				"Here's what you can do right away:\n"+
+				"- Add your drivers and transporters\n"+
+				"- Create dispatch orders for your shipments\n"+
+				"- Track every order end-to-end\n"+
+				"- Share live tracking links with your receiving parties — no login needed on their side\n\n"+
+				"If you need any help getting started, reply to this email and we'll be happy to assist.\n\n"+
+				"Welcome aboard!\nTeam Bogie\nbogie.in",
+			companyName, licenseKey, loginEmail, newPassword, cfg.TrackerPanelURL,
+		)
+
+		if err := mail.Send(cfg, mail.Message{
+			To:      toEmail,
+			Subject: "Your Bogie Tracker account is active — login details inside",
+			Body:    body,
+		}); err != nil {
+			log.Printf("tracker license email: send failed for %s: %v", toEmail, err)
+		}
+	}()
+}
+
 func sendTrackerRejectedEmail(cfg *config.Config, companyName, toEmail string) {
 	go func() {
 		defer func() {

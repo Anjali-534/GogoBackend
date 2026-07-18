@@ -20,6 +20,7 @@ import (
 	"github.com/deploykit/backend/internal/services/trackerbilling"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // nextTrackerInvoiceNumber allocates the next sequential invoice number for
@@ -111,6 +112,49 @@ func MarkTrackerPlanOrderPaid(c *gin.Context) {
 		return
 	}
 
+	// Payment is now the account-activation trigger: a company still sitting
+	// in 'pending' gets its license key + a fresh system password on this
+	// transition. Already-'active' companies are left untouched (no password
+	// rotation on a repeat/renewal order), and 'suspended'/'rejected' stay
+	// exactly that — payment does not override a staff decision.
+	var companyStatus string
+	if err := tx.QueryRow(ctx, `
+		SELECT status FROM tracker_companies WHERE id = $1
+	`, o.CompanyID).Scan(&companyStatus); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load company: " + err.Error()})
+		return
+	}
+
+	var licenseKey, newPassword string
+	activated := companyStatus == "pending"
+	if activated {
+		licenseKey, err = generateTrackerLicenseKey()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate license key"})
+			return
+		}
+		newPassword, err = generateRandomPassword()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate password"})
+			return
+		}
+		hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to hash password"})
+			return
+		}
+		approvedBy := c.GetString("user_id")
+		if _, err := tx.Exec(ctx, `
+			UPDATE tracker_companies
+			SET status = 'active', license_key = $1, password_hash = $2,
+			    approved_by = $3, approved_at = NOW(), updated_at = NOW()
+			WHERE id = $4
+		`, licenseKey, string(hash), approvedBy, o.CompanyID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to activate company: " + err.Error()})
+			return
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit"})
 		return
@@ -120,11 +164,24 @@ func MarkTrackerPlanOrderPaid(c *gin.Context) {
 	// PDF/email failures are reported back but never undo the paid status.
 	emailStatus := sendTrackerPlanInvoiceEmail(c, &o, invoiceNumber, paidAt)
 
+	if activated {
+		cfg := c.MustGet("config").(*config.Config)
+		var companyName, contactEmail string
+		if err := pool.QueryRow(ctx, `
+			SELECT company_name, contact_email FROM tracker_companies WHERE id = $1
+		`, o.CompanyID).Scan(&companyName, &contactEmail); err != nil {
+			log.Printf("MarkTrackerPlanOrderPaid: company lookup for license email failed for order=%s: %v", o.ID, err)
+		} else {
+			sendTrackerLicenseEmail(cfg, companyName, contactEmail, licenseKey, contactEmail, newPassword)
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"message":        "order marked paid",
-		"invoice_number": invoiceNumber,
-		"paid_at":        paidAt,
-		"email":          emailStatus,
+		"message":           "order marked paid",
+		"invoice_number":    invoiceNumber,
+		"paid_at":           paidAt,
+		"email":             emailStatus,
+		"company_activated": activated,
 	})
 }
 

@@ -84,6 +84,43 @@ func generateOTPCode() (string, error) {
 	return fmt.Sprintf("%06d", n), nil
 }
 
+// trackerCredentialCharset and trackerLicenseCharset exclude visually
+// ambiguous characters (0/O, 1/I/l) since these are manually typed into a
+// login form.
+const trackerCredentialCharset = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+const trackerLicenseCharset = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+// generateRandomPassword produces the system-generated password issued to a
+// company when its account is auto-activated on payment (see
+// MarkTrackerPlanOrderPaid). The company can change it afterward via the
+// existing change-password endpoint.
+func generateRandomPassword() (string, error) {
+	const length = 14
+	buf := make([]byte, length)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	out := make([]byte, length)
+	for i, b := range buf {
+		out[i] = trackerCredentialCharset[int(b)%len(trackerCredentialCharset)]
+	}
+	return string(out), nil
+}
+
+// generateTrackerLicenseKey produces a BGT-XXXX-XXXX-XXXX license key,
+// issued once when a company is auto-activated on payment.
+func generateTrackerLicenseKey() (string, error) {
+	buf := make([]byte, 12)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	chars := make([]byte, 12)
+	for i, b := range buf {
+		chars[i] = trackerLicenseCharset[int(b)%len(trackerLicenseCharset)]
+	}
+	return fmt.Sprintf("BGT-%s-%s-%s", chars[0:4], chars[4:8], chars[8:12]), nil
+}
+
 // POST /gogoo/tracker/signup
 func TrackerCompanySignup(c *gin.Context) {
 	var req struct {
