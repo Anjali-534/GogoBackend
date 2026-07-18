@@ -276,6 +276,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		// companies. Staff-only, unscoped across all companies by design —
 		// see the comment at the top of tracker_admin.go before reusing any
 		// of this against a company-facing route.
+		gogoo.GET("/dashboard/tracker/overview", middleware.RequirePanel(), handlers.GetTrackerOverview)
 		gogoo.GET("/dashboard/tracker/companies", middleware.RequirePanel(), handlers.ListTrackerCompanies)
 		gogoo.GET("/dashboard/tracker/companies/:id", middleware.RequirePanel(), handlers.GetTrackerCompany)
 		gogoo.POST("/dashboard/tracker/companies/:id/approve", middleware.RequirePanel(), handlers.ApproveTrackerCompany)

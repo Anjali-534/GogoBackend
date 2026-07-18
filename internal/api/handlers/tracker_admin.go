@@ -203,6 +203,65 @@ func ListTrackerCompanies(c *gin.Context) {
 	c.JSON(http.StatusOK, companies)
 }
 
+// TrackerOverview is the aggregate business-health summary shown on the
+// master dashboard's overview page. plan_breakdown always includes every
+// sellable plan key (0 if no active companies are on it) so the frontend
+// never has to guard against a missing key.
+type TrackerOverview struct {
+	ActiveCompanies      int            `json:"active_companies"`
+	ExpiringSoon7d       int            `json:"expiring_soon_7d"`
+	RevenueThisMonth     float64        `json:"revenue_this_month"`
+	PendingPaymentOrders int            `json:"pending_payment_orders"`
+	PlanBreakdown        map[string]int `json:"plan_breakdown"`
+}
+
+// GET /gogoo/dashboard/tracker/overview — aggregate counts for the master
+// dashboard's Bogie Tracker summary row. Cheap enough (a handful of
+// COUNT/SUM subqueries plus one GROUP BY) to run fresh on every dashboard
+// poll rather than caching.
+func GetTrackerOverview(c *gin.Context) {
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+
+	var ov TrackerOverview
+	err := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT COUNT(*) FROM tracker_companies WHERE status = 'active') AS active_companies,
+			(SELECT COUNT(*) FROM tracker_companies
+			 WHERE status = 'active' AND subscription_expires_at IS NOT NULL
+			   AND subscription_expires_at BETWEEN NOW() AND NOW() + INTERVAL '7 days') AS expiring_soon_7d,
+			(SELECT COALESCE(SUM(total_amount), 0) FROM tracker_plan_orders
+			 WHERE status = 'paid' AND paid_at >= date_trunc('month', NOW())) AS revenue_this_month,
+			(SELECT COUNT(*) FROM tracker_plan_orders WHERE status = 'pending_payment') AS pending_payment_orders
+	`).Scan(&ov.ActiveCompanies, &ov.ExpiringSoon7d, &ov.RevenueThisMonth, &ov.PendingPaymentOrders)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error: " + err.Error()})
+		return
+	}
+
+	ov.PlanBreakdown = map[string]int{"single": 0, "2users": 0, "5users": 0, "mega": 0, "lifetime": 0}
+	rows, err := pool.Query(ctx, `
+		SELECT current_plan, COUNT(*) FROM tracker_companies
+		WHERE status = 'active' AND current_plan IS NOT NULL
+		GROUP BY current_plan
+	`)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error: " + err.Error()})
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var plan string
+		var count int
+		if err := rows.Scan(&plan, &count); err != nil {
+			continue
+		}
+		ov.PlanBreakdown[plan] = count
+	}
+
+	c.JSON(http.StatusOK, ov)
+}
+
 // GET /gogoo/dashboard/tracker/companies/:id
 func GetTrackerCompany(c *gin.Context) {
 	id := c.Param("id")
