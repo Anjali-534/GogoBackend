@@ -176,6 +176,18 @@ func MarkTrackerPlanOrderPaid(c *gin.Context) {
 		}
 	}
 
+	// current_plan is updated unconditionally on every paid order, same as
+	// the expiry stacking below — an upgrade (e.g. single -> mega) via a new
+	// paid order must overwrite the old plan immediately, not just on first
+	// activation. This is also what CreateTrackerCompanyOrder checks for
+	// daily dispatch-limit enforcement (see trackerbilling.DispatchLimit).
+	if _, err := tx.Exec(ctx, `
+		UPDATE tracker_companies SET current_plan = $1, updated_at = NOW() WHERE id = $2
+	`, o.Plan, o.CompanyID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update current plan: " + err.Error()})
+		return
+	}
+
 	// Expiry stacking runs on every successful paid order regardless of the
 	// activation branch above — a renewal on an already-active company must
 	// still extend its expiry even though the activation block above is a

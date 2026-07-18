@@ -27,6 +27,7 @@ import (
 
 	"github.com/deploykit/backend/internal/config"
 	"github.com/deploykit/backend/internal/db"
+	"github.com/deploykit/backend/internal/services/trackerbilling"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -653,6 +654,60 @@ func ListTrackerCompanyOwnOrders(c *gin.Context) {
 // POST /gogoo/tracker/orders
 func CreateTrackerCompanyOrder(c *gin.Context) {
 	companyID := c.GetString("company_id")
+
+	// Daily dispatch-limit enforcement, checked before anything else so a
+	// company over its limit fails fast without wasted body-parsing/driver
+	// lookups. current_plan IS NULL (never paid, or pre-dates migration 038)
+	// blocks entirely — no plan means no service, same policy as an expired
+	// subscription. See trackerbilling.DispatchLimit for the per-plan caps.
+	preCtx := context.Background()
+	prePool := db.GetDB().GetPool()
+	var currentPlan *string
+	if err := prePool.QueryRow(preCtx, `
+		SELECT current_plan FROM tracker_companies WHERE id = $1
+	`, companyID).Scan(&currentPlan); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load company plan"})
+		return
+	}
+	if currentPlan == nil {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error": "no active plan — subscribe to a Bogie Tracker plan to create dispatches",
+			"code":  "no_active_plan",
+		})
+		return
+	}
+	limit, unlimited, ok := trackerbilling.DispatchLimit(*currentPlan)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "unrecognized plan"})
+		return
+	}
+	if !unlimited {
+		ist, err := time.LoadLocation("Asia/Kolkata")
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load timezone"})
+			return
+		}
+		year, month, day := time.Now().In(ist).Date()
+		startOfDay := time.Date(year, month, day, 0, 0, 0, 0, ist)
+
+		var todayCount int
+		if err := prePool.QueryRow(preCtx, `
+			SELECT COUNT(*) FROM tracker_orders WHERE company_id = $1 AND created_at >= $2
+		`, companyID, startOfDay).Scan(&todayCount); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check dispatch count"})
+			return
+		}
+		if todayCount >= limit {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":            fmt.Sprintf("You've reached your daily dispatch limit (%d). Upgrade your plan to create more.", limit),
+				"code":             "dispatch_limit_reached",
+				"daily_limit":      limit,
+				"dispatches_today": todayCount,
+			})
+			return
+		}
+	}
+
 	var req struct {
 		BookedForCompanyName string   `json:"booked_for_company_name" binding:"required"`
 		BookedForPhone       string   `json:"booked_for_phone" binding:"required"`
