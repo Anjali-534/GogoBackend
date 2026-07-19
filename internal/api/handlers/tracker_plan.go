@@ -43,6 +43,15 @@ var trackerSubscriptionExtension = map[string]int{
 	"yearly":     12,
 }
 
+// expiresSuffix formats an optional expiry date for the downgrade-blocked
+// error message — omitted entirely for lifetime plans, which have none.
+func expiresSuffix(expiresAt *time.Time) string {
+	if expiresAt == nil {
+		return ""
+	}
+	return " (expires " + expiresAt.Format("2 Jan 2006") + ")"
+}
+
 // TrackerPlanOrder mirrors the tracker_plan_orders row shape returned to the
 // company panel (list/detail) — payment_gateway_ref and invoice_number stay
 // nil until MarkTrackerPlanOrderPaid stamps them in.
@@ -103,6 +112,39 @@ func CreateTrackerPlanOrder(c *gin.Context) {
 
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
+
+	// Block a downgrade while the company's current tier is still active —
+	// otherwise MarkTrackerPlanOrderPaid's unconditional current_plan
+	// overwrite would drop them to the lower tier's dispatch limit
+	// immediately, even though they already paid for and are entitled to the
+	// higher tier until it expires. Same-tier renewals and upgrades are
+	// unaffected (rank comparison is strictly less-than). A current plan of
+	// "lifetime" never expires and outranks everything, so it blocks any new
+	// order outright.
+	var currentPlan *string
+	var subscriptionExpiresAt *time.Time
+	if err := pool.QueryRow(ctx, `
+		SELECT current_plan, subscription_expires_at FROM tracker_companies WHERE id = $1
+	`, companyID).Scan(&currentPlan, &subscriptionExpiresAt); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error: " + err.Error()})
+		return
+	}
+	if currentPlan != nil {
+		currentActive := *currentPlan == "lifetime" || (subscriptionExpiresAt != nil && subscriptionExpiresAt.After(time.Now()))
+		if currentActive {
+			currentRank, currentOk := trackerbilling.TierRank(*currentPlan)
+			requestedRank, requestedOk := trackerbilling.TierRank(req.Plan)
+			if currentOk && requestedOk && requestedRank < currentRank {
+				msg := fmt.Sprintf(
+					"You have an active %s plan — downgrades can be placed once it expires%s.",
+					trackerbilling.PlanLabel(*currentPlan),
+					expiresSuffix(subscriptionExpiresAt),
+				)
+				c.JSON(http.StatusConflict, gin.H{"error": msg, "code": "downgrade_blocked_active_plan"})
+				return
+			}
+		}
+	}
 
 	// Reject an exact-duplicate pending order rather than letting the same
 	// plan/duration pile up unconfirmed — staff otherwise has to sift

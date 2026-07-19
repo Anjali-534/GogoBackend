@@ -1134,3 +1134,10 @@ ALTER TABLE tracker_orders
 ALTER TABLE tracker_orders
     ADD COLUMN IF NOT EXISTS booked_for_state  TEXT,
     ADD COLUMN IF NOT EXISTS consignee_state   TEXT;
+
+-- ============================================================
+-- Migration 038 — Bogie Tracker: company's current subscription plan.
+-- ============================================================
+ALTER TABLE tracker_companies
+    ADD COLUMN IF NOT EXISTS current_plan TEXT
+        CHECK (current_plan IN ('single','2users','5users','mega','lifetime'));

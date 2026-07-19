@@ -24,3 +24,24 @@ func DispatchLimit(plan string) (limit int, unlimited bool, ok bool) {
 	}
 	return v, false, true
 }
+
+// tierRank orders plans low -> high for upgrade/downgrade comparisons.
+// Mirrors bogie-tracker-panel/lib/types.ts's PLAN_TIER_ORDER — kept in sync
+// manually, same as dispatchesPerDay/planPricing. The backend is the
+// authoritative copy: CreateTrackerPlanOrder must never trust a client's own
+// notion of which plan outranks which for anything that blocks/allows an
+// order.
+var tierRank = map[string]int{
+	"single":   0,
+	"2users":   1,
+	"5users":   2,
+	"mega":     3,
+	"lifetime": 99,
+}
+
+// TierRank returns a plan's rank for upgrade/downgrade comparisons — higher
+// means a higher tier. ok is false for an unrecognized plan.
+func TierRank(plan string) (rank int, ok bool) {
+	rank, ok = tierRank[plan]
+	return rank, ok
+}
