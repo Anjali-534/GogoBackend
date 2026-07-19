@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/deploykit/backend/internal/config"
+	"github.com/deploykit/backend/internal/dateutil"
 	"github.com/deploykit/backend/internal/db"
 	"github.com/deploykit/backend/internal/services/trackerbilling"
 	"github.com/gin-gonic/gin"
@@ -723,13 +724,8 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 		return
 	}
 	if !unlimited {
-		ist, err := time.LoadLocation("Asia/Kolkata")
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load timezone"})
-			return
-		}
-		year, month, day := time.Now().In(ist).Date()
-		startOfDay := time.Date(year, month, day, 0, 0, 0, 0, ist)
+		year, month, day := time.Now().In(dateutil.ISTLocation).Date()
+		startOfDay := time.Date(year, month, day, 0, 0, 0, 0, dateutil.ISTLocation)
 
 		var todayCount int
 		if err := prePool.QueryRow(preCtx, `
