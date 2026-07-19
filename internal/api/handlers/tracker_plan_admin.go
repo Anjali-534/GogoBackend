@@ -267,7 +267,7 @@ func disableExcessTrackerStaff(ctx context.Context, tx pgx.Tx, companyID, plan s
 		WHERE id IN (
 			SELECT id FROM tracker_staff_users
 			WHERE company_id = $1 AND disabled_at IS NULL
-			ORDER BY created_at DESC
+			ORDER BY created_at ASC
 			OFFSET $2
 		)
 	`, companyID, cap)

@@ -785,6 +785,12 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 		// always a plain editable field — manual entry/override always works.
 		ConsigneeState string `json:"consignee_state"`
 		BookedForState string `json:"booked_for_state"`
+
+		// Saved recipient the form was pre-filled from, if any — usage
+		// telemetry only (bumps use_count/last_used_at for most-used-first
+		// ordering). The order itself stores the plain field values above; a
+		// stale or foreign id is simply ignored, never an error.
+		SavedRecipientID *string `json:"saved_recipient_id"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -868,6 +874,21 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create order event"})
 		return
+	}
+
+	// A malformed id would fail the UUID cast and abort the transaction, so
+	// it's parsed first — same "ignore, don't error" treatment as a stale id.
+	if req.SavedRecipientID != nil {
+		if _, err := uuid.Parse(*req.SavedRecipientID); err == nil {
+			if _, err := tx.Exec(ctx, `
+			UPDATE tracker_saved_recipients
+			SET use_count = use_count + 1, last_used_at = NOW()
+			WHERE id = $1 AND company_id = $2
+			`, *req.SavedRecipientID, companyID); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update recipient usage"})
+				return
+			}
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {

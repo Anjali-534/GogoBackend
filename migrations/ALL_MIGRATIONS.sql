@@ -1141,3 +1141,48 @@ ALTER TABLE tracker_orders
 ALTER TABLE tracker_companies
     ADD COLUMN IF NOT EXISTS current_plan TEXT
         CHECK (current_plan IN ('single','2users','5users','mega','lifetime'));
+
+-- ============================================================
+-- Migration 039 — Bogie Tracker: staff logins per company.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS tracker_staff_users (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id    UUID NOT NULL REFERENCES tracker_companies(id) ON DELETE CASCADE,
+  email         TEXT NOT NULL,
+  password_hash TEXT NOT NULL,
+  created_at    TIMESTAMPTZ DEFAULT NOW(),
+  created_by    UUID NOT NULL REFERENCES tracker_companies(id),
+  UNIQUE (company_id, email)
+);
+
+-- ============================================================
+-- Migration 040 — Bogie Tracker: auto-disable staff seats on plan downgrade.
+-- ============================================================
+ALTER TABLE tracker_staff_users ADD COLUMN IF NOT EXISTS disabled_at TIMESTAMPTZ;
+
+-- ============================================================
+-- Migration 041 — Bogie Tracker: saved recipients for dispatch orders.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS tracker_saved_recipients (
+  id                        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id                UUID NOT NULL REFERENCES tracker_companies(id) ON DELETE CASCADE,
+  label                     TEXT NOT NULL,
+  booked_for_company_name   TEXT NOT NULL,
+  booked_for_phone          TEXT NOT NULL,
+  booked_for_email          TEXT,
+  booked_for_gstin          TEXT,
+  booked_for_state          TEXT,
+  consignee_name            TEXT,
+  consignee_email           TEXT,
+  consignee_gstin           TEXT,
+  consignee_state           TEXT,
+  dispatch_to               TEXT,
+  dispatch_to_lat           DOUBLE PRECISION,
+  dispatch_to_lng           DOUBLE PRECISION,
+  use_count                 INT NOT NULL DEFAULT 0,
+  last_used_at              TIMESTAMPTZ,
+  created_at                TIMESTAMPTZ DEFAULT NOW(),
+  updated_at                TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_tracker_saved_recipients_company_id
+  ON tracker_saved_recipients(company_id);

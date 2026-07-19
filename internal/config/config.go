@@ -123,7 +123,7 @@ func Load() *Config {
 		ResendAPIKey:    getString("RESEND_API_KEY", ""),
 		ResendFromEmail: getString("RESEND_FROM_EMAIL", "statements@bogie.in"),
 
-		TrackerPanelURL: getString("TRACKER_PANEL_URL", "https://tracker.bogie.in"),
+		TrackerPanelURL: getString("TRACKER_PANEL_URL", "https://bogie-tracker.bogie.in"),
 	}
 
 	return cfg
