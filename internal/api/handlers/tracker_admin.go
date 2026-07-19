@@ -42,6 +42,12 @@ type TrackerCompany struct {
 	// LogoURL is nil when the company hasn't uploaded one — the panel/
 	// marketing site both fall back to the generic Bogie logo in that case.
 	LogoURL *string `json:"logo_url"`
+
+	// CurrentPlan is nil when the company has never paid (or pre-dates
+	// migration 038). SubscriptionExpiresAt is nil for that same case AND
+	// for 'lifetime' plans, which never expire — see migration 036.
+	CurrentPlan           *string    `json:"current_plan"`
+	SubscriptionExpiresAt *time.Time `json:"subscription_expires_at"`
 }
 
 type TrackerCompanyListItem struct {

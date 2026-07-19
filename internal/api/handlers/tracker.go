@@ -346,12 +346,12 @@ func GetTrackerCompanyProfile(c *gin.Context) {
 	err := pool.QueryRow(ctx, `
 		SELECT id, company_name, COALESCE(contact_phone,''), contact_email,
 		       COALESCE(gstin,''), status, approved_by::text, approved_at, created_at,
-		       notification_email, logo_url
+		       notification_email, logo_url, current_plan, subscription_expires_at
 		FROM tracker_companies WHERE id = $1
 	`, companyID).Scan(
 		&comp.ID, &comp.CompanyName, &comp.ContactPhone, &comp.ContactEmail,
 		&comp.GSTIN, &comp.Status, &approvedBy, &comp.ApprovedAt, &comp.CreatedAt,
-		&comp.NotificationEmail, &comp.LogoURL,
+		&comp.NotificationEmail, &comp.LogoURL, &comp.CurrentPlan, &comp.SubscriptionExpiresAt,
 	)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "company not found"})

@@ -103,6 +103,29 @@ func CreateTrackerPlanOrder(c *gin.Context) {
 
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
+
+	// Reject an exact-duplicate pending order rather than letting the same
+	// plan/duration pile up unconfirmed — staff otherwise has to sift
+	// through repeat rows for what's really one order (see screenshot: the
+	// same plan ordered 6 times). Any plan/duration combo can only have one
+	// pending_payment order in flight at a time.
+	var dupID string
+	err = pool.QueryRow(ctx, `
+		SELECT id FROM tracker_plan_orders
+		WHERE company_id = $1 AND plan = $2 AND billing_duration = $3 AND status = 'pending_payment'
+		LIMIT 1
+	`, companyID, req.Plan, req.BillingDuration).Scan(&dupID)
+	if err == nil {
+		c.JSON(http.StatusConflict, gin.H{
+			"error": "You already have a pending order for this plan. Please complete payment or wait for staff confirmation before placing another.",
+			"code":  "duplicate_pending_order",
+		})
+		return
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error: " + err.Error()})
+		return
+	}
+
 	id := uuid.New()
 	_, err = pool.Exec(ctx, `
 		INSERT INTO tracker_plan_orders
