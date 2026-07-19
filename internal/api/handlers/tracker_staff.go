@@ -20,9 +20,10 @@ import (
 )
 
 type trackerStaffUser struct {
-	ID        string    `json:"id"`
-	Email     string    `json:"email"`
-	CreatedAt time.Time `json:"created_at"`
+	ID         string     `json:"id"`
+	Email      string     `json:"email"`
+	CreatedAt  time.Time  `json:"created_at"`
+	DisabledAt *time.Time `json:"disabled_at"`
 }
 
 // GET /gogoo/tracker/staff
@@ -40,7 +41,7 @@ func ListTrackerStaffUsers(c *gin.Context) {
 	}
 
 	rows, err := pool.Query(ctx, `
-		SELECT id, email, created_at FROM tracker_staff_users
+		SELECT id, email, created_at, disabled_at FROM tracker_staff_users
 		WHERE company_id = $1 ORDER BY created_at ASC
 	`, companyID)
 	if err != nil {
@@ -50,16 +51,20 @@ func ListTrackerStaffUsers(c *gin.Context) {
 	defer rows.Close()
 
 	staff := []trackerStaffUser{}
+	activeCount := 0
 	for rows.Next() {
 		var s trackerStaffUser
-		if err := rows.Scan(&s.ID, &s.Email, &s.CreatedAt); err != nil {
+		if err := rows.Scan(&s.ID, &s.Email, &s.CreatedAt, &s.DisabledAt); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "db error: " + err.Error()})
 			return
+		}
+		if s.DisabledAt == nil {
+			activeCount++
 		}
 		staff = append(staff, s)
 	}
 
-	resp := gin.H{"staff": staff, "count": len(staff)}
+	resp := gin.H{"staff": staff, "count": activeCount}
 	if currentPlan != nil {
 		if cap, unlimited, ok := trackerbilling.PanelLoginStaffCap(*currentPlan); ok {
 			resp["unlimited"] = unlimited
@@ -106,7 +111,7 @@ func CreateTrackerStaffUser(c *gin.Context) {
 	if ok && !unlimited {
 		var count int
 		if err := pool.QueryRow(ctx,
-			`SELECT COUNT(*) FROM tracker_staff_users WHERE company_id=$1`, companyID,
+			`SELECT COUNT(*) FROM tracker_staff_users WHERE company_id=$1 AND disabled_at IS NULL`, companyID,
 		).Scan(&count); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "db error: " + err.Error()})
 			return
@@ -143,6 +148,59 @@ func CreateTrackerStaffUser(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, staff)
+}
+
+// POST /gogoo/tracker/staff/:id/reactivate — re-enables a staff login that
+// was auto-disabled by a plan downgrade (see disableExcessTrackerStaff).
+// Never automatic: the owner must explicitly do this, and only once there's
+// a free seat under the current plan again.
+func ReactivateTrackerStaffUser(c *gin.Context) {
+	companyID := c.GetString("company_id")
+	staffID := c.Param("id")
+
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+
+	var currentPlan *string
+	if err := pool.QueryRow(ctx,
+		`SELECT current_plan FROM tracker_companies WHERE id=$1`, companyID,
+	).Scan(&currentPlan); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error: " + err.Error()})
+		return
+	}
+
+	if currentPlan != nil {
+		if cap, unlimited, ok := trackerbilling.PanelLoginStaffCap(*currentPlan); ok && !unlimited {
+			var count int
+			if err := pool.QueryRow(ctx,
+				`SELECT COUNT(*) FROM tracker_staff_users WHERE company_id=$1 AND disabled_at IS NULL`, companyID,
+			).Scan(&count); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "db error: " + err.Error()})
+				return
+			}
+			if count >= cap {
+				c.JSON(http.StatusConflict, gin.H{
+					"error": "your plan doesn't have a free seat for this login — upgrade or remove another staff login first",
+					"code":  "staff_limit_reached",
+				})
+				return
+			}
+		}
+	}
+
+	tag, err := pool.Exec(ctx,
+		`UPDATE tracker_staff_users SET disabled_at = NULL WHERE id=$1 AND company_id=$2`, staffID, companyID,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error: " + err.Error()})
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "staff login not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "staff login reactivated"})
 }
 
 // DELETE /gogoo/tracker/staff/:id

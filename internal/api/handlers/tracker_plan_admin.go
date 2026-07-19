@@ -188,6 +188,11 @@ func MarkTrackerPlanOrderPaid(c *gin.Context) {
 		return
 	}
 
+	if err := disableExcessTrackerStaff(ctx, tx, o.CompanyID, o.Plan); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to reconcile staff seats: " + err.Error()})
+		return
+	}
+
 	// Expiry stacking runs on every successful paid order regardless of the
 	// activation branch above — a renewal on an already-active company must
 	// still extend its expiry even though the activation block above is a
@@ -239,6 +244,34 @@ func MarkTrackerPlanOrderPaid(c *gin.Context) {
 		"company_activated": activated,
 		"first_activation":  firstActivation,
 	})
+}
+
+// disableExcessTrackerStaff brings a company's active staff-login count down
+// to its new plan's cap after a downgrade takes effect (see
+// trackerbilling.PanelLoginStaffCap). Excess seats are marked disabled_at
+// rather than deleted, so the owner can see who was auto-disabled and
+// manually remove them or wait to upgrade again — reactivation is always a
+// manual owner action, never automatic. Disables the MOST RECENTLY created
+// active staff first, keeping the company's oldest/most-established logins
+// working. A no-op if the plan is unrecognized, unlimited, or already within
+// cap.
+func disableExcessTrackerStaff(ctx context.Context, tx pgx.Tx, companyID, plan string) error {
+	cap, unlimited, ok := trackerbilling.PanelLoginStaffCap(plan)
+	if !ok || unlimited {
+		return nil
+	}
+
+	_, err := tx.Exec(ctx, `
+		UPDATE tracker_staff_users
+		SET disabled_at = NOW()
+		WHERE id IN (
+			SELECT id FROM tracker_staff_users
+			WHERE company_id = $1 AND disabled_at IS NULL
+			ORDER BY created_at DESC
+			OFFSET $2
+		)
+	`, companyID, cap)
+	return err
 }
 
 // sendTrackerPlanInvoiceEmail renders the invoice PDF and emails it to the

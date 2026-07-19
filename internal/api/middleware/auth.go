@@ -120,9 +120,10 @@ func RequirePanel(panels ...string) gin.HandlerFunc {
 // route both cases to the same blocked-screen handling.
 //
 // For a staff-issued token (is_owner=false), it additionally re-verifies the
-// specific tracker_staff_users row still exists on every request — so
-// removing a staff login takes effect on their very next request instead of
-// waiting for the token to expire.
+// specific tracker_staff_users row still exists AND isn't disabled_at (e.g.
+// auto-disabled by a plan downgrade — see MarkTrackerPlanOrderPaid) on every
+// request — so removing or disabling a staff login takes effect on their
+// very next request instead of waiting for the token to expire.
 func RequireTrackerCompany() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c.GetString("panel") != "tracker_company" {
@@ -160,7 +161,7 @@ func RequireTrackerCompany() gin.HandlerFunc {
 			staffID := c.GetString("user_id")
 			var exists bool
 			if err := pool.QueryRow(ctx,
-				`SELECT EXISTS(SELECT 1 FROM tracker_staff_users WHERE id=$1 AND company_id=$2)`,
+				`SELECT EXISTS(SELECT 1 FROM tracker_staff_users WHERE id=$1 AND company_id=$2 AND disabled_at IS NULL)`,
 				staffID, companyID,
 			).Scan(&exists); err != nil || !exists {
 				c.JSON(http.StatusForbidden, gin.H{"error": "staff access revoked"})
