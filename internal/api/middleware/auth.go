@@ -40,6 +40,8 @@ func AuthMiddleware() gin.HandlerFunc {
 		c.Set("user_name", claims.Name)
 		c.Set("panel", claims.Panel)
 		c.Set("role", claims.Role)
+		c.Set("jwt_company_id", claims.CompanyID)
+		c.Set("jwt_is_owner", claims.IsOwner)
 		c.Next()
 	}
 }
@@ -75,6 +77,8 @@ func DownloadAuthMiddleware() gin.HandlerFunc {
 		c.Set("user_name", claims.Name)
 		c.Set("panel", claims.Panel)
 		c.Set("role", claims.Role)
+		c.Set("jwt_company_id", claims.CompanyID)
+		c.Set("jwt_is_owner", claims.IsOwner)
 		c.Next()
 	}
 }
@@ -104,15 +108,21 @@ func RequirePanel(panels ...string) gin.HandlerFunc {
 }
 
 // RequireTrackerCompany restricts a route to tracker-company panel tokens
-// and puts the JWT-derived company id into gin context as "company_id" —
-// handlers must scope every query off this value, never a client-supplied
-// path/query param (same defense-in-depth rule as GetHospitalBookings).
+// and puts the JWT-derived company id into gin context as "company_id", plus
+// "is_owner" for the owner-only staff-management routes — handlers must
+// scope every query off "company_id", never a client-supplied path/query
+// param (same defense-in-depth rule as GetHospitalBookings).
 //
 // It also re-checks the company's live status on every request (one indexed
 // PK lookup) rather than trusting the JWT alone — otherwise suspending a
 // company wouldn't cut off an already-issued token until it expires. The
 // 403 body matches login's shape ({error, status}) so the frontend can
 // route both cases to the same blocked-screen handling.
+//
+// For a staff-issued token (is_owner=false), it additionally re-verifies the
+// specific tracker_staff_users row still exists on every request — so
+// removing a staff login takes effect on their very next request instead of
+// waiting for the token to expire.
 func RequireTrackerCompany() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c.GetString("panel") != "tracker_company" {
@@ -121,12 +131,21 @@ func RequireTrackerCompany() gin.HandlerFunc {
 			return
 		}
 
-		companyID := c.GetString("user_id")
+		companyID := c.GetString("jwt_company_id")
+		isOwner := c.GetBool("jwt_is_owner")
+		if companyID == "" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "account not found"})
+			c.Abort()
+			return
+		}
+
+		ctx := context.Background()
+		pool := db.GetDB().GetPool()
+
 		var status string
-		err := db.GetDB().GetPool().QueryRow(context.Background(),
+		if err := pool.QueryRow(ctx,
 			`SELECT status FROM tracker_companies WHERE id=$1`, companyID,
-		).Scan(&status)
-		if err != nil {
+		).Scan(&status); err != nil {
 			c.JSON(http.StatusForbidden, gin.H{"error": "account not found"})
 			c.Abort()
 			return
@@ -137,7 +156,37 @@ func RequireTrackerCompany() gin.HandlerFunc {
 			return
 		}
 
+		if !isOwner {
+			staffID := c.GetString("user_id")
+			var exists bool
+			if err := pool.QueryRow(ctx,
+				`SELECT EXISTS(SELECT 1 FROM tracker_staff_users WHERE id=$1 AND company_id=$2)`,
+				staffID, companyID,
+			).Scan(&exists); err != nil || !exists {
+				c.JSON(http.StatusForbidden, gin.H{"error": "staff access revoked"})
+				c.Abort()
+				return
+			}
+		}
+
 		c.Set("company_id", companyID)
+		c.Set("is_owner", isOwner)
+		c.Next()
+	}
+}
+
+// RequireTrackerOwner restricts a route to the company's owner token (as
+// opposed to a staff login) — chain after RequireTrackerCompany(), which is
+// what populates "is_owner". Used for staff-management routes only: staff
+// have full owner-equivalent access everywhere else, just not over other
+// staff logins.
+func RequireTrackerOwner() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !c.GetBool("is_owner") {
+			c.JSON(http.StatusForbidden, gin.H{"error": "owner access required"})
+			c.Abort()
+			return
+		}
 		c.Next()
 	}
 }
@@ -169,6 +218,8 @@ func OptionalAuthMiddleware() gin.HandlerFunc {
 		c.Set("user_name", claims.Name)
 		c.Set("panel", claims.Panel)
 		c.Set("role", claims.Role)
+		c.Set("jwt_company_id", claims.CompanyID)
+		c.Set("jwt_is_owner", claims.IsOwner)
 		c.Next()
 	}
 }

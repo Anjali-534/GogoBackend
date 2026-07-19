@@ -2129,7 +2129,7 @@ func PanelLogin(c *gin.Context) {
             return
         }
         pool.Exec(ctx, `UPDATE panel_access SET last_login = NOW() WHERE id = $1`, panelID)
-        tokenStr := signPanelToken(panelID, req.Email, role, req.Panel, jwtSecret)
+        tokenStr := signPanelToken(panelID, req.Email, role, req.Panel, jwtSecret, panelID, true)
         c.JSON(http.StatusOK, gin.H{"token": tokenStr, "role": role, "panel": req.Panel, "email": req.Email})
         return
     }
@@ -2156,17 +2156,23 @@ func PanelLogin(c *gin.Context) {
         return
     }
 
-    tokenStr := signPanelToken(adminID.String(), req.Email, "master_admin", req.Panel, jwtSecret)
+    tokenStr := signPanelToken(adminID.String(), req.Email, "master_admin", req.Panel, jwtSecret, adminID.String(), true)
     c.JSON(http.StatusOK, gin.H{"token": tokenStr, "role": "master_admin", "panel": req.Panel, "email": req.Email})
 }
 
-func signPanelToken(userID, email, role, panel, secret string) string {
+// signPanelToken signs a panel JWT. companyID/isOwner are meaningful only
+// for the tracker_company panel — every other panel passes userID as
+// companyID and isOwner=true, preserving today's behavior where user_id
+// alone identified both "who" and "which account" (see auth.Claims).
+func signPanelToken(userID, email, role, panel, secret, companyID string, isOwner bool) string {
     token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-        "user_id": userID,
-        "email":   email,
-        "role":    role,
-        "panel":   panel,
-        "exp":     time.Now().Add(24 * time.Hour).Unix(),
+        "user_id":    userID,
+        "email":      email,
+        "role":       role,
+        "panel":      panel,
+        "company_id": companyID,
+        "is_owner":   isOwner,
+        "exp":        time.Now().Add(24 * time.Hour).Unix(),
     })
     tokenStr, _ := token.SignedString([]byte(secret))
     return tokenStr

@@ -290,16 +290,56 @@ func TrackerCompanyLogin(c *gin.Context) {
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 
-	var id, companyName, passwordHash, status string
+	var id, companyID, companyName, passwordHash, status string
+	isOwner := true
 	err := pool.QueryRow(ctx, `
 		SELECT id, company_name, password_hash, status
 		FROM tracker_companies WHERE contact_email=$1
 	`, req.Email).Scan(&id, &companyName, &passwordHash, &status)
-	if err != nil {
+	switch {
+	case err == nil:
+		companyID = id
+	case errors.Is(err, pgx.ErrNoRows):
+		// No owner account with this email — try staff. Emails are only
+		// unique per-company (not globally), so two different companies
+		// could each have a staff login with the same address; fetch every
+		// matching row and bcrypt-check each rather than picking one before
+		// knowing which password actually matches.
+		rows, qErr := pool.Query(ctx, `
+			SELECT s.id, s.company_id, s.password_hash, c.company_name, c.status
+			FROM tracker_staff_users s
+			JOIN tracker_companies c ON c.id = s.company_id
+			WHERE s.email = $1
+		`, req.Email)
+		if qErr != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
+			return
+		}
+		defer rows.Close()
+
+		matched := false
+		for rows.Next() {
+			var sID, sCompanyID, sHash, sCompanyName, sStatus string
+			if scanErr := rows.Scan(&sID, &sCompanyID, &sHash, &sCompanyName, &sStatus); scanErr != nil {
+				continue
+			}
+			if bcrypt.CompareHashAndPassword([]byte(sHash), []byte(req.Password)) == nil {
+				id, companyID, companyName, status = sID, sCompanyID, sCompanyName, sStatus
+				isOwner = false
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
+			return
+		}
+	default:
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		return
 	}
-	if bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)) != nil {
+
+	if isOwner && bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)) != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		return
 	}
@@ -322,13 +362,14 @@ func TrackerCompanyLogin(c *gin.Context) {
 	}
 
 	cfg := c.MustGet("config").(*config.Config)
-	token := signPanelToken(id, req.Email, "company", "tracker_company", cfg.JWTSecret)
+	token := signPanelToken(id, req.Email, "company", "tracker_company", cfg.JWTSecret, companyID, isOwner)
 	c.JSON(http.StatusOK, gin.H{
 		"token": token,
 		"company": gin.H{
-			"id":           id,
+			"id":           companyID,
 			"company_name": companyName,
 			"status":       status,
+			"is_owner":     isOwner,
 		},
 	})
 }

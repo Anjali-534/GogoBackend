@@ -480,7 +480,7 @@ func HospitalLogin(c *gin.Context) {
 	}
 
 	cfg := c.MustGet("config").(*config.Config)
-	token := signPanelToken(id, req.Email, "hospital", "hospital", cfg.JWTSecret)
+	token := signPanelToken(id, req.Email, "hospital", "hospital", cfg.JWTSecret, id, true)
 	c.JSON(http.StatusOK, gin.H{
 		"token":       token,
 		"hospital_id": id,

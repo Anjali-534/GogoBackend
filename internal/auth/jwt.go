@@ -16,6 +16,12 @@ type Claims struct {
 	Panel     string     `json:"panel,omitempty"`
 	Role      string     `json:"role,omitempty"`
 	ProjectID *uuid.UUID `json:"project_id,omitempty"`
+	// CompanyID and IsOwner are set on tracker_company panel tokens only —
+	// see handlers.signPanelToken and middleware.RequireTrackerCompany.
+	// UserID is "who authenticated" (owner's own id, or a staff row's id);
+	// CompanyID is always the owning company's tracker_companies.id.
+	CompanyID string `json:"company_id,omitempty"`
+	IsOwner   bool   `json:"is_owner,omitempty"`
 	jwt.RegisteredClaims
 }
 

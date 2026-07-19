@@ -313,6 +313,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.POST("/tracker/plan-orders", middleware.RequireTrackerCompany(), handlers.CreateTrackerPlanOrder)
 		gogoo.GET("/tracker/plan-orders", middleware.RequireTrackerCompany(), handlers.ListTrackerPlanOrders)
 		gogoo.GET("/tracker/plan-orders/:id/invoice", middleware.RequireTrackerCompany(), handlers.GetTrackerPlanOrderInvoice)
+		gogoo.GET("/tracker/staff", middleware.RequireTrackerCompany(), middleware.RequireTrackerOwner(), handlers.ListTrackerStaffUsers)
+		gogoo.POST("/tracker/staff", middleware.RequireTrackerCompany(), middleware.RequireTrackerOwner(), handlers.CreateTrackerStaffUser)
+		gogoo.DELETE("/tracker/staff/:id", middleware.RequireTrackerCompany(), middleware.RequireTrackerOwner(), handlers.DeleteTrackerStaffUser)
 
 		// Ambulance — Bookings
 		gogoo.GET("/ambulance/bookings/hospital", middleware.RequirePanel("hospital", "ambulance"), handlers.GetHospitalBookings)
