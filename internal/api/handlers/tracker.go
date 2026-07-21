@@ -1536,6 +1536,15 @@ func GetPublicTrackerOrder(c *gin.Context) {
 		return
 	}
 
+	// Same self-heal as GetTrackerCompanyOwnOrder: retry a failed create-time
+	// route fetch in the background so the public page picks it up on its
+	// next poll instead of staying routeless forever.
+	if routePolyline == nil &&
+		dispatchFromLat != nil && dispatchFromLng != nil &&
+		dispatchToLat != nil && dispatchToLng != nil {
+		go cacheTrackerOrderRoute(orderID, *dispatchFromLat, *dispatchFromLng, *dispatchToLat, *dispatchToLng)
+	}
+
 	rows, err := pool.Query(ctx, `
 		SELECT e.status, COALESCE(e.note,''), COALESCE(e.location,''), e.created_at,
 		       e.reported_by, COALESCE(e.event_kind,'')
@@ -1622,26 +1631,33 @@ func GetTrackerDriverOrder(c *gin.Context) {
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 
-	var status, dispatchFrom, dispatchTo, vehicleNumber, companyName string
+	var orderID, status, dispatchFrom, dispatchTo, vehicleNumber, companyName string
 	var fromLat, fromLng, toLat, toLng *float64
 	var routePolyline *string
 	var routeDistanceKm *float64
 	var routeDurationMins *int
 	err := pool.QueryRow(ctx, `
-		SELECT o.status, o.dispatch_from, o.dispatch_to, o.vehicle_number,
+		SELECT o.id::text, o.status, o.dispatch_from, o.dispatch_to, o.vehicle_number,
 		       o.dispatch_from_lat, o.dispatch_from_lng, o.dispatch_to_lat, o.dispatch_to_lng,
 		       o.route_polyline, o.route_distance_km, o.route_duration_mins,
 		       c.company_name
 		FROM tracker_orders o
 		JOIN tracker_companies c ON c.id = o.company_id
 		WHERE o.driver_tracking_token = $1
-	`, driverToken).Scan(&status, &dispatchFrom, &dispatchTo, &vehicleNumber,
+	`, driverToken).Scan(&orderID, &status, &dispatchFrom, &dispatchTo, &vehicleNumber,
 		&fromLat, &fromLng, &toLat, &toLng,
 		&routePolyline, &routeDistanceKm, &routeDurationMins,
 		&companyName)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "tracking link not found"})
 		return
+	}
+
+	// Same self-heal as GetTrackerCompanyOwnOrder: retry a failed create-time
+	// route fetch in the background so the driver page picks it up on its
+	// next poll instead of staying routeless forever.
+	if routePolyline == nil && fromLat != nil && fromLng != nil && toLat != nil && toLng != nil {
+		go cacheTrackerOrderRoute(orderID, *fromLat, *fromLng, *toLat, *toLng)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
