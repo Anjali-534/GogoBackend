@@ -201,7 +201,6 @@ const truckAddonPrice = 200.0
 
 func CreateBooking(c *gin.Context) {
     var req struct {
-        RiderID       string  `json:"rider_id" binding:"required"`
         ServiceTypeID string  `json:"service_type_id" binding:"required"`
         PickupLat     float64 `json:"pickup_lat" binding:"required"`
         PickupLng     float64 `json:"pickup_lng" binding:"required"`
@@ -246,21 +245,23 @@ func CreateBooking(c *gin.Context) {
     if req.Source == "" {
         req.Source = "app"
     }
-    // Coordinates are deliberately not logged — precise pickup/drop GPS is
-    // personal location data and doesn't belong in server logs.
-    log.Printf("CreateBooking: rider=%s service=%s fare=%v scheduled=%v",
-        req.RiderID, req.ServiceTypeID, req.EstimatedFare, req.IsScheduled)
-
     ctx := context.Background()
     pool := db.GetDB().GetPool()
 
-    // Validate rider exists
-    var riderExists bool
-    if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM riders WHERE id=$1)`, req.RiderID).Scan(&riderExists); err != nil || !riderExists {
-        log.Printf("CreateBooking: rider not found: %s (err=%v)", req.RiderID, err)
-        c.JSON(http.StatusBadRequest, gin.H{"error": "rider not found: " + req.RiderID})
+    // rider_id is derived from the caller's JWT, never taken from the
+    // request body — a client can only ever book on behalf of itself.
+    userID := c.GetString("user_id")
+    var riderID string
+    if err := pool.QueryRow(ctx, `SELECT id FROM riders WHERE user_id=$1`, userID).Scan(&riderID); err != nil {
+        log.Printf("CreateBooking: no rider profile for user_id=%s (err=%v)", userID, err)
+        c.JSON(http.StatusBadRequest, gin.H{"error": "rider profile not found"})
         return
     }
+
+    // Coordinates are deliberately not logged — precise pickup/drop GPS is
+    // personal location data and doesn't belong in server logs.
+    log.Printf("CreateBooking: rider=%s service=%s fare=%v scheduled=%v",
+        riderID, req.ServiceTypeID, req.EstimatedFare, req.IsScheduled)
 
     // Validate service_type exists and fetch its official pricing — the
     // client never gets to declare its own base_fare/per_km_rate.
@@ -298,7 +299,7 @@ func CreateBooking(c *gin.Context) {
     // into THIS booking's fare, never silently dropped. Only reset once a
     // booking actually completes (see UpdateBookingStatus).
     var outstandingFee float64
-    pool.QueryRow(ctx, `SELECT COALESCE(outstanding_cancellation_fee,0) FROM riders WHERE id=$1`, req.RiderID).Scan(&outstandingFee)
+    pool.QueryRow(ctx, `SELECT COALESCE(outstanding_cancellation_fee,0) FROM riders WHERE id=$1`, riderID).Scan(&outstandingFee)
 
     // Server-side fare engine — the client's estimated_fare is never trusted
     // outright. We recompute the fare from the service_type's own pricing
@@ -336,7 +337,7 @@ func CreateBooking(c *gin.Context) {
     tolerance := math.Max(expected*0.05, 5.0)
     if math.Abs(req.EstimatedFare-expected) > tolerance {
         log.Printf("CreateBooking: fare mismatch rider=%s service=%s client_fare=%.2f server_fare=%.2f",
-            req.RiderID, req.ServiceTypeID, req.EstimatedFare, expected)
+            riderID, req.ServiceTypeID, req.EstimatedFare, expected)
         c.JSON(http.StatusBadRequest, gin.H{"error": "fare could not be verified — please go back and try booking again"})
         return
     }
@@ -352,7 +353,7 @@ func CreateBooking(c *gin.Context) {
              is_scheduled,scheduled_at,receiver_name,receiver_phone)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
     `,
-        bookingID, req.RiderID, req.ServiceTypeID, status, req.PickupLat, req.PickupLng, req.PickupAddress,
+        bookingID, riderID, req.ServiceTypeID, status, req.PickupLat, req.PickupLng, req.PickupAddress,
         req.DropLat, req.DropLng, req.DropAddress, finalFareEstimate, req.DistanceKm, otp, req.Source,
         req.IsScheduled && svcCategory != "ambulance", scheduledAt, req.ReceiverName, req.ReceiverPhone)
     if err != nil {
