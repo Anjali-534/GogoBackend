@@ -1684,7 +1684,7 @@ func GetTrackerDriverOrder(c *gin.Context) {
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 
-	var orderID, status, dispatchFrom, dispatchTo, vehicleNumber, companyName string
+	var orderID, status, dispatchFrom, dispatchTo, vehicleNumber, companyName, bookedForCompanyName string
 	var fromLat, fromLng, toLat, toLng *float64
 	var routePolyline *string
 	var routeDistanceKm *float64
@@ -1693,14 +1693,14 @@ func GetTrackerDriverOrder(c *gin.Context) {
 		SELECT o.id::text, o.status, o.dispatch_from, o.dispatch_to, o.vehicle_number,
 		       o.dispatch_from_lat, o.dispatch_from_lng, o.dispatch_to_lat, o.dispatch_to_lng,
 		       o.route_polyline, o.route_distance_km, o.route_duration_mins,
-		       c.company_name
+		       c.company_name, o.booked_for_company_name
 		FROM tracker_orders o
 		JOIN tracker_companies c ON c.id = o.company_id
 		WHERE o.driver_tracking_token = $1
 	`, driverToken).Scan(&orderID, &status, &dispatchFrom, &dispatchTo, &vehicleNumber,
 		&fromLat, &fromLng, &toLat, &toLng,
 		&routePolyline, &routeDistanceKm, &routeDurationMins,
-		&companyName)
+		&companyName, &bookedForCompanyName)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "tracking link not found"})
 		return
@@ -1714,19 +1714,20 @@ func GetTrackerDriverOrder(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"status":              status,
-		"dispatch_from":       dispatchFrom,
-		"dispatch_to":         dispatchTo,
-		"vehicle_number":      vehicleNumber,
-		"company_name":        companyName,
-		"is_terminal":         terminalOrderStatuses[status],
-		"dispatch_from_lat":   fromLat,
-		"dispatch_from_lng":   fromLng,
-		"dispatch_to_lat":     toLat,
-		"dispatch_to_lng":     toLng,
-		"route_polyline":      routePolyline,
-		"route_distance_km":   routeDistanceKm,
-		"route_duration_mins": routeDurationMins,
+		"status":                  status,
+		"dispatch_from":           dispatchFrom,
+		"dispatch_to":             dispatchTo,
+		"vehicle_number":          vehicleNumber,
+		"company_name":            companyName,
+		"booked_for_company_name": bookedForCompanyName,
+		"is_terminal":             terminalOrderStatuses[status],
+		"dispatch_from_lat":       fromLat,
+		"dispatch_from_lng":       fromLng,
+		"dispatch_to_lat":         toLat,
+		"dispatch_to_lng":         toLng,
+		"route_polyline":          routePolyline,
+		"route_distance_km":       routeDistanceKm,
+		"route_duration_mins":     routeDurationMins,
 	})
 }
 
