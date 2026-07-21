@@ -338,17 +338,70 @@ func CreateBooking(c *gin.Context) {
             serverFare += truckAddonPrice
         }
     }
-    // Coupon/discount amount is still client-reported (no promo_code
-    // validation exists server-side yet — flagged separately) but it
-    // can only ever reduce the fare, never invert it into a negative.
-    discount := req.DiscountAmt
-    if discount < 0 {
-        discount = 0
+    // Promo code is validated and priced entirely server-side — the
+    // client's discount_amount is never trusted, only promo_code (if any)
+    // is looked up against the promo_codes table.
+    var discount float64
+    var appliedPromoCodeID *uuid.UUID
+    var appliedPromoCode string
+    if req.PromoCode != nil && strings.TrimSpace(*req.PromoCode) != "" {
+        code := strings.ToUpper(strings.TrimSpace(*req.PromoCode))
+        var promoID uuid.UUID
+        var discountType string
+        var discountValue, minFare float64
+        var maxDiscount *float64
+        var usageLimitTotal, usageLimitPerUser *int
+        err := pool.QueryRow(ctx, `
+            SELECT id, discount_type, discount_value, min_fare, max_discount,
+                   usage_limit_total, usage_limit_per_user
+            FROM promo_codes
+            WHERE code=$1 AND active=TRUE
+              AND (applies_to = $2 OR applies_to IS NULL)
+              AND (valid_from IS NULL OR valid_from <= NOW())
+              AND (valid_until IS NULL OR valid_until >= NOW())
+            ORDER BY applies_to NULLS LAST
+            LIMIT 1
+        `, code, svcCategory).Scan(&promoID, &discountType, &discountValue, &minFare, &maxDiscount,
+            &usageLimitTotal, &usageLimitPerUser)
+        if err != nil {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or expired promo code"})
+            return
+        }
+        if serverFare < minFare {
+            c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("promo code requires a minimum fare of ₹%.0f", minFare)})
+            return
+        }
+        if usageLimitTotal != nil {
+            var totalUses int
+            pool.QueryRow(ctx, `SELECT COUNT(*) FROM promo_redemptions WHERE promo_code_id=$1`, promoID).Scan(&totalUses)
+            if totalUses >= *usageLimitTotal {
+                c.JSON(http.StatusBadRequest, gin.H{"error": "promo code usage limit reached"})
+                return
+            }
+        }
+        if usageLimitPerUser != nil {
+            var userUses int
+            pool.QueryRow(ctx, `SELECT COUNT(*) FROM promo_redemptions WHERE promo_code_id=$1 AND rider_id=$2`, promoID, riderID).Scan(&userUses)
+            if userUses >= *usageLimitPerUser {
+                c.JSON(http.StatusBadRequest, gin.H{"error": "you have already used this promo code"})
+                return
+            }
+        }
+        if discountType == "percent" {
+            discount = math.Round(serverFare * discountValue / 100)
+        } else {
+            discount = discountValue
+        }
+        if maxDiscount != nil && discount > *maxDiscount {
+            discount = *maxDiscount
+        }
+        if discount > serverFare {
+            discount = serverFare
+        }
+        serverFare -= discount
+        appliedPromoCodeID = &promoID
+        appliedPromoCode = code
     }
-    if discount > serverFare {
-        discount = serverFare
-    }
-    serverFare -= discount
 
     expected := serverFare + outstandingFee
     tolerance := math.Max(expected*0.05, 5.0)
@@ -397,6 +450,16 @@ func CreateBooking(c *gin.Context) {
         req.PurposeType, req.PatientName, req.ContactPhone, req.MedicalNotes,
         bookingID)
 
+    if appliedPromoCodeID != nil {
+        _, err := pool.Exec(ctx, `
+            INSERT INTO promo_redemptions (promo_code_id, code, rider_id, booking_id)
+            VALUES ($1,$2,$3,$4)
+        `, *appliedPromoCodeID, appliedPromoCode, riderID, bookingID)
+        if err != nil {
+            log.Printf("CreateBooking: failed to record promo redemption for booking=%s promo=%s: %v", bookingID, appliedPromoCode, err)
+        }
+    }
+
     log.Printf("CreateBooking success: %s (status=%s)", bookingID, status)
 
     // Scheduled bookings are NOT dispatched now — the scheduler ticks them
@@ -412,6 +475,10 @@ func CreateBooking(c *gin.Context) {
     }
     if outstandingFee > 0 {
         resp["outstanding_fee_applied"] = outstandingFee
+    }
+    if appliedPromoCodeID != nil {
+        resp["promo_code"] = appliedPromoCode
+        resp["discount_amount"] = discount
     }
     c.JSON(http.StatusCreated, resp)
 }
