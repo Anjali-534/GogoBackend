@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -308,6 +309,73 @@ func ReverseGeocodeProxy(c *gin.Context) {
 	geocodeCacheMu.Unlock()
 
 	c.JSON(http.StatusOK, gin.H{"address": address})
+}
+
+// fetchOlaForwardGeocode calls Ola Maps forward geocoding server-side
+// (OLA_MAPS_KEY) and returns the first result's coordinates. Shared by
+// ForwardGeocodeProxy and the tracker's geocode-on-create fallback
+// (tracker.go), same split as fetchOlaDirections/ProxyOlaRoute above.
+func fetchOlaForwardGeocode(address string) (lat, lng float64, err error) {
+	address = strings.TrimSpace(address)
+	if address == "" {
+		return 0, 0, fmt.Errorf("empty address")
+	}
+
+	apiKey := os.Getenv("OLA_MAPS_KEY")
+	if apiKey == "" {
+		return 0, 0, fmt.Errorf("OLA_MAPS_KEY not set")
+	}
+
+	reqURL := "https://api.olamaps.io/places/v1/geocode?address=" + url.QueryEscape(address) + "&api_key=" + apiKey
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(reqURL)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return 0, 0, fmt.Errorf("ola geocode returned status %d", resp.StatusCode)
+	}
+
+	var result struct {
+		GeocodingResults []struct {
+			Geometry struct {
+				Location struct {
+					Lat float64 `json:"lat"`
+					Lng float64 `json:"lng"`
+				} `json:"location"`
+			} `json:"geometry"`
+		} `json:"geocodingResults"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0, 0, err
+	}
+	if len(result.GeocodingResults) == 0 {
+		return 0, 0, fmt.Errorf("ola geocode returned no results")
+	}
+
+	loc := result.GeocodingResults[0].Geometry.Location
+	return loc.Lat, loc.Lng, nil
+}
+
+// GET /gogoo/geocode/forward?address=<text>
+// Server-side proxy to Ola Maps forward geocoding so the Ola key never
+// reaches panel frontends. No cache here unlike the reverse-geocode proxy
+// above — that one absorbs repeated marker clicks on the same handful of
+// driver locations; free-text addresses rarely repeat, so a cache would
+// just grow unbounded for no hit-rate benefit.
+// Always returns 200 — degrades to null lat/lng on any failure so callers
+// can treat "not found" the same as "geocoding unavailable" without a
+// separate error path.
+func ForwardGeocodeProxy(c *gin.Context) {
+	lat, lng, err := fetchOlaForwardGeocode(c.Query("address"))
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"lat": nil, "lng": nil})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"lat": lat, "lng": lng})
 }
 
 // isLatLng validates a "lat,lng" query param before it's interpolated into an outbound URL.

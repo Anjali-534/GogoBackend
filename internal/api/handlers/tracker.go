@@ -898,6 +898,18 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 	if req.DispatchFromLat != nil && req.DispatchFromLng != nil && req.DispatchToLat != nil && req.DispatchToLng != nil {
 		go cacheTrackerOrderRoute(id.String(),
 			*req.DispatchFromLat, *req.DispatchFromLng, *req.DispatchToLat, *req.DispatchToLng)
+	} else {
+		// One or both endpoints arrived as plain text with no coordinates —
+		// the client didn't send lat/lng because the user typed the address
+		// instead of picking an autocomplete suggestion. Best-effort forward
+		// geocode each missing endpoint in the background; on success the
+		// existing route self-heal (GetTrackerCompanyOwnOrder et al.) picks
+		// up the new coordinates on the next poll and fills in the route
+		// itself — no extra plumbing needed here. On failure the order just
+		// stays exactly as it is today: routeless, but otherwise unaffected.
+		go geocodeMissingTrackerOrderEndpoints(id.String(),
+			req.DispatchFrom, req.DispatchFromLat, req.DispatchFromLng,
+			req.DispatchTo, req.DispatchToLat, req.DispatchToLng)
 	}
 
 	c.JSON(http.StatusCreated, gin.H{"id": id, "public_tracking_token": token, "message": "order created"})
@@ -937,6 +949,43 @@ func cacheTrackerOrderRoute(orderID string, fromLat, fromLng, toLat, toLng float
 	`, polyline, distanceKm, durationMins, orderID)
 	if err != nil {
 		log.Printf("cacheTrackerOrderRoute: store failed for order=%s: %v", orderID, err)
+	}
+}
+
+// geocodeMissingTrackerOrderEndpoints best-effort forward-geocodes whichever
+// of the two dispatch endpoints arrived without coordinates (typed address,
+// not picked from autocomplete) and stores whatever succeeds. Runs detached
+// from the create request, same fire-and-forget contract as
+// cacheTrackerOrderRoute — on failure the column just stays NULL, exactly
+// as if this fallback didn't exist.
+func geocodeMissingTrackerOrderEndpoints(orderID string,
+	fromText string, fromLat, fromLng *float64,
+	toText string, toLat, toLng *float64) {
+	pool := db.GetDB().GetPool()
+	ctx := context.Background()
+
+	if fromLat == nil || fromLng == nil {
+		if lat, lng, err := fetchOlaForwardGeocode(fromText); err == nil {
+			if _, err := pool.Exec(ctx, `
+				UPDATE tracker_orders SET dispatch_from_lat=$1, dispatch_from_lng=$2, updated_at=NOW() WHERE id=$3
+			`, lat, lng, orderID); err != nil {
+				log.Printf("geocodeMissingTrackerOrderEndpoints: store failed for order=%s (from): %v", orderID, err)
+			}
+		} else {
+			log.Printf("geocodeMissingTrackerOrderEndpoints: geocode failed for order=%s (from=%q): %v", orderID, fromText, err)
+		}
+	}
+
+	if toLat == nil || toLng == nil {
+		if lat, lng, err := fetchOlaForwardGeocode(toText); err == nil {
+			if _, err := pool.Exec(ctx, `
+				UPDATE tracker_orders SET dispatch_to_lat=$1, dispatch_to_lng=$2, updated_at=NOW() WHERE id=$3
+			`, lat, lng, orderID); err != nil {
+				log.Printf("geocodeMissingTrackerOrderEndpoints: store failed for order=%s (to): %v", orderID, err)
+			}
+		} else {
+			log.Printf("geocodeMissingTrackerOrderEndpoints: geocode failed for order=%s (to=%q): %v", orderID, toText, err)
+		}
 	}
 }
 

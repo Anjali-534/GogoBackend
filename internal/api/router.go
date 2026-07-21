@@ -173,6 +173,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.GET("/live/bookings", handlers.ListLiveBookings)
 		gogoo.GET("/route", handlers.ProxyOlaRoute)
 		gogoo.GET("/geocode/reverse", handlers.ReverseGeocodeProxy)
+		gogoo.GET("/geocode/forward", handlers.ForwardGeocodeProxy)
 
 		// Riders (dashboard)
 		gogoo.GET("/riders", handlers.ListRiders)
