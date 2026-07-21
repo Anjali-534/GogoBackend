@@ -52,6 +52,14 @@ var validOrderStatuses = map[string]bool{
 	"cancelled":  true,
 }
 
+// validOrderPriorities matches the CHECK constraint added in migration 043.
+// Empty request input defaults to "normal" rather than being rejected.
+var validOrderPriorities = map[string]bool{
+	"normal":   true,
+	"urgent":   true,
+	"same_day": true,
+}
+
 // validDriverEventKinds are the driver-reported quick-status taps from the
 // drive page — notes at the order's CURRENT status, never a status
 // transition. Must match the CHECK constraint added in migration 028.
@@ -787,9 +795,38 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 		// ordering). The order itself stores the plain field values above; a
 		// stale or foreign id is simply ignored, never an error.
 		SavedRecipientID *string `json:"saved_recipient_id"`
+
+		// Shipment-detail expansion (migration 043) — all optional.
+		RegisteredAddress        string `json:"registered_address"`
+		FactoryAddress           string `json:"factory_address"`
+		ContactPersonName        string `json:"contact_person_name"`
+		ContactPersonPhone       string `json:"contact_person_phone"`
+		ContactPersonEmail       string `json:"contact_person_email" binding:"omitempty,email"`
+		ContactPersonDesignation string `json:"contact_person_designation"`
+		// Priority defaults to "normal" when omitted — validated below rather
+		// than via binding so an empty string doesn't fail the bind.
+		Priority             string     `json:"priority"`
+		ExpectedDeliveryDate *time.Time `json:"expected_delivery_date"`
+		DeclaredValue        *float64   `json:"declared_value"`
+		SpecialHandling      []string   `json:"special_handling"`
+		InternalReference    string     `json:"internal_reference"`
+
+		// Additional dispatch-email recipients, variable count (migration
+		// 043's tracker_order_cc_emails). Distinct from BookedFor/Consignee/
+		// TransporterEmail above, which each map to a specific party.
+		CCEmails  []string `json:"cc_emails" binding:"omitempty,dive,email"`
+		BCCEmails []string `json:"bcc_emails" binding:"omitempty,dive,email"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	priority := req.Priority
+	if priority == "" {
+		priority = "normal"
+	} else if !validOrderPriorities[priority] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid priority"})
 		return
 	}
 
@@ -846,8 +883,11 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 			 consignee_name, material, quantity, dispatch_datetime, documents_enclosed,
 			 booked_for_email, consignee_email, transporter_email,
 			 consignee_gstin, booked_for_gstin, consignee_state, booked_for_state,
-			 received_confirmation_token)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'created',$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)
+			 received_confirmation_token,
+			 registered_address, factory_address,
+			 contact_person_name, contact_person_phone, contact_person_email, contact_person_designation,
+			 priority, expected_delivery_date, declared_value, special_handling, internal_reference)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'created',$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42)
 	`, id, companyID, req.BookedForCompanyName, req.BookedForPhone,
 		req.DispatchFrom, req.DispatchTo, req.DispatchFromLat, req.DispatchFromLng,
 		req.DispatchToLat, req.DispatchToLng, nullIfEmpty(req.TransporterName), nullIfEmpty(req.TransporterPhone),
@@ -857,7 +897,11 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 		req.DispatchDatetime, nullIfEmpty(req.DocumentsEnclosed),
 		nullIfEmpty(req.BookedForEmail), nullIfEmpty(req.ConsigneeEmail), nullIfEmpty(req.TransporterEmail),
 		nullIfEmpty(req.ConsigneeGstin), nullIfEmpty(req.BookedForGstin),
-		nullIfEmpty(req.ConsigneeState), nullIfEmpty(req.BookedForState), receiptToken)
+		nullIfEmpty(req.ConsigneeState), nullIfEmpty(req.BookedForState), receiptToken,
+		nullIfEmpty(req.RegisteredAddress), nullIfEmpty(req.FactoryAddress),
+		nullIfEmpty(req.ContactPersonName), nullIfEmpty(req.ContactPersonPhone),
+		nullIfEmpty(req.ContactPersonEmail), nullIfEmpty(req.ContactPersonDesignation),
+		priority, req.ExpectedDeliveryDate, req.DeclaredValue, req.SpecialHandling, nullIfEmpty(req.InternalReference))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create order: " + err.Error()})
 		return
@@ -870,6 +914,23 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create order event"})
 		return
+	}
+
+	for _, email := range req.CCEmails {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO tracker_order_cc_emails (order_id, email, kind) VALUES ($1,$2,'cc')
+		`, id, email); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save cc email"})
+			return
+		}
+	}
+	for _, email := range req.BCCEmails {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO tracker_order_cc_emails (order_id, email, kind) VALUES ($1,$2,'bcc')
+		`, id, email); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save bcc email"})
+			return
+		}
 	}
 
 	// A malformed id would fail the UUID cast and abort the transaction, so
@@ -1012,7 +1073,10 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 		       route_polyline, route_distance_km, route_duration_mins,
 		       signature_url, booked_for_email, consignee_email, transporter_email,
 		       received_confirmation_token, received_confirmed_at,
-		       consignee_gstin, booked_for_gstin, consignee_state, booked_for_state
+		       consignee_gstin, booked_for_gstin, consignee_state, booked_for_state,
+		       registered_address, factory_address,
+		       contact_person_name, contact_person_phone, contact_person_email, contact_person_designation,
+		       priority, expected_delivery_date, declared_value, special_handling, internal_reference
 		FROM tracker_orders
 		WHERE id = $1 AND company_id = $2
 	`, orderID, companyID).Scan(
@@ -1029,6 +1093,9 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 		&o.SignatureURL, &o.BookedForEmail, &o.ConsigneeEmail, &o.TransporterEmail,
 		&o.ReceivedConfirmationToken, &o.ReceivedConfirmedAt,
 		&o.ConsigneeGstin, &o.BookedForGstin, &o.ConsigneeState, &o.BookedForState,
+		&o.RegisteredAddress, &o.FactoryAddress,
+		&o.ContactPersonName, &o.ContactPersonPhone, &o.ContactPersonEmail, &o.ContactPersonDesignation,
+		&o.Priority, &o.ExpectedDeliveryDate, &o.DeclaredValue, &o.SpecialHandling, &o.InternalReference,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -1040,6 +1107,28 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 		return
 	}
 	o.DriverID = driverID
+
+	ccRows, err := pool.Query(ctx, `
+		SELECT email, kind FROM tracker_order_cc_emails WHERE order_id = $1
+	`, orderID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error: " + err.Error()})
+		return
+	}
+	defer ccRows.Close()
+	o.CCEmails = []string{}
+	o.BCCEmails = []string{}
+	for ccRows.Next() {
+		var email, kind string
+		if err := ccRows.Scan(&email, &kind); err != nil {
+			continue
+		}
+		if kind == "bcc" {
+			o.BCCEmails = append(o.BCCEmails, email)
+		} else {
+			o.CCEmails = append(o.CCEmails, email)
+		}
+	}
 
 	// Lazy backfill: if the create-time route fetch failed (or the order
 	// predates route caching) but we have both coordinate pairs, retry in the
@@ -1120,16 +1209,48 @@ func UpdateTrackerCompanyOrderDetails(c *gin.Context) {
 
 		ConsigneeState string `json:"consignee_state"`
 		BookedForState string `json:"booked_for_state"`
+
+		// Shipment-detail expansion (migration 043) — same field set as
+		// CreateTrackerCompanyOrder, minus what create-time locks in
+		// (SavedRecipientID has no meaning on an edit).
+		RegisteredAddress        string     `json:"registered_address"`
+		FactoryAddress           string     `json:"factory_address"`
+		ContactPersonName        string     `json:"contact_person_name"`
+		ContactPersonPhone       string     `json:"contact_person_phone"`
+		ContactPersonEmail       string     `json:"contact_person_email" binding:"omitempty,email"`
+		ContactPersonDesignation string     `json:"contact_person_designation"`
+		Priority                 string     `json:"priority"`
+		ExpectedDeliveryDate     *time.Time `json:"expected_delivery_date"`
+		DeclaredValue            *float64   `json:"declared_value"`
+		SpecialHandling          []string   `json:"special_handling"`
+		InternalReference        string     `json:"internal_reference"`
+		CCEmails                 []string   `json:"cc_emails" binding:"omitempty,dive,email"`
+		BCCEmails                []string   `json:"bcc_emails" binding:"omitempty,dive,email"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
+	priority := req.Priority
+	if priority == "" {
+		priority = "normal"
+	} else if !validOrderPriorities[priority] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid priority"})
+		return
+	}
+
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 
-	tag, err := pool.Exec(ctx, `
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	tag, err := tx.Exec(ctx, `
 		UPDATE tracker_orders SET
 			booked_for_company_name=$1, booked_for_phone=$2,
 			dispatch_from=$3, dispatch_to=$4,
@@ -1140,8 +1261,13 @@ func UpdateTrackerCompanyOrderDetails(c *gin.Context) {
 			booked_for_email=$14, consignee_email=$15, transporter_email=$16,
 			consignee_gstin=$17, booked_for_gstin=$18,
 			consignee_state=$19, booked_for_state=$20,
+			registered_address=$21, factory_address=$22,
+			contact_person_name=$23, contact_person_phone=$24,
+			contact_person_email=$25, contact_person_designation=$26,
+			priority=$27, expected_delivery_date=$28, declared_value=$29,
+			special_handling=$30, internal_reference=$31,
 			updated_at=NOW()
-		WHERE id=$21 AND company_id=$22
+		WHERE id=$32 AND company_id=$33
 	`, req.BookedForCompanyName, req.BookedForPhone,
 		req.DispatchFrom, req.DispatchTo,
 		nullIfEmpty(req.TransporterName), nullIfEmpty(req.TransporterPhone),
@@ -1151,6 +1277,11 @@ func UpdateTrackerCompanyOrderDetails(c *gin.Context) {
 		nullIfEmpty(req.BookedForEmail), nullIfEmpty(req.ConsigneeEmail), nullIfEmpty(req.TransporterEmail),
 		nullIfEmpty(req.ConsigneeGstin), nullIfEmpty(req.BookedForGstin),
 		nullIfEmpty(req.ConsigneeState), nullIfEmpty(req.BookedForState),
+		nullIfEmpty(req.RegisteredAddress), nullIfEmpty(req.FactoryAddress),
+		nullIfEmpty(req.ContactPersonName), nullIfEmpty(req.ContactPersonPhone),
+		nullIfEmpty(req.ContactPersonEmail), nullIfEmpty(req.ContactPersonDesignation),
+		priority, req.ExpectedDeliveryDate, req.DeclaredValue,
+		req.SpecialHandling, nullIfEmpty(req.InternalReference),
 		orderID, companyID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "update failed: " + err.Error()})
@@ -1158,6 +1289,35 @@ func UpdateTrackerCompanyOrderDetails(c *gin.Context) {
 	}
 	if tag.RowsAffected() == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
+		return
+	}
+
+	// CC/BCC is a full replace, same "always sends every field" contract as
+	// the rest of this endpoint — simplest correct approach for a variable-
+	// length list edited from a form that always round-trips the whole set.
+	if _, err := tx.Exec(ctx, `DELETE FROM tracker_order_cc_emails WHERE order_id=$1`, orderID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update cc/bcc emails"})
+		return
+	}
+	for _, email := range req.CCEmails {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO tracker_order_cc_emails (order_id, email, kind) VALUES ($1,$2,'cc')
+		`, orderID, email); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save cc email"})
+			return
+		}
+	}
+	for _, email := range req.BCCEmails {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO tracker_order_cc_emails (order_id, email, kind) VALUES ($1,$2,'bcc')
+		`, orderID, email); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save bcc email"})
+			return
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit"})
 		return
 	}
 

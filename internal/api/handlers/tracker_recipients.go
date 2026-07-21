@@ -40,6 +40,18 @@ type trackerSavedRecipient struct {
 	DispatchToLat *float64 `json:"dispatch_to_lat"`
 	DispatchToLng *float64 `json:"dispatch_to_lng"`
 
+	// Address/contact-person fields (migration 043) — added so picking a
+	// recipient pre-fills the fuller picture, same as the who/where fields
+	// above. Deliberately excludes shipment-specific fields (priority,
+	// declared value, etc.) — those stay order-only, same split the table
+	// already draws for material/quantity.
+	RegisteredAddress        *string `json:"registered_address"`
+	FactoryAddress           *string `json:"factory_address"`
+	ContactPersonName        *string `json:"contact_person_name"`
+	ContactPersonPhone       *string `json:"contact_person_phone"`
+	ContactPersonEmail       *string `json:"contact_person_email"`
+	ContactPersonDesignation *string `json:"contact_person_designation"`
+
 	UseCount   int        `json:"use_count"`
 	LastUsedAt *time.Time `json:"last_used_at"`
 	CreatedAt  time.Time  `json:"created_at"`
@@ -64,6 +76,13 @@ type trackerSavedRecipientReq struct {
 	DispatchTo    string   `json:"dispatch_to"`
 	DispatchToLat *float64 `json:"dispatch_to_lat"`
 	DispatchToLng *float64 `json:"dispatch_to_lng"`
+
+	RegisteredAddress        string `json:"registered_address"`
+	FactoryAddress           string `json:"factory_address"`
+	ContactPersonName        string `json:"contact_person_name"`
+	ContactPersonPhone       string `json:"contact_person_phone"`
+	ContactPersonEmail       string `json:"contact_person_email" binding:"omitempty,email"`
+	ContactPersonDesignation string `json:"contact_person_designation"`
 }
 
 const trackerSavedRecipientCols = `
@@ -72,6 +91,8 @@ const trackerSavedRecipientCols = `
 	booked_for_gstin, booked_for_state,
 	consignee_name, consignee_email, consignee_gstin, consignee_state,
 	dispatch_to, dispatch_to_lat, dispatch_to_lng,
+	registered_address, factory_address,
+	contact_person_name, contact_person_phone, contact_person_email, contact_person_designation,
 	use_count, last_used_at, created_at`
 
 func scanTrackerSavedRecipient(row interface{ Scan(...any) error }) (trackerSavedRecipient, error) {
@@ -82,6 +103,8 @@ func scanTrackerSavedRecipient(row interface{ Scan(...any) error }) (trackerSave
 		&r.BookedForGstin, &r.BookedForState,
 		&r.ConsigneeName, &r.ConsigneeEmail, &r.ConsigneeGstin, &r.ConsigneeState,
 		&r.DispatchTo, &r.DispatchToLat, &r.DispatchToLng,
+		&r.RegisteredAddress, &r.FactoryAddress,
+		&r.ContactPersonName, &r.ContactPersonPhone, &r.ContactPersonEmail, &r.ContactPersonDesignation,
 		&r.UseCount, &r.LastUsedAt, &r.CreatedAt,
 	)
 	return r, err
@@ -137,15 +160,20 @@ func CreateTrackerSavedRecipient(c *gin.Context) {
 			 booked_for_company_name, booked_for_phone, booked_for_email,
 			 booked_for_gstin, booked_for_state,
 			 consignee_name, consignee_email, consignee_gstin, consignee_state,
-			 dispatch_to, dispatch_to_lat, dispatch_to_lng)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+			 dispatch_to, dispatch_to_lat, dispatch_to_lng,
+			 registered_address, factory_address,
+			 contact_person_name, contact_person_phone, contact_person_email, contact_person_designation)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
 		RETURNING `+trackerSavedRecipientCols,
 		companyID, req.Label,
 		req.BookedForCompanyName, req.BookedForPhone, nullIfEmpty(req.BookedForEmail),
 		nullIfEmpty(req.BookedForGstin), nullIfEmpty(req.BookedForState),
 		nullIfEmpty(req.ConsigneeName), nullIfEmpty(req.ConsigneeEmail),
 		nullIfEmpty(req.ConsigneeGstin), nullIfEmpty(req.ConsigneeState),
-		nullIfEmpty(req.DispatchTo), req.DispatchToLat, req.DispatchToLng)
+		nullIfEmpty(req.DispatchTo), req.DispatchToLat, req.DispatchToLng,
+		nullIfEmpty(req.RegisteredAddress), nullIfEmpty(req.FactoryAddress),
+		nullIfEmpty(req.ContactPersonName), nullIfEmpty(req.ContactPersonPhone),
+		nullIfEmpty(req.ContactPersonEmail), nullIfEmpty(req.ContactPersonDesignation))
 
 	r, err := scanTrackerSavedRecipient(row)
 	if err != nil {
@@ -177,8 +205,11 @@ func UpdateTrackerSavedRecipient(c *gin.Context) {
 			booked_for_gstin=$5, booked_for_state=$6,
 			consignee_name=$7, consignee_email=$8, consignee_gstin=$9, consignee_state=$10,
 			dispatch_to=$11, dispatch_to_lat=$12, dispatch_to_lng=$13,
+			registered_address=$14, factory_address=$15,
+			contact_person_name=$16, contact_person_phone=$17,
+			contact_person_email=$18, contact_person_designation=$19,
 			updated_at=NOW()
-		WHERE id=$14 AND company_id=$15
+		WHERE id=$20 AND company_id=$21
 		RETURNING `+trackerSavedRecipientCols,
 		req.Label,
 		req.BookedForCompanyName, req.BookedForPhone, nullIfEmpty(req.BookedForEmail),
@@ -186,6 +217,9 @@ func UpdateTrackerSavedRecipient(c *gin.Context) {
 		nullIfEmpty(req.ConsigneeName), nullIfEmpty(req.ConsigneeEmail),
 		nullIfEmpty(req.ConsigneeGstin), nullIfEmpty(req.ConsigneeState),
 		nullIfEmpty(req.DispatchTo), req.DispatchToLat, req.DispatchToLng,
+		nullIfEmpty(req.RegisteredAddress), nullIfEmpty(req.FactoryAddress),
+		nullIfEmpty(req.ContactPersonName), nullIfEmpty(req.ContactPersonPhone),
+		nullIfEmpty(req.ContactPersonEmail), nullIfEmpty(req.ContactPersonDesignation),
 		recipientID, companyID)
 
 	r, err := scanTrackerSavedRecipient(row)

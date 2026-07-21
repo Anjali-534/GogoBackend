@@ -142,6 +142,26 @@ type TrackerOrder struct {
 	// normal editable field; manual entry/override always works.
 	ConsigneeState *string `json:"consignee_state"`
 	BookedForState *string `json:"booked_for_state"`
+
+	// Shipment-detail expansion (migration 043) — all optional, nullable.
+	// Existing orders predate these columns and come back null except
+	// Priority, which is NOT NULL DEFAULT 'normal' at the DB level.
+	RegisteredAddress        *string    `json:"registered_address"`
+	FactoryAddress           *string    `json:"factory_address"`
+	ContactPersonName        *string    `json:"contact_person_name"`
+	ContactPersonPhone       *string    `json:"contact_person_phone"`
+	ContactPersonEmail       *string    `json:"contact_person_email"`
+	ContactPersonDesignation *string    `json:"contact_person_designation"`
+	Priority                 string     `json:"priority"`
+	ExpectedDeliveryDate     *time.Time `json:"expected_delivery_date"`
+	DeclaredValue            *float64   `json:"declared_value"`
+	SpecialHandling          []string   `json:"special_handling"`
+	InternalReference        *string    `json:"internal_reference"`
+
+	// CC/BCC dispatch-email recipients — populated by a separate query
+	// against tracker_order_cc_emails, not part of the main SELECT below.
+	CCEmails  []string `json:"cc_emails"`
+	BCCEmails []string `json:"bcc_emails"`
 }
 
 // TrackerLocationPing is one point on an order's route trail.

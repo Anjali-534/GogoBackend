@@ -1250,3 +1250,38 @@ INSERT INTO promo_codes (code, discount_type, discount_value, min_fare, applies_
   ('TRUCK10',  'percent', 10,  500, 'truck'),
   ('NEWUSER',  'flat',    150, 250, 'cab'),
   ('NEWUSER',  'flat',    150, 300, 'truck');
+
+-- ===== 043_tracker_order_shipment_details.sql =====
+
+ALTER TABLE tracker_orders
+  ADD COLUMN IF NOT EXISTS registered_address       TEXT,
+  ADD COLUMN IF NOT EXISTS factory_address           TEXT,
+  ADD COLUMN IF NOT EXISTS contact_person_name       TEXT,
+  ADD COLUMN IF NOT EXISTS contact_person_phone      TEXT,
+  ADD COLUMN IF NOT EXISTS contact_person_email      TEXT,
+  ADD COLUMN IF NOT EXISTS contact_person_designation TEXT,
+  ADD COLUMN IF NOT EXISTS priority                  TEXT NOT NULL DEFAULT 'normal'
+                                CHECK (priority IN ('normal','urgent','same_day')),
+  ADD COLUMN IF NOT EXISTS expected_delivery_date    DATE,
+  ADD COLUMN IF NOT EXISTS declared_value            NUMERIC,
+  ADD COLUMN IF NOT EXISTS special_handling          TEXT[],
+  ADD COLUMN IF NOT EXISTS internal_reference        TEXT;
+
+CREATE TABLE IF NOT EXISTS tracker_order_cc_emails (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  order_id    UUID NOT NULL REFERENCES tracker_orders(id) ON DELETE CASCADE,
+  email       TEXT NOT NULL,
+  kind        TEXT NOT NULL CHECK (kind IN ('cc','bcc')),
+  created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_tracker_order_cc_emails_order_id
+  ON tracker_order_cc_emails(order_id);
+
+ALTER TABLE tracker_saved_recipients
+  ADD COLUMN IF NOT EXISTS registered_address        TEXT,
+  ADD COLUMN IF NOT EXISTS factory_address            TEXT,
+  ADD COLUMN IF NOT EXISTS contact_person_name        TEXT,
+  ADD COLUMN IF NOT EXISTS contact_person_phone       TEXT,
+  ADD COLUMN IF NOT EXISTS contact_person_email       TEXT,
+  ADD COLUMN IF NOT EXISTS contact_person_designation TEXT;
