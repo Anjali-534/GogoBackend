@@ -1406,6 +1406,13 @@ func UpdateTrackerCompanyOrderStatus(c *gin.Context) {
 		return
 	}
 
+	// Fire-and-forget — a status-change email failing must never surface as
+	// an error on the status update itself. maybeSendTrackerOrderStatusEmail
+	// is a no-op for statuses outside its own trigger allowlist (see
+	// tracker_status_email.go), so it's safe to call unconditionally here.
+	cfg := c.MustGet("config").(*config.Config)
+	maybeSendTrackerOrderStatusEmail(cfg, companyID, orderID, req.Status)
+
 	resp := gin.H{"message": "status updated"}
 	if newDriverToken != "" {
 		resp["driver_tracking_token"] = newDriverToken

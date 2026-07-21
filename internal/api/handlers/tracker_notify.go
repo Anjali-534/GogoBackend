@@ -124,7 +124,7 @@ func NotifyTrackerOrderStakeholders(c *gin.Context) {
 	if notificationEmail != nil && *notificationEmail != "" {
 		replyTo = *notificationEmail
 	}
-	fromName := companyName + " via Bogie Tracker"
+	fromName := "Bogie Tracker - " + companyName
 
 	var results []notifyResult
 	var sentTo []string

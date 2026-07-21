@@ -121,7 +121,11 @@ func sendTrackerOrderCreationEmail(cfg *config.Config, o TrackerOrder, companyNa
 			return // nobody to send to
 		}
 
-		attachments, skipped := buildTrackerCreationEmailAttachments(docs)
+		var attachables []trackerEmailAttachable
+		for _, d := range docs {
+			attachables = append(attachables, trackerEmailAttachable{Label: trackerDocDisplayLabel(d), FileURL: d.FileURL})
+		}
+		attachments, skipped := buildTrackerEmailAttachments(attachables)
 
 		trackingLink := strings.TrimRight(cfg.TrackerPanelURL, "/") + "/track/" + o.PublicTrackingToken
 
@@ -138,29 +142,39 @@ func sendTrackerOrderCreationEmail(cfg *config.Config, o TrackerOrder, companyNa
 			Subject:     subject,
 			Body:        buildTrackerCreationEmailBody(o, companyName, trackingLink, skipped),
 			Attachments: attachments,
-			FromName:    companyName + " via Bogie Tracker",
+			FromName:    "Bogie Tracker - " + companyName,
 		}); err != nil {
 			log.Printf("tracker creation email: send failed for order=%s: %v", o.ID, err)
 		}
 	}()
 }
 
-// buildTrackerCreationEmailAttachments fetches each document's bytes from
-// Cloudinary and greedily packs them into the raw-byte budget in upload
-// order, skipping (not aborting on) anything that doesn't fit — so one
-// large early document can't crowd out smaller ones that come after it.
-// Returns the attachments that fit and the display labels of ones that
-// didn't (or that failed to fetch), for the body's fallback note.
-func buildTrackerCreationEmailAttachments(docs []TrackerOrderDocument) ([]mail.Attachment, []string) {
+// trackerEmailAttachable is a genericized (label, file URL) pair — the
+// common shape buildTrackerEmailAttachments needs regardless of whether the
+// source is a tracker_order_documents row (creation email) or a single
+// proof-of-delivery signature image (status-change email, see
+// tracker_status_email.go).
+type trackerEmailAttachable struct {
+	Label   string
+	FileURL string
+}
+
+// buildTrackerEmailAttachments fetches each file's bytes from Cloudinary and
+// greedily packs them into the raw-byte budget in list order, skipping (not
+// aborting on) anything that doesn't fit — so one large early file can't
+// crowd out smaller ones that come after it. Returns the attachments that
+// fit and the labels of ones that didn't (or that failed to fetch), for the
+// body's fallback note.
+func buildTrackerEmailAttachments(files []trackerEmailAttachable) ([]mail.Attachment, []string) {
 	var attachments []mail.Attachment
 	var skipped []string
 	var total int64
 
 	client := &http.Client{Timeout: 20 * time.Second}
-	for _, d := range docs {
-		resp, err := client.Get(d.FileURL)
+	for _, f := range files {
+		resp, err := client.Get(f.FileURL)
 		if err != nil {
-			skipped = append(skipped, trackerDocDisplayLabel(d))
+			skipped = append(skipped, f.Label)
 			continue
 		}
 		// LimitReader+1 guards against a mis-sized/backfilled row (upload-
@@ -169,17 +183,21 @@ func buildTrackerCreationEmailAttachments(docs []TrackerOrderDocument) ([]mail.A
 		data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxFileSize+1))
 		resp.Body.Close()
 		if readErr != nil || int64(len(data)) > maxFileSize {
-			skipped = append(skipped, trackerDocDisplayLabel(d))
+			skipped = append(skipped, f.Label)
 			continue
 		}
 		if total+int64(len(data)) > trackerEmailAttachmentBudgetBytes {
-			skipped = append(skipped, trackerDocDisplayLabel(d))
+			skipped = append(skipped, f.Label)
 			continue
 		}
 		total += int64(len(data))
+		ext := trackerDocFileExt(f.FileURL)
+		if ext == "" {
+			ext = ".pdf"
+		}
 		attachments = append(attachments, mail.Attachment{
-			Filename:    trackerDocFilename(d),
-			ContentType: trackerDocContentType(d.FileURL),
+			Filename:    f.Label + ext,
+			ContentType: trackerDocContentType(f.FileURL),
 			Data:        data,
 		})
 	}
@@ -194,14 +212,6 @@ func trackerDocDisplayLabel(d TrackerOrderDocument) string {
 		return label
 	}
 	return d.DocType
-}
-
-func trackerDocFilename(d TrackerOrderDocument) string {
-	ext := trackerDocFileExt(d.FileURL)
-	if ext == "" {
-		ext = ".pdf"
-	}
-	return trackerDocDisplayLabel(d) + ext
 }
 
 func trackerDocContentType(fileURL string) string {
