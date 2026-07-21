@@ -1515,22 +1515,25 @@ func GetPublicTrackerOrder(c *gin.Context) {
 	var routeDurationMins *int
 	var signatureURL *string
 	var receivedConfirmedAt *time.Time
+	var companyName string
 	err := pool.QueryRow(ctx, `
-		SELECT id, status, dispatch_from, dispatch_to, vehicle_number,
-		       transporter_name, transporter_phone, driver_name, driver_phone,
-		       consignee_name, material, quantity, dispatch_datetime,
-		       last_lat, last_lng, last_location_at,
-		       dispatch_from_lat, dispatch_from_lng, dispatch_to_lat, dispatch_to_lng,
-		       route_polyline, route_distance_km, route_duration_mins,
-		       signature_url, received_confirmed_at
-		FROM tracker_orders WHERE public_tracking_token = $1
+		SELECT o.id, o.status, o.dispatch_from, o.dispatch_to, o.vehicle_number,
+		       o.transporter_name, o.transporter_phone, o.driver_name, o.driver_phone,
+		       o.consignee_name, o.material, o.quantity, o.dispatch_datetime,
+		       o.last_lat, o.last_lng, o.last_location_at,
+		       o.dispatch_from_lat, o.dispatch_from_lng, o.dispatch_to_lat, o.dispatch_to_lng,
+		       o.route_polyline, o.route_distance_km, o.route_duration_mins,
+		       o.signature_url, o.received_confirmed_at, c.company_name
+		FROM tracker_orders o
+		JOIN tracker_companies c ON c.id = o.company_id
+		WHERE o.public_tracking_token = $1
 	`, token).Scan(&orderID, &status, &dispatchFrom, &dispatchTo, &vehicleNumber,
 		&transporterName, &transporterPhone, &driverName, &driverPhone,
 		&consigneeName, &material, &quantity, &dispatchDatetime,
 		&lastLat, &lastLng, &lastLocationAt,
 		&dispatchFromLat, &dispatchFromLng, &dispatchToLat, &dispatchToLng,
 		&routePolyline, &routeDistanceKm, &routeDurationMins,
-		&signatureURL, &receivedConfirmedAt)
+		&signatureURL, &receivedConfirmedAt, &companyName)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "tracking link not found"})
 		return
@@ -1589,6 +1592,7 @@ func GetPublicTrackerOrder(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"status":                status,
+		"company_name":          companyName,
 		"dispatch_from":         dispatchFrom,
 		"dispatch_to":           dispatchTo,
 		"vehicle_number":        vehicleNumber,

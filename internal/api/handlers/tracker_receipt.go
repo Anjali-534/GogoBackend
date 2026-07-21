@@ -27,7 +27,7 @@ func GetTrackerReceiptOrder(c *gin.Context) {
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 
-	var status, dispatchFrom, dispatchTo, vehicleNumber string
+	var status, dispatchFrom, dispatchTo, vehicleNumber, companyName string
 	var material, quantity *string
 	var receivedConfirmedAt *time.Time
 	var deliveredAt *time.Time
@@ -36,11 +36,13 @@ func GetTrackerReceiptOrder(c *gin.Context) {
 		       o.material, o.quantity, o.received_confirmed_at,
 		       (SELECT e.created_at FROM tracker_order_events e
 		        WHERE e.order_id = o.id AND e.status = 'delivered'
-		        ORDER BY e.created_at DESC LIMIT 1)
+		        ORDER BY e.created_at DESC LIMIT 1),
+		       c.company_name
 		FROM tracker_orders o
+		JOIN tracker_companies c ON c.id = o.company_id
 		WHERE o.received_confirmation_token = $1
 	`, token).Scan(&status, &dispatchFrom, &dispatchTo, &vehicleNumber,
-		&material, &quantity, &receivedConfirmedAt, &deliveredAt)
+		&material, &quantity, &receivedConfirmedAt, &deliveredAt, &companyName)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "receipt link not found"})
 		return
@@ -48,6 +50,7 @@ func GetTrackerReceiptOrder(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"status":                status,
+		"company_name":          companyName,
 		"dispatch_from":         dispatchFrom,
 		"dispatch_to":           dispatchTo,
 		"vehicle_number":        vehicleNumber,
