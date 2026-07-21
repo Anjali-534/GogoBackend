@@ -199,6 +199,22 @@ var cabExtraFareMultipliers = map[string]float64{
 
 const truckAddonPrice = 200.0
 
+// haversineKm computes great-circle distance in km between two coordinates.
+// This mirrors the client's on-device estimate (booking/index.tsx) but runs
+// server-side so distance_km can no longer be set by the request — pricing
+// must never trust a client-reported distance. This is straight-line, not
+// routed, distance; swapping in the existing OSRM/route proxy for actual
+// road distance is a worthwhile future improvement but not required to
+// close the trust-boundary gap this closes.
+func haversineKm(aLat, aLng, bLat, bLng float64) float64 {
+    const R = 6371.0
+    dLat := (bLat - aLat) * math.Pi / 180
+    dLng := (bLng - aLng) * math.Pi / 180
+    x := math.Sin(dLat/2)*math.Sin(dLat/2) +
+        math.Cos(aLat*math.Pi/180)*math.Cos(bLat*math.Pi/180)*math.Sin(dLng/2)*math.Sin(dLng/2)
+    return R * 2 * math.Atan2(math.Sqrt(x), math.Sqrt(1-x))
+}
+
 func CreateBooking(c *gin.Context) {
     var req struct {
         ServiceTypeID string  `json:"service_type_id" binding:"required"`
@@ -209,7 +225,6 @@ func CreateBooking(c *gin.Context) {
         DropLng       float64 `json:"drop_lng" binding:"required"`
         DropAddress   string  `json:"drop_address" binding:"required"`
         EstimatedFare float64 `json:"estimated_fare"`
-        DistanceKm    float64 `json:"distance_km"`
         PromoCode     *string `json:"promo_code"`
         DiscountAmt   float64 `json:"discount_amount"`
         Source        string  `json:"source" binding:"omitempty,oneof=app website"`
@@ -302,14 +317,16 @@ func CreateBooking(c *gin.Context) {
     pool.QueryRow(ctx, `SELECT COALESCE(outstanding_cancellation_fee,0) FROM riders WHERE id=$1`, riderID).Scan(&outstandingFee)
 
     // Server-side fare engine — the client's estimated_fare is never trusted
-    // outright. We recompute the fare from the service_type's own pricing
-    // and the client-reported distance (distance itself isn't independently
-    // verified server-side — see the report accompanying this change).
+    // outright. Distance is recomputed server-side from pickup/drop
+    // coordinates (haversine, straight-line) rather than trusting a
+    // client-reported distance, so fare and the stored booking row can't
+    // be manipulated by sending a fake distance.
     // Every ambulance booking is priced and created as paid, including
     // Patient Transport/BLS/ALS — there is no client-side "free" path.
     // Free-ambulance status is only ever granted afterward by staff via
     // POST /bookings/:id/waive-ambulance-fare.
-    serverFare := math.Round(svcBaseFare + req.DistanceKm*svcPerKmRate)
+    serverDistanceKm := haversineKm(req.PickupLat, req.PickupLng, req.DropLat, req.DropLng)
+    serverFare := math.Round(svcBaseFare + serverDistanceKm*svcPerKmRate)
     if mult, ok := cabExtraFareMultipliers[req.VehicleSlug]; ok && req.VehicleSlug != svcSlug {
         serverFare = math.Round(serverFare * mult)
     }
@@ -354,7 +371,7 @@ func CreateBooking(c *gin.Context) {
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
     `,
         bookingID, riderID, req.ServiceTypeID, status, req.PickupLat, req.PickupLng, req.PickupAddress,
-        req.DropLat, req.DropLng, req.DropAddress, finalFareEstimate, req.DistanceKm, otp, req.Source,
+        req.DropLat, req.DropLng, req.DropAddress, finalFareEstimate, serverDistanceKm, otp, req.Source,
         req.IsScheduled && svcCategory != "ambulance", scheduledAt, req.ReceiverName, req.ReceiverPhone)
     if err != nil {
         log.Printf("CreateBooking insert error: %v", err)
