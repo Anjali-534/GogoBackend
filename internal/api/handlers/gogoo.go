@@ -1153,7 +1153,11 @@ func AcceptBooking(c *gin.Context) {
         return
     }
 
-    pool.Exec(ctx, `UPDATE bookings SET driver_id=$1,status='accepted',accepted_at=NOW() WHERE id=$2 AND status='searching'`, driverID, bookingID)
+    tag, _ := pool.Exec(ctx, `UPDATE bookings SET driver_id=$1,status='accepted',accepted_at=NOW() WHERE id=$2 AND status='searching'`, driverID, bookingID)
+    if tag.RowsAffected() == 0 {
+        c.JSON(http.StatusConflict, gin.H{"error": "This ride was already accepted by another driver"})
+        return
+    }
     c.JSON(http.StatusOK, gin.H{"status": "accepted", "driver_id": driverID})
 }
 
