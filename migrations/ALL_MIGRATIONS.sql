@@ -1285,3 +1285,23 @@ ALTER TABLE tracker_saved_recipients
   ADD COLUMN IF NOT EXISTS contact_person_phone       TEXT,
   ADD COLUMN IF NOT EXISTS contact_person_email       TEXT,
   ADD COLUMN IF NOT EXISTS contact_person_designation TEXT;
+
+-- ===== 044_tracker_order_documents.sql =====
+
+CREATE TABLE IF NOT EXISTS tracker_order_documents (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  order_id      UUID NOT NULL REFERENCES tracker_orders(id) ON DELETE CASCADE,
+  doc_type      TEXT NOT NULL CHECK (doc_type IN ('coa','invoice','lr','eway_bill','other')),
+  custom_label  TEXT,
+  file_url      TEXT NOT NULL,
+  expiry_date   DATE,
+  created_at    TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_tracker_order_documents_order_id
+  ON tracker_order_documents(order_id);
+
+INSERT INTO tracker_order_documents (order_id, doc_type, file_url, created_at)
+SELECT id, 'eway_bill', eway_bill_file_url, created_at
+FROM tracker_orders
+WHERE eway_bill_file_url IS NOT NULL AND eway_bill_file_url <> '';

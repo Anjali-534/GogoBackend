@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -1108,27 +1109,20 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 	}
 	o.DriverID = driverID
 
-	ccRows, err := pool.Query(ctx, `
-		SELECT email, kind FROM tracker_order_cc_emails WHERE order_id = $1
-	`, orderID)
+	cc, bcc, err := fetchTrackerOrderCCEmails(ctx, pool, orderID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error: " + err.Error()})
 		return
 	}
-	defer ccRows.Close()
-	o.CCEmails = []string{}
-	o.BCCEmails = []string{}
-	for ccRows.Next() {
-		var email, kind string
-		if err := ccRows.Scan(&email, &kind); err != nil {
-			continue
-		}
-		if kind == "bcc" {
-			o.BCCEmails = append(o.BCCEmails, email)
-		} else {
-			o.CCEmails = append(o.CCEmails, email)
-		}
+	o.CCEmails = cc
+	o.BCCEmails = bcc
+
+	docs, err := fetchTrackerOrderDocuments(ctx, pool, orderID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error: " + err.Error()})
+		return
 	}
+	o.Documents = docs
 
 	// Lazy backfill: if the create-time route fetch failed (or the order
 	// predates route caching) but we have both coordinate pairs, retry in the
@@ -1541,6 +1535,250 @@ func UploadTrackerOrderEwayBill(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"file_url": fileURL, "message": "e-way bill uploaded"})
 }
 
+// validTrackerDocTypes matches the CHECK constraint added in migration 044.
+var validTrackerDocTypes = map[string]bool{
+	"coa":       true,
+	"invoice":   true,
+	"lr":        true,
+	"eway_bill": true,
+	"other":     true,
+}
+
+// uploadTrackerOrderFile is the shared upload core for order documents —
+// same Cloudinary-with-local-disk-fallback pattern as UploadTrackerOrderEwayBill,
+// factored out so it can be reused by the multi-document endpoint below
+// without duplicating the mime/size validation and dual storage branches.
+func uploadTrackerOrderFile(ctx context.Context, c *gin.Context, companyID, orderID, docType string, file multipart.File, header *multipart.FileHeader) (string, bool) {
+	mimeType := header.Header.Get("Content-Type")
+	if idx := strings.Index(mimeType, ";"); idx > 0 {
+		mimeType = strings.TrimSpace(mimeType[:idx])
+	}
+	ext, allowed := allowedMimeTypes[mimeType]
+	if !allowed {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "only JPG, PNG and PDF files allowed"})
+		return "", false
+	}
+	if header.Size > maxFileSize {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file must be under 10MB"})
+		return "", false
+	}
+
+	if os.Getenv("CLOUDINARY_CLOUD_NAME") != "" {
+		publicID := fmt.Sprintf("gogoo/tracker_orders/%s/%s_%s", orderID, docType, uuid.New().String()[:8])
+		secureURL, err := uploadToCloudinaryWithPublicID(ctx, file, header.Filename, publicID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "cloud storage error: " + err.Error()})
+			return "", false
+		}
+		return secureURL, true
+	}
+
+	uploadDir := filepath.Join("uploads", "tracker", companyID)
+	if err := os.MkdirAll(uploadDir, 0755); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "storage error"})
+		return "", false
+	}
+	localName := docType + "_" + orderID + "_" + uuid.New().String()[:8] + ext
+	filePath := filepath.Join(uploadDir, localName)
+	dst, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save file"})
+		return "", false
+	}
+	_, err = dst.ReadFrom(file)
+	dst.Close()
+	if err != nil {
+		os.Remove(filePath)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to write file"})
+		return "", false
+	}
+	return "/uploads/tracker/" + companyID + "/" + localName, true
+}
+
+// POST /gogoo/tracker/orders/:id/documents (multipart/form-data: file,
+// doc_type, custom_label (only meaningful/stored when doc_type='other'),
+// expiry_date (YYYY-MM-DD, optional)). Every doc_type is always optional —
+// there is no mandatory-document enforcement (COA/Invoice/LR/E-way
+// Bill/Other are all equally optional, regardless of declared value).
+func UploadTrackerOrderDocument(c *gin.Context) {
+	companyID := c.GetString("company_id")
+	orderID := c.Param("id")
+
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+
+	var exists bool
+	if err := pool.QueryRow(ctx, `
+		SELECT EXISTS(SELECT 1 FROM tracker_orders WHERE id=$1 AND company_id=$2)
+	`, orderID, companyID).Scan(&exists); err != nil || !exists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
+		return
+	}
+
+	if err := c.Request.ParseMultipartForm(maxFileSize); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file too large — max 10MB allowed"})
+		return
+	}
+
+	docType := c.Request.FormValue("doc_type")
+	if !validTrackerDocTypes[docType] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid doc_type"})
+		return
+	}
+	customLabel := c.Request.FormValue("custom_label")
+
+	var expiryDate *time.Time
+	if raw := c.Request.FormValue("expiry_date"); raw != "" {
+		parsed, err := time.Parse("2006-01-02", raw)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "expiry_date must be YYYY-MM-DD"})
+			return
+		}
+		expiryDate = &parsed
+	}
+
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file is required"})
+		return
+	}
+	defer file.Close()
+
+	fileURL, ok := uploadTrackerOrderFile(ctx, c, companyID, orderID, docType, file, header)
+	if !ok {
+		return
+	}
+
+	var doc TrackerOrderDocument
+	err = pool.QueryRow(ctx, `
+		INSERT INTO tracker_order_documents (order_id, doc_type, custom_label, file_url, expiry_date)
+		VALUES ($1,$2,$3,$4,$5)
+		RETURNING id, order_id, doc_type, custom_label, file_url, expiry_date, created_at
+	`, orderID, docType, nullIfEmpty(customLabel), fileURL, expiryDate).Scan(
+		&doc.ID, &doc.OrderID, &doc.DocType, &doc.CustomLabel, &doc.FileURL, &doc.ExpiryDate, &doc.CreatedAt,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, doc)
+}
+
+// GET /gogoo/tracker/orders/:id/documents
+func ListTrackerOrderDocuments(c *gin.Context) {
+	companyID := c.GetString("company_id")
+	orderID := c.Param("id")
+
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+
+	var exists bool
+	if err := pool.QueryRow(ctx, `
+		SELECT EXISTS(SELECT 1 FROM tracker_orders WHERE id=$1 AND company_id=$2)
+	`, orderID, companyID).Scan(&exists); err != nil || !exists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
+		return
+	}
+
+	docs, err := fetchTrackerOrderDocuments(ctx, pool, orderID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error: " + err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, docs)
+}
+
+// fetchTrackerOrderCCEmails is shared by GetTrackerCompanyOwnOrder and
+// SendTrackerOrderCreationEmail (tracker_creation_email.go) — order
+// ownership must already be verified by the caller.
+func fetchTrackerOrderCCEmails(ctx context.Context, pool *pgxpool.Pool, orderID string) (cc, bcc []string, err error) {
+	rows, err := pool.Query(ctx, `
+		SELECT email, kind FROM tracker_order_cc_emails WHERE order_id = $1
+	`, orderID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	cc = []string{}
+	bcc = []string{}
+	for rows.Next() {
+		var email, kind string
+		if err := rows.Scan(&email, &kind); err != nil {
+			continue
+		}
+		if kind == "bcc" {
+			bcc = append(bcc, email)
+		} else {
+			cc = append(cc, email)
+		}
+	}
+	return cc, bcc, nil
+}
+
+// fetchTrackerOrderDocuments is shared by ListTrackerOrderDocuments and
+// GetTrackerCompanyOwnOrder (which embeds the document list in the order
+// detail response) — order ownership must already be verified by the caller.
+func fetchTrackerOrderDocuments(ctx context.Context, pool *pgxpool.Pool, orderID string) ([]TrackerOrderDocument, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT id, order_id, doc_type, custom_label, file_url, expiry_date, created_at
+		FROM tracker_order_documents
+		WHERE order_id = $1
+		ORDER BY created_at ASC
+	`, orderID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	docs := []TrackerOrderDocument{}
+	for rows.Next() {
+		var d TrackerOrderDocument
+		if err := rows.Scan(&d.ID, &d.OrderID, &d.DocType, &d.CustomLabel, &d.FileURL, &d.ExpiryDate, &d.CreatedAt); err != nil {
+			continue
+		}
+		docs = append(docs, d)
+	}
+	return docs, nil
+}
+
+// DELETE /gogoo/tracker/orders/:id/documents/:docId
+func DeleteTrackerOrderDocument(c *gin.Context) {
+	companyID := c.GetString("company_id")
+	orderID := c.Param("id")
+	docID := c.Param("docId")
+
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+
+	var exists bool
+	if err := pool.QueryRow(ctx, `
+		SELECT EXISTS(SELECT 1 FROM tracker_orders WHERE id=$1 AND company_id=$2)
+	`, orderID, companyID).Scan(&exists); err != nil || !exists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
+		return
+	}
+
+	var fileURL string
+	err := pool.QueryRow(ctx, `
+		DELETE FROM tracker_order_documents WHERE id=$1 AND order_id=$2 RETURNING file_url
+	`, docID, orderID).Scan(&fileURL)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "document not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+
+	if strings.HasPrefix(fileURL, "https://res.cloudinary.com") {
+		go deleteFromCloudinary(fileURL)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "document removed"})
+}
+
 // allowedLogoMimeTypes restricts logo uploads to images only — unlike KYC
 // documents and e-way bills, a PDF doesn't make sense as a company logo.
 var allowedLogoMimeTypes = map[string]string{
@@ -1799,8 +2037,38 @@ func GetPublicTrackerOrder(c *gin.Context) {
 		return
 	}
 
+	// Public-safe document subset — doc_type/custom_label/file_url only, no
+	// expiry_date or internal ids. This is what makes the creation email's
+	// "exceeded email size limits, view it here" fallback (see
+	// tracker_creation_email.go) an actually-true statement instead of a
+	// dead end: the recipient can open this same tracking link and get the
+	// file directly from Cloudinary.
+	type publicDocument struct {
+		DocType     string  `json:"doc_type"`
+		CustomLabel *string `json:"custom_label"`
+		FileURL     string  `json:"file_url"`
+	}
+	docRows, err := pool.Query(ctx, `
+		SELECT doc_type, custom_label, file_url FROM tracker_order_documents
+		WHERE order_id = $1 ORDER BY created_at ASC
+	`, orderID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	defer docRows.Close()
+	documents := []publicDocument{}
+	for docRows.Next() {
+		var d publicDocument
+		if err := docRows.Scan(&d.DocType, &d.CustomLabel, &d.FileURL); err != nil {
+			continue
+		}
+		documents = append(documents, d)
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"status":                status,
+		"documents":             documents,
 		"company_name":          companyName,
 		"dispatch_from":         dispatchFrom,
 		"dispatch_to":           dispatchTo,

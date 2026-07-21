@@ -35,6 +35,12 @@ type Message struct {
 	Body        string
 	Attachments []Attachment
 
+	// CC and BCC are comma-joined address lists, same convention as To —
+	// used by the shipment-creation email (see tracker_creation_email.go),
+	// which fans out to a company's variable-length CC/BCC list.
+	CC  string
+	BCC string
+
 	// FromName overrides cfg.SMTPFromName for this send only — e.g. dispatch
 	// emails go out as "<company name> via Bogie Tracker" so the recipient
 	// knows which company booked the shipment, while the underlying address
@@ -61,7 +67,9 @@ type resendAttachment struct {
 
 type resendPayload struct {
 	From        string             `json:"from"`
-	To          []string           `json:"to"`
+	To          []string           `json:"to,omitempty"`
+	Cc          []string           `json:"cc,omitempty"`
+	Bcc         []string           `json:"bcc,omitempty"`
 	Subject     string             `json:"subject"`
 	Text        string             `json:"text"`
 	ReplyTo     string             `json:"reply_to,omitempty"`
@@ -72,6 +80,13 @@ type resendPayload struct {
 // (an address on bogie.in, which is verified on Resend — that's what lets
 // this deliver to arbitrary recipients instead of only the account owner's
 // own address, which is all Resend's unverified sandbox domain allows).
+//
+// Resend caps total attachment size at 40MB *after* Base64 encoding (see
+// https://resend.com/docs/api-reference/emails/send-email) — callers
+// building Attachments from raw file bytes should budget conservatively
+// below the ~30MB raw-byte break-even (Base64 inflates by ~4/3) to leave
+// headroom for encoding rounding. See tracker_creation_email.go for the one
+// caller that currently needs to reason about this.
 func Send(cfg *config.Config, msg Message) error {
 	if !IsConfigured(cfg) {
 		return fmt.Errorf("resend not configured (RESEND_API_KEY/RESEND_FROM_EMAIL missing)")
@@ -88,10 +103,18 @@ func Send(cfg *config.Config, msg Message) error {
 
 	payload := resendPayload{
 		From:    from,
-		To:      strings.Split(msg.To, ","),
 		Subject: msg.Subject,
 		Text:    msg.Body,
 		ReplyTo: msg.ReplyTo,
+	}
+	if msg.To != "" {
+		payload.To = strings.Split(msg.To, ",")
+	}
+	if msg.CC != "" {
+		payload.Cc = strings.Split(msg.CC, ",")
+	}
+	if msg.BCC != "" {
+		payload.Bcc = strings.Split(msg.BCC, ",")
 	}
 	for _, a := range msg.Attachments {
 		payload.Attachments = append(payload.Attachments, resendAttachment{

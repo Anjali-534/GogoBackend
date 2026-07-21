@@ -162,6 +162,23 @@ type TrackerOrder struct {
 	// against tracker_order_cc_emails, not part of the main SELECT below.
 	CCEmails  []string `json:"cc_emails"`
 	BCCEmails []string `json:"bcc_emails"`
+
+	// Documents (migration 044) — populated by a separate query against
+	// tracker_order_documents, not part of the main SELECT below.
+	Documents []TrackerOrderDocument `json:"documents"`
+}
+
+// TrackerOrderDocument is one uploaded file attached to an order — COA,
+// Invoice, LR, E-way Bill, or a custom-labeled "Other". Every doc_type is
+// always optional; there is no mandatory-document enforcement.
+type TrackerOrderDocument struct {
+	ID          string     `json:"id"`
+	OrderID     string     `json:"order_id"`
+	DocType     string     `json:"doc_type"`
+	CustomLabel *string    `json:"custom_label"`
+	FileURL     string     `json:"file_url"`
+	ExpiryDate  *time.Time `json:"expiry_date"`
+	CreatedAt   time.Time  `json:"created_at"`
 }
 
 // TrackerLocationPing is one point on an order's route trail.
