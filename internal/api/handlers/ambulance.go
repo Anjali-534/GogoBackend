@@ -98,6 +98,51 @@ func GetNGOs(c *gin.Context) {
 	c.JSON(http.StatusOK, ngos)
 }
 
+// GET /gogoo/ambulance/ngos/public
+// Unauthenticated, rider-facing directory of active free-ambulance NGOs.
+// The panel's GetNGOs above returns admin-only fields (email, pincode,
+// is_verified, notes, ...) and every NGO regardless of status — not
+// appropriate to expose publicly. This mirrors the existing
+// GetNearbyHospitals public-route pattern: active rows only, minimal
+// fields, no auth required since the free-ambulance info screen
+// (user-app ambulance/free-info.tsx) is shown without guaranteeing a
+// valid session and this directory data isn't sensitive.
+func GetPublicNGOs(c *gin.Context) {
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+
+	rows, err := pool.Query(ctx, `
+		SELECT id, name, COALESCE(area,''), vehicle_count,
+		       COALESCE(coverage_areas, ARRAY[]::TEXT[])
+		FROM ambulance_ngos
+		WHERE is_active = TRUE
+		ORDER BY name
+	`)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	defer rows.Close()
+
+	type publicNGO struct {
+		ID            string   `json:"id"`
+		Name          string   `json:"name"`
+		Area          string   `json:"area"`
+		VehicleCount  int      `json:"vehicle_count"`
+		CoverageAreas []string `json:"coverage_areas"`
+	}
+	var ngos []publicNGO
+	for rows.Next() {
+		var n publicNGO
+		rows.Scan(&n.ID, &n.Name, &n.Area, &n.VehicleCount, &n.CoverageAreas)
+		ngos = append(ngos, n)
+	}
+	if ngos == nil {
+		ngos = []publicNGO{}
+	}
+	c.JSON(http.StatusOK, ngos)
+}
+
 // POST /gogoo/ambulance/ngos
 func CreateNGO(c *gin.Context) {
 	var req struct {
