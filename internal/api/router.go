@@ -201,7 +201,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.POST("/rider/saved-places", handlers.SavePlace)
 		gogoo.DELETE("/rider/saved-places/:label", handlers.DeleteSavedPlace)
 		// Driver ride history + block management (admin)
-		gogoo.GET("/drivers/:id/bookings", handlers.ListDriverBookingsByID)
+		gogoo.GET("/drivers/:id/bookings", middleware.RequirePanel("cab"), handlers.ListDriverBookingsByID)
 		gogoo.PATCH("/drivers/:id/block", middleware.RequirePanel("cab", "truck", "ambulance", "support"), handlers.ManageDriverBlock)
 		// Rider ride history (admin)
 		gogoo.GET("/riders/:id/bookings", handlers.ListRiderBookingsByID)
