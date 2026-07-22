@@ -19,6 +19,7 @@ import (
     "github.com/gin-gonic/gin"
     "github.com/golang-jwt/jwt/v5"
     "github.com/google/uuid"
+    "github.com/jackc/pgx/v5/pgxpool"
     "golang.org/x/crypto/bcrypt"
 )
 
@@ -215,51 +216,54 @@ func haversineKm(aLat, aLng, bLat, bLng float64) float64 {
     return R * 2 * math.Atan2(math.Sqrt(x), math.Sqrt(1-x))
 }
 
+// createBookingRequest is CreateBooking's request body, factored out to a
+// named type so createBookingCore can also be called from
+// CreateTrackerCompanyRide (tracker.go) with the same binding/validation.
+type createBookingRequest struct {
+    ServiceTypeID string  `json:"service_type_id" binding:"required"`
+    PickupLat     float64 `json:"pickup_lat" binding:"required"`
+    PickupLng     float64 `json:"pickup_lng" binding:"required"`
+    PickupAddress string  `json:"pickup_address" binding:"required"`
+    DropLat       float64 `json:"drop_lat" binding:"required"`
+    DropLng       float64 `json:"drop_lng" binding:"required"`
+    DropAddress   string  `json:"drop_address" binding:"required"`
+    EstimatedFare float64 `json:"estimated_fare"`
+    PromoCode     *string `json:"promo_code"`
+    DiscountAmt   float64 `json:"discount_amount"`
+    Source        string  `json:"source" binding:"omitempty,oneof=app website"`
+    // Cab "extra" vehicle variant (cab_any/cab_prime_sed/cab_mini_nonac);
+    // blank or unrecognized means the plain service_type fare applies.
+    VehicleSlug string `json:"vehicle_slug"`
+    // Truck addons (flat ₹200 each, matches truck/addons.tsx)
+    LoadingAddon   bool `json:"loading_addon"`
+    UnloadingAddon bool `json:"unloading_addon"`
+    // Ambulance-specific fields
+    HospitalID       *string `json:"hospital_id"`
+    HospitalName     *string `json:"hospital_name"`
+    AmbulanceSubType *string `json:"ambulance_sub_type"`
+    // is_free_ambulance is deliberately not bound here — it's never
+    // client-controlled. Every ambulance booking is created as paid;
+    // staff flip it via POST /bookings/:id/waive-ambulance-fare.
+    PurposeType      *string `json:"purpose_type"`
+    PatientName      *string `json:"patient_name"`
+    ContactPhone     *string `json:"contact_phone"`
+    MedicalNotes     *string `json:"medical_notes"`
+    // Scheduled rides
+    IsScheduled bool   `json:"is_scheduled"`
+    ScheduledAt string `json:"scheduled_at"` // ISO 8601
+    // Receiver details (truck/parcel deliveries)
+    ReceiverName  *string `json:"receiver_name"`
+    ReceiverPhone *string `json:"receiver_phone"`
+}
+
 func CreateBooking(c *gin.Context) {
-    var req struct {
-        ServiceTypeID string  `json:"service_type_id" binding:"required"`
-        PickupLat     float64 `json:"pickup_lat" binding:"required"`
-        PickupLng     float64 `json:"pickup_lng" binding:"required"`
-        PickupAddress string  `json:"pickup_address" binding:"required"`
-        DropLat       float64 `json:"drop_lat" binding:"required"`
-        DropLng       float64 `json:"drop_lng" binding:"required"`
-        DropAddress   string  `json:"drop_address" binding:"required"`
-        EstimatedFare float64 `json:"estimated_fare"`
-        PromoCode     *string `json:"promo_code"`
-        DiscountAmt   float64 `json:"discount_amount"`
-        Source        string  `json:"source" binding:"omitempty,oneof=app website"`
-        // Cab "extra" vehicle variant (cab_any/cab_prime_sed/cab_mini_nonac);
-        // blank or unrecognized means the plain service_type fare applies.
-        VehicleSlug string `json:"vehicle_slug"`
-        // Truck addons (flat ₹200 each, matches truck/addons.tsx)
-        LoadingAddon   bool `json:"loading_addon"`
-        UnloadingAddon bool `json:"unloading_addon"`
-        // Ambulance-specific fields
-        HospitalID       *string `json:"hospital_id"`
-        HospitalName     *string `json:"hospital_name"`
-        AmbulanceSubType *string `json:"ambulance_sub_type"`
-        // is_free_ambulance is deliberately not bound here — it's never
-        // client-controlled. Every ambulance booking is created as paid;
-        // staff flip it via POST /bookings/:id/waive-ambulance-fare.
-        PurposeType      *string `json:"purpose_type"`
-        PatientName      *string `json:"patient_name"`
-        ContactPhone     *string `json:"contact_phone"`
-        MedicalNotes     *string `json:"medical_notes"`
-        // Scheduled rides
-        IsScheduled bool   `json:"is_scheduled"`
-        ScheduledAt string `json:"scheduled_at"` // ISO 8601
-        // Receiver details (truck/parcel deliveries)
-        ReceiverName  *string `json:"receiver_name"`
-        ReceiverPhone *string `json:"receiver_phone"`
-    }
+    var req createBookingRequest
     if err := c.ShouldBindJSON(&req); err != nil {
         log.Printf("CreateBooking bind error: %v", err)
         c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body: " + err.Error()})
         return
     }
-    if req.Source == "" {
-        req.Source = "app"
-    }
+
     ctx := context.Background()
     pool := db.GetDB().GetPool()
 
@@ -271,6 +275,21 @@ func CreateBooking(c *gin.Context) {
         log.Printf("CreateBooking: no rider profile for user_id=%s (err=%v)", userID, err)
         c.JSON(http.StatusBadRequest, gin.H{"error": "rider profile not found"})
         return
+    }
+
+    createBookingCore(c, ctx, pool, riderID, req)
+}
+
+// createBookingCore is CreateBooking's actual booking-creation logic —
+// validation, server-side fare engine, promo handling, insert, dispatch —
+// shared verbatim by CreateTrackerCompanyRide (tracker.go), which resolves
+// riderID via trackerrider.EnsureTrackerCompanyRiderProfile instead of a
+// rider JWT. Nothing below this point should re-diverge between the two
+// callers; add new booking fields to createBookingRequest, not to a
+// per-caller copy.
+func createBookingCore(c *gin.Context, ctx context.Context, pool *pgxpool.Pool, riderID string, req createBookingRequest) {
+    if req.Source == "" {
+        req.Source = "app"
     }
 
     // Coordinates are deliberately not logged — precise pickup/drop GPS is

@@ -30,6 +30,7 @@ import (
 	"github.com/deploykit/backend/internal/dateutil"
 	"github.com/deploykit/backend/internal/db"
 	"github.com/deploykit/backend/internal/services/trackerbilling"
+	"github.com/deploykit/backend/internal/services/trackerrider"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -607,6 +608,40 @@ func DeactivateTrackerCompanyDriver(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "driver deactivated"})
+}
+
+// ─── Rides ──────────────────────────────────────────────────────────────────
+
+// POST /gogoo/tracker/companies/rides
+//
+// Lets a Bogie Tracker company book a ride through the same rider-booking
+// pipeline used by the consumer app, without needing a real rider account —
+// the company books "as" its own synthetic rider, provisioned lazily by
+// trackerrider.EnsureTrackerCompanyRiderProfile on first use. Binds the
+// exact same createBookingRequest CreateBooking does (gogoo.go) and hands
+// off to the same createBookingCore, so validation, the server-side fare
+// engine, promo handling, and dispatch never diverge between a normal rider
+// booking and a tracker-company one — only how rider_id is resolved differs.
+func CreateTrackerCompanyRide(c *gin.Context) {
+	var req createBookingRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		log.Printf("CreateTrackerCompanyRide bind error: %v", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body: " + err.Error()})
+		return
+	}
+
+	companyID := c.GetString("company_id")
+	ctx := context.Background()
+
+	riderID, err := trackerrider.EnsureTrackerCompanyRiderProfile(ctx, companyID)
+	if err != nil {
+		log.Printf("CreateTrackerCompanyRide: ensure rider profile failed for company=%s: %v", companyID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to prepare booking profile"})
+		return
+	}
+
+	pool := db.GetDB().GetPool()
+	createBookingCore(c, ctx, pool, riderID, req)
 }
 
 // ─── Orders ─────────────────────────────────────────────────────────────────

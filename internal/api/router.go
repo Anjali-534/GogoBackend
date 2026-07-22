@@ -297,6 +297,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.GET("/tracker/company/profile", middleware.RequireTrackerCompany(), handlers.GetTrackerCompanyProfile)
 		gogoo.PATCH("/tracker/company/profile", middleware.RequireTrackerCompany(), handlers.UpdateTrackerCompanyProfile)
 		gogoo.POST("/tracker/company/password", middleware.RequireTrackerCompany(), handlers.UpdateTrackerCompanyPassword)
+		gogoo.POST("/tracker/companies/rides", middleware.RequireTrackerCompany(), handlers.CreateTrackerCompanyRide)
 		gogoo.GET("/tracker/drivers", middleware.RequireTrackerCompany(), handlers.ListTrackerCompanyOwnDrivers)
 		gogoo.POST("/tracker/drivers", middleware.RequireTrackerCompany(), handlers.CreateTrackerCompanyDriver)
 		gogoo.PATCH("/tracker/drivers/:id", middleware.RequireTrackerCompany(), handlers.UpdateTrackerCompanyDriver)
