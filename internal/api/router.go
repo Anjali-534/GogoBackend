@@ -375,7 +375,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.POST("/support/tickets/:id/refund", middleware.RequirePanel("support"), handlers.ProcessRefund)
 		gogoo.GET("/support/tickets/:id/messages", middleware.RequirePanel("support"), handlers.GetTicketMessages)
 		gogoo.POST("/support/tickets/:id/messages", middleware.RequirePanel("support"), handlers.SendTicketMessage)
-		gogoo.GET("/support/stats", handlers.GetSupportStats)
+		gogoo.GET("/support/stats", middleware.RequirePanel("support"), handlers.GetSupportStats)
 		gogoo.POST("/support/cancel-booking/:id", middleware.RequirePanel("support"), handlers.SupportCancelBooking)
 		gogoo.POST("/support/block-rider/:id", middleware.RequirePanel("support"), handlers.SupportBlockRider)
 
