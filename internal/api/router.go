@@ -40,6 +40,11 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		public.GET("/r/:code", handlers.ReferralLandingUser)
 		public.GET("/dr/:code", handlers.ReferralLandingDriver)
 		public.GET("/driver-app", handlers.DriverAppLanding)
+
+		// Bogie Wallet top-up webhook — Razorpay calls this directly with no
+		// app JWT. Trust comes entirely from the verified signature inside
+		// the handler, never from auth middleware.
+		public.POST("/gogoo/wallet/topup/webhook", handlers.WalletTopupWebhook)
 	}
 
 	// ============================================================
@@ -212,6 +217,13 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.GET("/driver/ledger", handlers.GetDriverLedger)
 		gogoo.GET("/driver/ledger/pdf", handlers.GetDriverLedgerPDF)
 		gogoo.GET("/driver/earnings/summary", handlers.GetEarningsSummary)
+
+		// Bogie Wallet (rider) — the create-order endpoint needs the caller's
+		// JWT to resolve rider_id, so it lives here. The webhook is public
+		// (Razorpay calls it directly, no app JWT) and is registered in the
+		// public group below instead.
+		gogoo.POST("/wallet/topup/create-order", handlers.CreateWalletTopupOrder)
+		gogoo.GET("/wallet/ledger", handlers.GetWalletLedger)
 
 		// Admin driver payments
 		gogoo.GET("/admin/driver-payments", middleware.RequirePanel("support"), handlers.AdminDriverPayments)

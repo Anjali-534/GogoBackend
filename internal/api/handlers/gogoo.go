@@ -254,6 +254,12 @@ type createBookingRequest struct {
     // Receiver details (truck/parcel deliveries)
     ReceiverName  *string `json:"receiver_name"`
     ReceiverPhone *string `json:"receiver_phone"`
+    // Payment method chosen at booking time. Only "wallet" is ever stored
+    // as such — anything else (including blank) is "cash", matching the
+    // column's own DB default. The actual wallet debit doesn't happen here;
+    // it happens atomically at ride completion (see UpdateBookingStatus),
+    // so an insufficient balance can still fall back to cash later.
+    PaymentMethod string `json:"payment_method"`
 }
 
 func CreateBooking(c *gin.Context) {
@@ -432,6 +438,25 @@ func createBookingCore(c *gin.Context, ctx context.Context, pool *pgxpool.Pool, 
     }
     finalFareEstimate := expected
 
+    paymentMethod := "cash"
+    if req.PaymentMethod == "wallet" {
+        paymentMethod = "wallet"
+    }
+    // Ambulance never shows a payment-method toggle — asking someone to pick
+    // cash vs. wallet in an emergency flow is exactly the friction that
+    // shouldn't exist there. Instead, silently prefer wallet whenever the
+    // rider's real-time balance actually covers the fare; otherwise it's
+    // cash, same as before. This is a server-side default, never a client
+    // choice — req.PaymentMethod is ignored entirely for this category.
+    if svcCategory == "ambulance" {
+        paymentMethod = "cash"
+        var walletBalance float64
+        pool.QueryRow(ctx, `SELECT COALESCE(wallet_balance,0) FROM riders WHERE id=$1`, riderID).Scan(&walletBalance)
+        if walletBalance >= finalFareEstimate {
+            paymentMethod = "wallet"
+        }
+    }
+
     bookingID := uuid.New()
     n, _ := rand.Int(rand.Reader, big.NewInt(10000))
     otp := fmt.Sprintf("%04d", n.Int64())
@@ -439,12 +464,12 @@ func createBookingCore(c *gin.Context, ctx context.Context, pool *pgxpool.Pool, 
         INSERT INTO bookings
             (id,rider_id,service_type_id,status,pickup_lat,pickup_lng,pickup_address,
              drop_lat,drop_lng,drop_address,estimated_fare,distance_km,ride_otp,source,
-             is_scheduled,scheduled_at,receiver_name,receiver_phone)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+             is_scheduled,scheduled_at,receiver_name,receiver_phone,payment_method)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
     `,
         bookingID, riderID, req.ServiceTypeID, status, req.PickupLat, req.PickupLng, req.PickupAddress,
         req.DropLat, req.DropLng, req.DropAddress, finalFareEstimate, serverDistanceKm, otp, req.Source,
-        req.IsScheduled && svcCategory != "ambulance", scheduledAt, req.ReceiverName, req.ReceiverPhone)
+        req.IsScheduled && svcCategory != "ambulance", scheduledAt, req.ReceiverName, req.ReceiverPhone, paymentMethod)
     if err != nil {
         log.Printf("CreateBooking insert error: %v", err)
         c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create booking: " + err.Error()})
@@ -488,7 +513,7 @@ func createBookingCore(c *gin.Context, ctx context.Context, pool *pgxpool.Pool, 
         notifyDriversOfNewRide(bookingID.String(), svcCategory, req.PickupAddress, finalFareEstimate)
     }
 
-    resp := gin.H{"booking_id": bookingID, "status": status, "is_scheduled": status == "scheduled"}
+    resp := gin.H{"booking_id": bookingID, "status": status, "is_scheduled": status == "scheduled", "payment_method": paymentMethod}
     if scheduledAt != nil {
         resp["scheduled_at"] = scheduledAt
     }
@@ -1319,6 +1344,25 @@ func UpdateBookingStatus(c *gin.Context) {
         var finalFare float64
         pool.QueryRow(ctx, `SELECT COALESCE(estimated_fare,0) FROM bookings WHERE id=$1`, bookingID).Scan(&finalFare)
         pool.Exec(ctx, `UPDATE bookings SET status='completed',completed_at=NOW(),final_fare=$1 WHERE id=$2`, finalFare, bookingID)
+
+        // Wallet debit — the only place a ride's fare is actually collected
+        // from a rider's wallet. Booked as payment_method='wallet' but the
+        // balance has since dropped below the final fare? Fall back to cash
+        // rather than blocking completion — the driver has already done the
+        // work, so the ride is never left half-paid.
+        var completedRiderID, completedDriverIDForPayment, bookingPaymentMethod string
+        pool.QueryRow(ctx, `SELECT rider_id, COALESCE(driver_id::text,''), payment_method FROM bookings WHERE id=$1`, bookingID).
+            Scan(&completedRiderID, &completedDriverIDForPayment, &bookingPaymentMethod)
+
+        walletFallbackToCash := false
+        if bookingPaymentMethod == "wallet" && finalFare > 0 {
+            if !debitWalletForRide(ctx, pool, completedRiderID, bookingID, finalFare) {
+                walletFallbackToCash = true
+                bookingPaymentMethod = "cash"
+                pool.Exec(ctx, `UPDATE bookings SET payment_method='cash' WHERE id=$1`, bookingID)
+            }
+        }
+
         // Credit driver wallet: 80% earnings, 20% gogoo commission
         if finalFare > 0 {
             driverNet  := finalFare * 0.80
@@ -1351,15 +1395,21 @@ func UpdateBookingStatus(c *gin.Context) {
             `, bookingID)
         }
 
-        var riderID, completedDriverID string
-        pool.QueryRow(ctx, `SELECT rider_id, driver_id FROM bookings WHERE id=$1`, bookingID).Scan(&riderID, &completedDriverID)
-        creditReferralRewards("rider", riderID)
-        creditReferralRewards("driver", completedDriverID)
+        creditReferralRewards("rider", completedRiderID)
+        creditReferralRewards("driver", completedDriverIDForPayment)
 
         // Simple v1 fee settlement: a completed ride always clears whatever
         // outstanding cancellation fee the rider owes, since it was already
         // folded into THIS booking's fare at creation (see CreateBooking).
-        pool.Exec(ctx, `UPDATE riders SET outstanding_cancellation_fee=0 WHERE id=$1 AND outstanding_cancellation_fee > 0`, riderID)
+        pool.Exec(ctx, `UPDATE riders SET outstanding_cancellation_fee=0 WHERE id=$1 AND outstanding_cancellation_fee > 0`, completedRiderID)
+
+        c.JSON(http.StatusOK, gin.H{
+            "status":                  "completed",
+            "final_fare":              finalFare,
+            "payment_method":          bookingPaymentMethod,
+            "wallet_payment_fallback": walletFallbackToCash,
+        })
+        return
     case "cancelled":
         // Fee is computed server-side ONLY — never trust a client-supplied
         // amount. Driver/support/system cancellations are always free for
@@ -1383,11 +1433,28 @@ func UpdateBookingStatus(c *gin.Context) {
             WHERE id=$4
         `, req.CancelBy, req.CancelReason, fee, bookingID)
 
-        if fee > 0 {
-            var riderID string
-            pool.QueryRow(ctx, `SELECT rider_id FROM bookings WHERE id=$1`, bookingID).Scan(&riderID)
-            if riderID != "" {
-                pool.Exec(ctx, `UPDATE riders SET outstanding_cancellation_fee = COALESCE(outstanding_cancellation_fee,0) + $1 WHERE id=$2`, fee, riderID)
+        var cancelRiderID string
+        pool.QueryRow(ctx, `SELECT rider_id FROM bookings WHERE id=$1`, bookingID).Scan(&cancelRiderID)
+
+        if fee > 0 && cancelRiderID != "" {
+            pool.Exec(ctx, `UPDATE riders SET outstanding_cancellation_fee = COALESCE(outstanding_cancellation_fee,0) + $1 WHERE id=$2`, fee, cancelRiderID)
+        }
+
+        // Wallet refund: normal cancels happen before a ride is ever paid
+        // (wallet debit only happens at completion), so this is a no-op for
+        // the ordinary flow. It only fires when this booking already has a
+        // completed ride_payment ledger row — e.g. a support-initiated
+        // cancel/dispute on a ride that had already been charged to the
+        // wallet — refunding (amount paid - cancellation fee).
+        if cancelRiderID != "" {
+            var paidAmount float64
+            pool.QueryRow(ctx, `
+                SELECT COALESCE(-amount,0) FROM wallet_ledger
+                WHERE booking_id=$1 AND type='ride_payment' AND status='completed'
+                ORDER BY created_at DESC LIMIT 1
+            `, bookingID).Scan(&paidAmount)
+            if refundAmount := paidAmount - fee; paidAmount > 0 && refundAmount > 0 {
+                refundWalletToRider(ctx, pool, cancelRiderID, bookingID, refundAmount)
             }
         }
 
