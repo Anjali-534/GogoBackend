@@ -216,7 +216,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.DELETE("/drivers/:id/documents/:doc_type", handlers.DeleteDriverDocument)
 
 		// Payments
-		gogoo.GET("/payments", handlers.ListPayments)
+		gogoo.GET("/payments", middleware.RequirePanel("support"), handlers.ListPayments)
 
 		// Driver wallet / ledger / earnings
 		gogoo.GET("/driver/wallet", handlers.GetDriverWallet)
