@@ -178,6 +178,24 @@ func ticketBelongsToCaller(ctx context.Context, pool *pgxpool.Pool, ticketID, us
 	return ok
 }
 
+// callerRoleForTicket is ticketBelongsToCaller plus which side the caller
+// actually is on that ticket ("rider" or "driver") — so sender_type can be
+// derived from the JWT instead of trusted from the request body.
+func callerRoleForTicket(ctx context.Context, pool *pgxpool.Pool, ticketID, userID string) (role string, ok bool) {
+	pool.QueryRow(ctx, `
+		SELECT CASE
+			WHEN r.user_id = $2::uuid THEN 'rider'
+			WHEN d.user_id = $2::uuid THEN 'driver'
+			ELSE ''
+		END
+		FROM support_tickets t
+		LEFT JOIN riders  r ON r.id = t.rider_id
+		LEFT JOIN drivers d ON d.id = t.driver_id
+		WHERE t.id = $1
+	`, ticketID, userID).Scan(&role)
+	return role, role != ""
+}
+
 // GET /gogoo/support/chat/:ticket_id/messages
 func GetChatMessages(c *gin.Context) {
 	ctx := context.Background()
@@ -224,7 +242,6 @@ func SendChatMessage(c *gin.Context) {
 
 	var req struct {
 		Message    string `json:"message"`
-		SenderType string `json:"sender_type"`
 		SenderName string `json:"sender_name"`
 	}
 	c.ShouldBindJSON(&req)
@@ -236,7 +253,11 @@ func SendChatMessage(c *gin.Context) {
 
 	userID := c.GetString("user_id")
 
-	if !ticketBelongsToCaller(ctx, pool, ticketID, userID) {
+	// sender_type is derived from who the caller actually is on this ticket,
+	// never taken from the request body — a client claiming to be "support"
+	// or "bot" would otherwise be trivial.
+	senderType, ok := callerRoleForTicket(ctx, pool, ticketID, userID)
+	if !ok {
 		c.JSON(http.StatusForbidden, gin.H{"error": "not your ticket"})
 		return
 	}
@@ -248,7 +269,7 @@ func SendChatMessage(c *gin.Context) {
 		INSERT INTO support_messages
 			(ticket_id, sender_type, sender_id, sender_name, message)
 		VALUES ($1, $2, $3, $4, $5)
-	`, ticketID, req.SenderType, userID, req.SenderName, req.Message)
+	`, ticketID, senderType, userID, req.SenderName, req.Message)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to send"})
 		return
@@ -260,21 +281,19 @@ func SendChatMessage(c *gin.Context) {
 	// agent. That silence reads as "the bot isn't responding" unless we say
 	// so once per ticket, so drop a single system note the first time a
 	// rider/driver sends a follow-up without having escalated yet.
-	if req.SenderType == "rider" || req.SenderType == "driver" {
-		var alreadyNoted bool
-		pool.QueryRow(ctx, `
-			SELECT EXISTS (
-				SELECT 1 FROM support_messages
-				WHERE ticket_id = $1 AND sender_type = 'system'
-			)
-		`, ticketID).Scan(&alreadyNoted)
-		if !alreadyNoted {
-			pool.Exec(ctx, `
-				INSERT INTO support_messages
-					(ticket_id, sender_type, sender_id, sender_name, message)
-				VALUES ($1, 'system', 'system', 'System', 'Our support team will review your message and reply here soon.')
-			`, ticketID)
-		}
+	var alreadyNoted bool
+	pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM support_messages
+			WHERE ticket_id = $1 AND sender_type = 'system'
+		)
+	`, ticketID).Scan(&alreadyNoted)
+	if !alreadyNoted {
+		pool.Exec(ctx, `
+			INSERT INTO support_messages
+				(ticket_id, sender_type, sender_id, sender_name, message)
+			VALUES ($1, 'system', 'system', 'System', 'Our support team will review your message and reply here soon.')
+		`, ticketID)
 	}
 
 	c.JSON(http.StatusCreated, gin.H{"message": "sent"})
