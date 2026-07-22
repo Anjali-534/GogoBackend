@@ -187,7 +187,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.GET("/geocode/forward", handlers.ForwardGeocodeProxy)
 
 		// Riders (dashboard)
-		gogoo.GET("/riders", handlers.ListRiders)
+		gogoo.GET("/riders", middleware.RequirePanel("cab", "truck", "ambulance", "support"), handlers.ListRiders)
 
 		// Driver profile & history
 		gogoo.GET("/driver/profile", handlers.GetDriverProfile)
