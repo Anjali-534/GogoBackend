@@ -240,15 +240,15 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.GET("/admin/driver-payments", middleware.RequirePanel("support"), handlers.AdminDriverPayments)
 
 		// Analytics
-		gogoo.GET("/analytics", handlers.GetAnalytics)
+		gogoo.GET("/analytics", middleware.RequirePanel(), handlers.GetAnalytics)
 		gogoo.POST("/analytics/event", handlers.RecordAnalyticsEvent)
-		gogoo.GET("/analytics/screen-times", handlers.GetScreenTimes)
-		gogoo.GET("/analytics/geo-distribution", handlers.GetGeoDistribution)
-		gogoo.GET("/analytics/device-breakdown", handlers.GetDeviceBreakdown)
-		gogoo.GET("/analytics/retention", handlers.GetRetentionStats)
-		gogoo.GET("/analytics/sessions", handlers.GetSessionStats)
-		gogoo.GET("/analytics/usage-heatmap", handlers.GetUsageHeatmap)
-		gogoo.GET("/analytics/funnel", handlers.GetFunnelData)
+		gogoo.GET("/analytics/screen-times", middleware.RequirePanel(), handlers.GetScreenTimes)
+		gogoo.GET("/analytics/geo-distribution", middleware.RequirePanel(), handlers.GetGeoDistribution)
+		gogoo.GET("/analytics/device-breakdown", middleware.RequirePanel(), handlers.GetDeviceBreakdown)
+		gogoo.GET("/analytics/retention", middleware.RequirePanel(), handlers.GetRetentionStats)
+		gogoo.GET("/analytics/sessions", middleware.RequirePanel(), handlers.GetSessionStats)
+		gogoo.GET("/analytics/usage-heatmap", middleware.RequirePanel(), handlers.GetUsageHeatmap)
+		gogoo.GET("/analytics/funnel", middleware.RequirePanel(), handlers.GetFunnelData)
 
 		// Notifications (riders)
 		gogoo.GET("/notifications", handlers.ListNotifications)
