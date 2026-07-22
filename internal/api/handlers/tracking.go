@@ -7,6 +7,7 @@ import (
 
 	"github.com/deploykit/backend/internal/db"
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // GET /gogoo/bookings/pending
@@ -142,6 +143,14 @@ func GetBooking(c *gin.Context) {
 		}
 	}
 
+	writeBookingDetail(c, ctx, pool, bookingID)
+}
+
+// writeBookingDetail is GetBooking's query/response-shaping logic, shared
+// verbatim by GetTrackerCompanyRide (tracker.go), which does its own
+// ownership check (booking.rider_id == company's synthetic_rider_id) before
+// calling this instead of GetBooking's rider/driver JWT-based check.
+func writeBookingDetail(c *gin.Context, ctx context.Context, pool *pgxpool.Pool, bookingID string) {
 	var (
 		id, riderID, status                              string
 		driverID                                         *string

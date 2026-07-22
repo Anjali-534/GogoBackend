@@ -644,6 +644,77 @@ func CreateTrackerCompanyRide(c *gin.Context) {
 	createBookingCore(c, ctx, pool, riderID, req)
 }
 
+// GET /gogoo/tracker/companies/rides
+//
+// "My Rides" for a tracker company — every booking made through
+// CreateTrackerCompanyRide by this company's synthetic rider. Cannot reuse
+// ListRiderBookings directly: that endpoint derives its rider from the
+// caller's own JWT user_id, which for a tracker-company token is the
+// staff/owner's user_id, not the synthetic rider's — so it would just come
+// back empty. Uses trackerrider.GetTrackerCompanyRiderID (no auto-create) so
+// a company that has never booked anything gets an empty list, not a
+// freshly-provisioned rider as a side effect of viewing this page.
+func ListTrackerCompanyRides(c *gin.Context) {
+	companyID := c.GetString("company_id")
+	ctx := context.Background()
+
+	riderID, err := trackerrider.GetTrackerCompanyRiderID(ctx, companyID)
+	if err != nil {
+		log.Printf("ListTrackerCompanyRides: lookup failed for company=%s: %v", companyID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load rides"})
+		return
+	}
+	if riderID == "" {
+		c.JSON(http.StatusOK, []map[string]interface{}{})
+		return
+	}
+
+	pool := db.GetDB().GetPool()
+	bookings, err := listBookingsForRider(ctx, pool, riderID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	c.JSON(http.StatusOK, bookings)
+}
+
+// GET /gogoo/tracker/companies/rides/:id
+//
+// Tracking/detail view for a single company-booked ride. Cannot reuse
+// GetBooking directly for the same reason as above — its ownership fallback
+// (bookingCallerRole) matches the caller's own user_id against the
+// booking's rider/driver, which will never be the synthetic rider for a
+// tracker-company caller. Instead this does its own ownership check —
+// booking.rider_id must equal this company's synthetic_rider_id — then
+// renders via the exact same writeBookingDetail (tracking.go) GetBooking
+// uses, so the response shape (status, driver info, fare, live driver GPS
+// once assigned) is identical either way.
+func GetTrackerCompanyRide(c *gin.Context) {
+	companyID := c.GetString("company_id")
+	bookingID := c.Param("id")
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+
+	riderID, err := trackerrider.GetTrackerCompanyRiderID(ctx, companyID)
+	if err != nil {
+		log.Printf("GetTrackerCompanyRide: lookup failed for company=%s: %v", companyID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load ride"})
+		return
+	}
+
+	var ownerRiderID string
+	if err := pool.QueryRow(ctx, `SELECT rider_id FROM bookings WHERE id = $1`, bookingID).Scan(&ownerRiderID); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "booking not found"})
+		return
+	}
+	if riderID == "" || ownerRiderID != riderID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		return
+	}
+
+	writeBookingDetail(c, ctx, pool, bookingID)
+}
+
 // ─── Orders ─────────────────────────────────────────────────────────────────
 
 // generateTrackingToken returns a crypto-random, non-guessable public

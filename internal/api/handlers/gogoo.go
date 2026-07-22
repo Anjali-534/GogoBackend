@@ -599,10 +599,29 @@ func ListRiderBookings(c *gin.Context) {
     userID := c.GetString("user_id")
     ctx := context.Background()
     pool := db.GetDB().GetPool()
-    rows, err := pool.Query(ctx, `SELECT b.id, b.status, b.pickup_address, b.drop_address, COALESCE(b.estimated_fare,0), COALESCE(b.final_fare,0), COALESCE(b.distance_km,0), b.created_at, COALESCE(u_d.name,'') as driver_name, st.name as service_name, b.source, COALESCE(b.cancellation_fee,0), COALESCE(b.is_scheduled,false), b.scheduled_at FROM bookings b JOIN riders r ON r.id = b.rider_id JOIN users u_r ON u_r.id = r.user_id LEFT JOIN drivers d ON d.id = b.driver_id LEFT JOIN users u_d ON u_d.id = d.user_id JOIN service_types st ON st.id = b.service_type_id WHERE u_r.id = $1 ORDER BY b.created_at DESC LIMIT 100`, userID)
+
+    var riderID string
+    if err := pool.QueryRow(ctx, `SELECT r.id FROM riders r JOIN users u ON u.id = r.user_id WHERE u.id = $1`, userID).Scan(&riderID); err != nil {
+        c.JSON(http.StatusOK, []map[string]interface{}{})
+        return
+    }
+
+    bookings, err := listBookingsForRider(ctx, pool, riderID)
     if err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
         return
+    }
+    c.JSON(http.StatusOK, bookings)
+}
+
+// listBookingsForRider is ListRiderBookings' query/row-mapping logic, shared
+// verbatim by CreateTrackerCompanyRide's sibling list handler (tracker.go),
+// which resolves riderID via the company's synthetic_rider_id instead of a
+// rider JWT's user_id.
+func listBookingsForRider(ctx context.Context, pool *pgxpool.Pool, riderID string) ([]map[string]interface{}, error) {
+    rows, err := pool.Query(ctx, `SELECT b.id, b.status, b.pickup_address, b.drop_address, COALESCE(b.estimated_fare,0), COALESCE(b.final_fare,0), COALESCE(b.distance_km,0), b.created_at, COALESCE(u_d.name,'') as driver_name, st.name as service_name, b.source, COALESCE(b.cancellation_fee,0), COALESCE(b.is_scheduled,false), b.scheduled_at FROM bookings b LEFT JOIN drivers d ON d.id = b.driver_id LEFT JOIN users u_d ON u_d.id = d.user_id JOIN service_types st ON st.id = b.service_type_id WHERE b.rider_id = $1 ORDER BY b.created_at DESC LIMIT 100`, riderID)
+    if err != nil {
+        return nil, err
     }
     defer rows.Close()
     var bookings []map[string]interface{}
@@ -621,7 +640,7 @@ func ListRiderBookings(c *gin.Context) {
         })
     }
     if bookings == nil { bookings = []map[string]interface{}{} }
-    c.JSON(http.StatusOK, bookings)
+    return bookings, nil
 }
 
 func vehicleCategoryFromType(vType string) string {

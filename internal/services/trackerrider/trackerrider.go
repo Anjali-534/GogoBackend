@@ -91,3 +91,23 @@ func EnsureTrackerCompanyRiderProfile(ctx context.Context, companyID string) (st
 
 	return riderID.String(), nil
 }
+
+// GetTrackerCompanyRiderID returns companyID's synthetic rider id without
+// creating one, so a "list my rides" / "view ride" call for a company that
+// has never booked anything returns "not found" instead of silently
+// provisioning a rider. Returns "", nil if no synthetic rider exists yet.
+func GetTrackerCompanyRiderID(ctx context.Context, companyID string) (string, error) {
+	pool := db.GetDB().GetPool()
+
+	var riderID *string
+	err := pool.QueryRow(ctx,
+		`SELECT synthetic_rider_id FROM tracker_companies WHERE id = $1`, companyID,
+	).Scan(&riderID)
+	if err != nil {
+		return "", fmt.Errorf("trackerrider: load company %s: %w", companyID, err)
+	}
+	if riderID == nil {
+		return "", nil
+	}
+	return *riderID, nil
+}
