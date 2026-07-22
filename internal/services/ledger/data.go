@@ -163,6 +163,10 @@ func describeEntry(typ, description, debitType string) string {
 		return "Trip Earnings"
 	case typ == "referral":
 		return "Referral Bonus — friend's first trip"
+	case typ == "topup":
+		return "Wallet Top-up"
+	case typ == "withdrawal":
+		return "Withdrawal"
 	case description != "":
 		return description
 	default:

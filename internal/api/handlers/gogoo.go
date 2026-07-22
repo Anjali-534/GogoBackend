@@ -1830,6 +1830,8 @@ func GetDriverWallet(c *gin.Context) {
         "minimum_balance":       500.00,
         "can_withdraw":          canWithdraw,
         "withdrawable_amount":   withdrawableAmt,
+        "payments_available":    rzp != nil,
+        "payouts_available":     payoutClient != nil,
     })
 }
 

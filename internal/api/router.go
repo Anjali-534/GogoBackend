@@ -45,6 +45,12 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		// app JWT. Trust comes entirely from the verified signature inside
 		// the handler, never from auth middleware.
 		public.POST("/gogoo/wallet/topup/webhook", handlers.WalletTopupWebhook)
+
+		// Driver Wallet — Razorpay (top-up) and RazorpayX (payout) webhooks,
+		// both public for the same reason as above: the caller is the payment
+		// gateway itself, trust comes from the verified signature inside each handler.
+		public.POST("/gogoo/driver/wallet/topup/webhook", handlers.DriverWalletTopupWebhook)
+		public.POST("/gogoo/driver/wallet/payout-webhook", handlers.DriverPayoutWebhook)
 	}
 
 	// ============================================================
@@ -224,6 +230,11 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		// public group below instead.
 		gogoo.POST("/wallet/topup/create-order", handlers.CreateWalletTopupOrder)
 		gogoo.GET("/wallet/ledger", handlers.GetWalletLedger)
+
+		// Driver Wallet — top-up (regular Razorpay Payments) and withdrawal
+		// (RazorpayX Payouts). Webhooks for both are public, registered above.
+		gogoo.POST("/driver/wallet/topup/create-order", handlers.CreateDriverWalletTopupOrder)
+		gogoo.POST("/driver/wallet/withdraw", handlers.RequestDriverWithdrawal)
 
 		// Admin driver payments
 		gogoo.GET("/admin/driver-payments", middleware.RequirePanel("support"), handlers.AdminDriverPayments)
