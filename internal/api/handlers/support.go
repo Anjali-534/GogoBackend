@@ -346,19 +346,21 @@ func SendTicketMessage(c *gin.Context) {
 	id := c.Param("id")
 
 	var req struct {
-		Message    string `json:"message"`
-		SenderType string `json:"sender_type"`
-		SenderName string `json:"sender_name"`
+		Message string `json:"message"`
 	}
 	c.ShouldBindJSON(&req)
 
+	// Route is RequirePanel("support")-gated, so every caller here is an
+	// agent — sender identity is always derived from the authenticated
+	// token, never trusted from the request body (see SendChatMessage's
+	// callerRoleForTicket pattern for the rider/driver-facing sibling).
 	agentEmail := c.GetString("user_email")
 
 	_, err := pool.Exec(ctx, `
 		INSERT INTO support_messages
 			(ticket_id, sender_type, sender_id, sender_name, message)
-		VALUES ($1, $2, $3, $4, $5)
-	`, id, req.SenderType, agentEmail, req.SenderName, req.Message)
+		VALUES ($1, 'support', $2, $3, $4)
+	`, id, agentEmail, agentEmail, req.Message)
 
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to send"})
@@ -367,13 +369,11 @@ func SendTicketMessage(c *gin.Context) {
 
 	pool.Exec(ctx, `UPDATE support_tickets SET updated_at=NOW() WHERE id=$1`, id)
 
-	if req.SenderType == "support" {
-		body := req.Message
-		if len(body) > 120 {
-			body = body[:120] + "…"
-		}
-		pushToTicketOwner(id, "New reply from Support", body, "support_reply")
+	body := req.Message
+	if len(body) > 120 {
+		body = body[:120] + "…"
 	}
+	pushToTicketOwner(id, "New reply from Support", body, "support_reply")
 
 	c.JSON(http.StatusCreated, gin.H{"message": "sent"})
 }
