@@ -1689,10 +1689,33 @@ func RateBooking(c *gin.Context) {
         return
     }
 
+    var status string
+    var existingDriverRating, existingRiderRating *int
+    if err := pool.QueryRow(ctx,
+        `SELECT status, driver_rating, rider_rating FROM bookings WHERE id=$1`, bookingID,
+    ).Scan(&status, &existingDriverRating, &existingRiderRating); err != nil {
+        c.JSON(http.StatusNotFound, gin.H{"error": "booking not found"})
+        return
+    }
+    if status != "completed" {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "booking must be completed before it can be rated"})
+        return
+    }
+
+    // A rating is one-shot per side — no silent overwrite of an existing
+    // rating/review by a second submission.
     if req.RaterType == "rider" {
+        if existingDriverRating != nil {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "you have already rated this ride"})
+            return
+        }
         pool.Exec(ctx, "UPDATE bookings SET driver_rating=$1,driver_review=$2 WHERE id=$3", req.Rating, req.Review, bookingID)
         pool.Exec(ctx, `UPDATE drivers SET rating=(SELECT ROUND(AVG(driver_rating)::numeric,2) FROM bookings WHERE driver_id=(SELECT driver_id FROM bookings WHERE id=$1) AND driver_rating IS NOT NULL) WHERE id=(SELECT driver_id FROM bookings WHERE id=$1)`, bookingID)
     } else {
+        if existingRiderRating != nil {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "you have already rated this ride"})
+            return
+        }
         pool.Exec(ctx, "UPDATE bookings SET rider_rating=$1,rider_review=$2 WHERE id=$3", req.Rating, req.Review, bookingID)
         pool.Exec(ctx, `UPDATE riders SET rating=(SELECT ROUND(AVG(rider_rating)::numeric,2) FROM bookings WHERE rider_id=(SELECT rider_id FROM bookings WHERE id=$1) AND rider_rating IS NOT NULL) WHERE id=(SELECT rider_id FROM bookings WHERE id=$1)`, bookingID)
     }
