@@ -1615,9 +1615,11 @@ func VerifyRideOTP(c *gin.Context) {
 
     var storedOTP *string
     var status string
+    var otpAttempts int
+    var otpLockedUntil *time.Time
     if err := pool.QueryRow(ctx,
-        `SELECT ride_otp, status FROM bookings WHERE id=$1`, bookingID,
-    ).Scan(&storedOTP, &status); err != nil {
+        `SELECT ride_otp, status, otp_attempts, otp_locked_until FROM bookings WHERE id=$1`, bookingID,
+    ).Scan(&storedOTP, &status, &otpAttempts, &otpLockedUntil); err != nil {
         c.JSON(http.StatusNotFound, gin.H{"error": "booking not found"})
         return
     }
@@ -1625,11 +1627,44 @@ func VerifyRideOTP(c *gin.Context) {
         c.JSON(http.StatusBadRequest, gin.H{"error": "booking is not awaiting OTP verification"})
         return
     }
-    if storedOTP == nil || *storedOTP != req.OTP {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid OTP"})
+
+    const maxOTPAttempts = 5
+    const otpLockoutDuration = 15 * time.Minute
+
+    // A previous lockout only blocks while it's still in effect — once it
+    // expires the driver gets a fresh set of attempts rather than being
+    // stuck forever or needing support to intervene.
+    if otpLockedUntil != nil && time.Now().Before(*otpLockedUntil) {
+        c.JSON(http.StatusTooManyRequests, gin.H{
+            "error":       "too many incorrect attempts, try again later",
+            "locked":      true,
+            "locked_until": otpLockedUntil.Format(time.RFC3339),
+        })
         return
     }
-    pool.Exec(ctx, `UPDATE bookings SET status='in_progress', started_at=NOW() WHERE id=$1`, bookingID)
+
+    if storedOTP == nil || *storedOTP != req.OTP {
+        otpAttempts++
+        if otpAttempts >= maxOTPAttempts {
+            lockUntil := time.Now().Add(otpLockoutDuration)
+            pool.Exec(ctx, `UPDATE bookings SET otp_attempts=$1, otp_locked_until=$2 WHERE id=$3`, otpAttempts, lockUntil, bookingID)
+            c.JSON(http.StatusTooManyRequests, gin.H{
+                "error":       "too many incorrect attempts, locked for 15 minutes",
+                "locked":      true,
+                "locked_until": lockUntil.Format(time.RFC3339),
+            })
+            return
+        }
+        pool.Exec(ctx, `UPDATE bookings SET otp_attempts=$1 WHERE id=$2`, otpAttempts, bookingID)
+        c.JSON(http.StatusBadRequest, gin.H{
+            "error":              "invalid OTP",
+            "locked":             false,
+            "attempts_remaining": maxOTPAttempts - otpAttempts,
+        })
+        return
+    }
+
+    pool.Exec(ctx, `UPDATE bookings SET status='in_progress', started_at=NOW(), otp_attempts=0, otp_locked_until=NULL WHERE id=$1`, bookingID)
     c.JSON(http.StatusOK, gin.H{"status": "in_progress"})
 }
 
