@@ -180,8 +180,8 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.GET("/drivers/nearby-count", handlers.GetNearbyDriverCount)
 
 		// Live map (admin panels)
-		gogoo.GET("/live/drivers", handlers.ListLiveDrivers)
-		gogoo.GET("/live/bookings", handlers.ListLiveBookings)
+		gogoo.GET("/live/drivers", middleware.RequirePanel("cab", "truck", "ambulance"), handlers.ListLiveDrivers)
+		gogoo.GET("/live/bookings", middleware.RequirePanel("cab", "truck", "ambulance"), handlers.ListLiveBookings)
 		gogoo.GET("/route", handlers.ProxyOlaRoute)
 		gogoo.GET("/geocode/reverse", handlers.ReverseGeocodeProxy)
 		gogoo.GET("/geocode/forward", handlers.ForwardGeocodeProxy)
