@@ -204,7 +204,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.GET("/drivers/:id/bookings", middleware.RequirePanel("cab"), handlers.ListDriverBookingsByID)
 		gogoo.PATCH("/drivers/:id/block", middleware.RequirePanel("cab", "truck", "ambulance", "support"), handlers.ManageDriverBlock)
 		// Rider ride history (admin)
-		gogoo.GET("/riders/:id/bookings", handlers.ListRiderBookingsByID)
+		gogoo.GET("/riders/:id/bookings", middleware.RequirePanel(), handlers.ListRiderBookingsByID)
 
 		// Documents — GET/POST/DELETE are the driver acting on their own
 		// documents (checked for ownership inside the handler) but panels also
