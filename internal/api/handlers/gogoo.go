@@ -303,6 +303,21 @@ func createBookingCore(c *gin.Context, ctx context.Context, pool *pgxpool.Pool, 
     log.Printf("CreateBooking: rider=%s service=%s fare=%v scheduled=%v",
         riderID, req.ServiceTypeID, req.EstimatedFare, req.IsScheduled)
 
+    // A rider can only ever have one non-terminal booking at a time. The
+    // client is trusted to not double-submit, but a retried request, a
+    // buggy client, or a race between two devices on the same account
+    // could otherwise create two live bookings for the same rider — this
+    // is the defense-in-depth backstop for that.
+    var activeCount int
+    pool.QueryRow(ctx,
+        `SELECT COUNT(*) FROM bookings WHERE rider_id=$1 AND status NOT IN ('completed','cancelled')`,
+        riderID,
+    ).Scan(&activeCount)
+    if activeCount > 0 {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "you have an active booking already"})
+        return
+    }
+
     // Validate service_type exists and fetch its official pricing — the
     // client never gets to declare its own base_fare/per_km_rate.
     var svcCategory, svcSlug string
