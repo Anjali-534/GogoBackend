@@ -266,7 +266,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		// Referrals (riders + drivers share same endpoints)
 		gogoo.GET("/referral/my-code", handlers.GetMyReferralCode)
 		gogoo.GET("/referral/my-referrals", handlers.GetMyReferrals)
-		gogoo.GET("/referral/all", handlers.AdminListReferrals)
+		gogoo.GET("/referral/all", middleware.RequirePanel(), handlers.AdminListReferrals)
 
 		// Broadcasts (admin) — every operating panel can send within its own
 		// category; scoping to that category is enforced inside the handlers.
