@@ -200,6 +200,14 @@ var cabExtraFareMultipliers = map[string]float64{
 
 const truckAddonPrice = 200.0
 
+// roadDistanceFactor approximates road distance from straight-line distance.
+// Every client (cab/truck/ambulance vehicles.tsx) multiplies its own
+// haversineKm estimate by this same factor before showing/sending
+// estimated_fare, so the server must apply it too — otherwise the server's
+// "expected" fare is always ~30% below what every client legitimately
+// quoted the rider, and the tolerance check below rejects real bookings.
+const roadDistanceFactor = 1.3
+
 // haversineKm computes great-circle distance in km between two coordinates.
 // This mirrors the client's on-device estimate (booking/index.tsx) but runs
 // server-side so distance_km can no longer be set by the request — pricing
@@ -365,7 +373,7 @@ func createBookingCore(c *gin.Context, ctx context.Context, pool *pgxpool.Pool, 
     // Patient Transport/BLS/ALS — there is no client-side "free" path.
     // Free-ambulance status is only ever granted afterward by staff via
     // POST /bookings/:id/waive-ambulance-fare.
-    serverDistanceKm := haversineKm(req.PickupLat, req.PickupLng, req.DropLat, req.DropLng)
+    serverDistanceKm := haversineKm(req.PickupLat, req.PickupLng, req.DropLat, req.DropLng) * roadDistanceFactor
     serverFare := math.Round(svcBaseFare + serverDistanceKm*svcPerKmRate)
     if mult, ok := cabExtraFareMultipliers[req.VehicleSlug]; ok && req.VehicleSlug != svcSlug {
         serverFare = math.Round(serverFare * mult)
