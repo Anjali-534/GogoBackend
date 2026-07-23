@@ -808,6 +808,66 @@ func ListTrackerCompanyOwnOrders(c *gin.Context) {
 	c.JSON(http.StatusOK, orders)
 }
 
+// TrackerLiveMapOrder is the trimmed shape the Live Map page needs — a
+// single-order query for map markers has no use for the full TrackerOrder
+// (documents, GSTIN, billing fields, etc.), so this is its own struct rather
+// than reusing TrackerOrder with most fields left blank.
+type TrackerLiveMapOrder struct {
+	ID                   string     `json:"id"`
+	DriverName           string     `json:"driver_name"`
+	VehicleNumber        string     `json:"vehicle_number"`
+	BookedForCompanyName string     `json:"booked_for_company_name"`
+	DispatchFrom         string     `json:"dispatch_from"`
+	DispatchTo           string     `json:"dispatch_to"`
+	Status               string     `json:"status"`
+	LastLat              *float64   `json:"last_lat"`
+	LastLng              *float64   `json:"last_lng"`
+	LastLocationAt       *time.Time `json:"last_location_at"`
+	RouteDistanceKm      *float64   `json:"route_distance_km"`
+	RouteDurationMins    *int       `json:"route_duration_mins"`
+}
+
+// GET /gogoo/tracker/live-map — company-scoped, returns one entry per
+// currently-trackable shipment (dispatched/in_transit with a location fix
+// already reported). Mirrors the same RequireTrackerCompany scoping as every
+// other /tracker/* endpoint; a company with zero qualifying orders gets an
+// empty array, never another company's data.
+func ListTrackerCompanyLiveMap(c *gin.Context) {
+	companyID := c.GetString("company_id")
+
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+
+	rows, err := pool.Query(ctx, `
+		SELECT id, COALESCE(driver_name,''), vehicle_number, booked_for_company_name,
+		       dispatch_from, dispatch_to, status, last_lat, last_lng, last_location_at,
+		       route_distance_km, route_duration_mins
+		FROM tracker_orders
+		WHERE company_id = $1
+		  AND status IN ('dispatched', 'in_transit')
+		  AND last_lat IS NOT NULL AND last_lng IS NOT NULL
+		ORDER BY last_location_at DESC NULLS LAST`, companyID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error: " + err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	orders := []TrackerLiveMapOrder{}
+	for rows.Next() {
+		var o TrackerLiveMapOrder
+		if err := rows.Scan(
+			&o.ID, &o.DriverName, &o.VehicleNumber, &o.BookedForCompanyName,
+			&o.DispatchFrom, &o.DispatchTo, &o.Status, &o.LastLat, &o.LastLng, &o.LastLocationAt,
+			&o.RouteDistanceKm, &o.RouteDurationMins,
+		); err != nil {
+			continue
+		}
+		orders = append(orders, o)
+	}
+	c.JSON(http.StatusOK, orders)
+}
+
 // POST /gogoo/tracker/orders
 func CreateTrackerCompanyOrder(c *gin.Context) {
 	companyID := c.GetString("company_id")

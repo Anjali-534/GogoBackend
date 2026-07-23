@@ -328,6 +328,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.PATCH("/tracker/drivers/:id", middleware.RequireTrackerCompany(), handlers.UpdateTrackerCompanyDriver)
 		gogoo.DELETE("/tracker/drivers/:id", middleware.RequireTrackerCompany(), handlers.DeactivateTrackerCompanyDriver)
 		gogoo.GET("/tracker/orders", middleware.RequireTrackerCompany(), handlers.ListTrackerCompanyOwnOrders)
+		gogoo.GET("/tracker/live-map", middleware.RequireTrackerCompany(), handlers.ListTrackerCompanyLiveMap)
 		gogoo.POST("/tracker/orders", middleware.RequireTrackerCompany(), handlers.CreateTrackerCompanyOrder)
 		gogoo.GET("/tracker/orders/:id", middleware.RequireTrackerCompany(), handlers.GetTrackerCompanyOwnOrder)
 		gogoo.PATCH("/tracker/orders/:id", middleware.RequireTrackerCompany(), handlers.UpdateTrackerCompanyOrderStatus)
