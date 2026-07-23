@@ -1305,3 +1305,72 @@ INSERT INTO tracker_order_documents (order_id, doc_type, file_url, created_at)
 SELECT id, 'eway_bill', eway_bill_file_url, created_at
 FROM tracker_orders
 WHERE eway_bill_file_url IS NOT NULL AND eway_bill_file_url <> '';
+
+-- ===== 045_tracker_company_rider_booking.sql =====
+
+ALTER TABLE tracker_companies
+  ADD COLUMN IF NOT EXISTS synthetic_rider_id UUID REFERENCES riders(id);
+
+-- ===== 046_wallet_ledger.sql =====
+
+CREATE TABLE IF NOT EXISTS wallet_ledger (
+  id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  rider_id            UUID NOT NULL REFERENCES riders(id),
+  type                TEXT NOT NULL CHECK (type IN ('topup','ride_payment','refund','referral_credit','adjustment')),
+  amount              DECIMAL(10,2) NOT NULL,
+  balance_after       DECIMAL(10,2) NOT NULL,
+  razorpay_payment_id TEXT,
+  booking_id          UUID REFERENCES bookings(id),
+  status              TEXT NOT NULL DEFAULT 'completed' CHECK (status IN ('pending','completed','failed')),
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_wallet_ledger_rider_id   ON wallet_ledger(rider_id);
+CREATE INDEX IF NOT EXISTS idx_wallet_ledger_booking_id ON wallet_ledger(booking_id);
+CREATE INDEX IF NOT EXISTS idx_wallet_ledger_created_at ON wallet_ledger(created_at);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_wallet_ledger_razorpay_payment_id
+  ON wallet_ledger(razorpay_payment_id) WHERE razorpay_payment_id IS NOT NULL;
+
+ALTER TABLE bookings
+  ADD COLUMN IF NOT EXISTS payment_method TEXT NOT NULL DEFAULT 'cash'
+    CHECK (payment_method IN ('cash','wallet'));
+
+-- ===== 047_driver_wallet_payouts.sql =====
+
+ALTER TABLE driver_earnings
+  ADD COLUMN IF NOT EXISTS razorpay_payment_id  TEXT,
+  ADD COLUMN IF NOT EXISTS razorpayx_payout_id  TEXT,
+  ADD COLUMN IF NOT EXISTS status                TEXT NOT NULL DEFAULT 'completed';
+
+CREATE UNIQUE INDEX IF NOT EXISTS driver_earnings_razorpay_payment_id_uq
+  ON driver_earnings (razorpay_payment_id)
+  WHERE razorpay_payment_id IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS driver_earnings_razorpayx_payout_id_uq
+  ON driver_earnings (razorpayx_payout_id)
+  WHERE razorpayx_payout_id IS NOT NULL;
+
+-- ===== 048_ride_otp_attempts.sql =====
+
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS otp_attempts INT NOT NULL DEFAULT 0;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS otp_locked_until TIMESTAMPTZ;
+
+-- ===== 049_tracker_delivery_auto_completion.sql =====
+
+ALTER TABLE tracker_orders
+  ADD COLUMN IF NOT EXISTS delivery_condition        TEXT
+    CHECK (delivery_condition IN ('good', 'bad')),
+  ADD COLUMN IF NOT EXISTS delivery_condition_reason TEXT,
+  ADD COLUMN IF NOT EXISTS needs_staff_attention     BOOLEAN NOT NULL DEFAULT FALSE;
+
+CREATE TABLE IF NOT EXISTS tracker_delivery_reminders_sent (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  order_id        UUID NOT NULL REFERENCES tracker_orders(id) ON DELETE CASCADE,
+  reminder_number INT  NOT NULL CHECK (reminder_number BETWEEN 1 AND 7),
+  sent_at         TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (order_id, reminder_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tracker_delivery_reminders_sent_order_id
+  ON tracker_delivery_reminders_sent(order_id);
