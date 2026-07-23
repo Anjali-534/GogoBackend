@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -46,6 +47,17 @@ func main() {
 	log.Println("✓ Database connected")
 
 	// Run migrations
+	//
+	// Numbered SQL files (backend/migrations/*.sql) are embedded into the
+	// binary and applied here on every boot — the Dockerfile's final stage
+	// only ships the compiled server, not the source tree, so without this
+	// step a migration added to the repo never reaches the deployed
+	// database until someone runs it by hand.
+	if err := db.GetDB().RunFileMigrations(context.Background()); err != nil {
+		log.Printf("⚠ File migrations warning: %v", err)
+	} else {
+		log.Println("✓ File-based migrations applied")
+	}
 	if err := handlers.MigrateNotifications(); err != nil {
 		log.Printf("⚠ Notifications migration warning: %v", err)
 	} else {
