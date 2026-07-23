@@ -127,11 +127,19 @@ type TrackerOrder struct {
 	SignatureURL *string `json:"signature_url"`
 
 	// Goods-received confirmation — ReceivedConfirmationToken is generated
-	// the first time the order reaches 'delivered' (see
-	// UpdateTrackerCompanyOrderStatus); ReceivedConfirmedAt is set once by
-	// the consignee via the public receipt page and never cleared.
+	// at order creation (or lazily backfilled on first notify send);
+	// ReceivedConfirmedAt is set once by the consignee via the public
+	// receipt page (either button) and never cleared. DeliveryCondition/
+	// DeliveryConditionReason are set alongside it — a separate flag that
+	// never blocks the 'delivered' status transition itself (see
+	// tryAutoCompleteDelivery). NeedsStaffAttention is set by the daily
+	// delivery-reminder job once 7 reminders get no consignee response —
+	// informational only, never blocking.
 	ReceivedConfirmationToken *string    `json:"received_confirmation_token"`
 	ReceivedConfirmedAt       *time.Time `json:"received_confirmed_at"`
+	DeliveryCondition         *string    `json:"delivery_condition"`
+	DeliveryConditionReason   *string    `json:"delivery_condition_reason"`
+	NeedsStaffAttention       bool       `json:"needs_staff_attention"`
 
 	// GSTIN for the two other dispatch-sheet parties — optional, format/
 	// checksum validated client-side only, never enforced server-side.

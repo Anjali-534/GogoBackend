@@ -13,6 +13,7 @@ import (
 	"github.com/deploykit/backend/internal/config"
 	"github.com/deploykit/backend/internal/db"
 	"github.com/deploykit/backend/internal/services/ledger"
+	"github.com/deploykit/backend/internal/services/trackerdelivery"
 	"github.com/deploykit/backend/internal/services/trackersub"
 	"github.com/joho/godotenv"
 )
@@ -84,6 +85,12 @@ func main() {
 	// companies expiring in 7 or 1 days.
 	go trackersub.StartSubscriptionReminderMailer(cfg)
 	log.Println("✓ Tracker subscription reminder mailer running")
+
+	// Bogie Tracker delivery-confirmation reminders — ticks daily, nudges
+	// the consignee once the driver has claimed delivery, flags the order
+	// for staff attention after 7 days of no response.
+	go trackerdelivery.StartDeliveryReminderMailer(cfg)
+	log.Println("✓ Tracker delivery reminder mailer running")
 
 	// Setup API router
 	router := api.SetupRouter(cfg)
