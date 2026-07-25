@@ -48,6 +48,14 @@ type TrackerCompany struct {
 	// for 'lifetime' plans, which never expire — see migration 036.
 	CurrentPlan           *string    `json:"current_plan"`
 	SubscriptionExpiresAt *time.Time `json:"subscription_expires_at"`
+
+	// DefaultAddress (+ lat/lng) is the company's own address (migration
+	// 050) — nil until the company sets one in its profile. Used to
+	// auto-fill dispatch_to on inbound orders (see CreateTrackerCompanyOrder),
+	// since goods on an inbound order flow back to the company itself.
+	DefaultAddress    *string  `json:"default_address"`
+	DefaultAddressLat *float64 `json:"default_address_lat"`
+	DefaultAddressLng *float64 `json:"default_address_lng"`
 }
 
 type TrackerCompanyListItem struct {
@@ -90,6 +98,13 @@ type TrackerOrder struct {
 	Status               string    `json:"status"`
 	PublicTrackingToken  string    `json:"public_tracking_token"`
 	CreatedAt            time.Time `json:"created_at"`
+
+	// OrderType (migration 050) is 'outbound' (default — goods sent out,
+	// the original/only order shape) or 'inbound' (goods received from a
+	// supplier — BookedFor* is repurposed as the supplier's details, and
+	// dispatch_to auto-fills from the company's DefaultAddress when omitted;
+	// see CreateTrackerCompanyOrder).
+	OrderType string `json:"order_type"`
 
 	// Dispatch details — from the real dispatch sheet, all optional. Existing
 	// orders predate these columns, so they come back null; render "—" on

@@ -67,7 +67,7 @@ func NotifyTrackerOrderStakeholders(c *gin.Context) {
 		       o.vehicle_number, o.status, o.public_tracking_token,
 		       o.consignee_name, o.consignee_email, o.material, o.quantity,
 		       o.dispatch_datetime, o.documents_enclosed, o.received_confirmation_token,
-		       o.booked_for_state, o.consignee_state,
+		       o.booked_for_state, o.consignee_state, o.order_type,
 		       c.company_name, c.contact_email, c.notification_email
 		FROM tracker_orders o
 		JOIN tracker_companies c ON c.id = o.company_id
@@ -80,7 +80,7 @@ func NotifyTrackerOrderStakeholders(c *gin.Context) {
 		&o.VehicleNumber, &o.Status, &o.PublicTrackingToken,
 		&o.ConsigneeName, &o.ConsigneeEmail, &o.Material, &o.Quantity,
 		&o.DispatchDatetime, &o.DocumentsEnclosed, &o.ReceivedConfirmationToken,
-		&o.BookedForState, &o.ConsigneeState,
+		&o.BookedForState, &o.ConsigneeState, &o.OrderType,
 		&companyName, &contactEmail, &notificationEmail,
 	)
 	if err != nil {
@@ -115,8 +115,16 @@ func NotifyTrackerOrderStakeholders(c *gin.Context) {
 	subject := fmt.Sprintf("Dispatch Details — %s (Truck %s)", o.BookedForCompanyName, o.VehicleNumber)
 	// Only consignee/booked_for get the receipt-confirmation line — the
 	// transporter isn't the one confirming goods were received.
-	bodyWithReceipt := buildDispatchEmailBody(o, trackingLink, receiptLink)
-	bodyWithoutReceipt := buildDispatchEmailBody(o, trackingLink, "")
+	//
+	// omitTrackingLink: on an inbound order, BookedFor* is repurposed as the
+	// Supplier (approved field reuse, migration 050) and the "shipment" is
+	// really the company's own inbound pickup — a public live-tracking link
+	// isn't meaningful to send them. Rather than splitting into a separate
+	// send path for inbound orders, buildDispatchEmailBody takes a shared
+	// flag and omits just the one line.
+	omitTrackingLink := o.OrderType == "inbound"
+	bodyWithReceipt := buildDispatchEmailBody(o, trackingLink, receiptLink, omitTrackingLink)
+	bodyWithoutReceipt := buildDispatchEmailBody(o, trackingLink, "", omitTrackingLink)
 
 	// Reply-To is the company's own address — never the client's domain,
 	// which would fail SPF/DKIM if we tried to send "from" it.
@@ -200,7 +208,10 @@ func NotifyTrackerOrderStakeholders(c *gin.Context) {
 // the mail package (Resend's Text field, no HTML templating). receiptLink
 // is only passed for the consignee/booked_for recipients — empty omits the
 // "confirm receipt" line entirely (transporter emails never get it).
-func buildDispatchEmailBody(o TrackerOrder, trackingLink, receiptLink string) string {
+// omitTrackingLink drops the "Track this shipment live" line — set for
+// inbound orders, where BookedFor* is the Supplier rather than a party
+// tracking an outbound delivery (see NotifyTrackerOrderStakeholders).
+func buildDispatchEmailBody(o TrackerOrder, trackingLink, receiptLink string, omitTrackingLink bool) string {
 	bookedForState := "—"
 	if o.BookedForState != nil && *o.BookedForState != "" {
 		bookedForState = *o.BookedForState
@@ -265,7 +276,9 @@ func buildDispatchEmailBody(o TrackerOrder, trackingLink, receiptLink string) st
 		b.WriteString(fmt.Sprintf("%-4d %-16s %s\n", i+1, row[0], row[1]))
 	}
 	b.WriteString("\n")
-	b.WriteString(fmt.Sprintf("Track this shipment live: %s\n\n", trackingLink))
+	if !omitTrackingLink {
+		b.WriteString(fmt.Sprintf("Track this shipment live: %s\n\n", trackingLink))
+	}
 	if receiptLink != "" {
 		b.WriteString(fmt.Sprintf("Once your goods arrive, confirm receipt here: %s\n\n", receiptLink))
 	}

@@ -343,6 +343,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.DELETE("/tracker/logo", middleware.RequireTrackerCompany(), handlers.DeleteTrackerCompanyLogo)
 		gogoo.POST("/tracker/orders/:id/messages", middleware.RequireTrackerCompany(), handlers.SendTrackerOrderMessage)
 		gogoo.POST("/tracker/orders/:id/notify", middleware.RequireTrackerCompany(), handlers.NotifyTrackerOrderStakeholders)
+		gogoo.POST("/tracker/orders/:id/mark-received", middleware.RequireTrackerCompany(), handlers.MarkTrackerOrderReceivedByStaff)
 		gogoo.POST("/tracker/plan-orders", middleware.RequireTrackerCompany(), handlers.CreateTrackerPlanOrder)
 		gogoo.GET("/tracker/plan-orders", middleware.RequireTrackerCompany(), handlers.ListTrackerPlanOrders)
 		gogoo.GET("/tracker/plan-orders/:id/invoice", middleware.RequireTrackerCompany(), handlers.GetTrackerPlanOrderInvoice)

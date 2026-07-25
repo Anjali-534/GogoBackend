@@ -1374,3 +1374,23 @@ CREATE TABLE IF NOT EXISTS tracker_delivery_reminders_sent (
 
 CREATE INDEX IF NOT EXISTS idx_tracker_delivery_reminders_sent_order_id
   ON tracker_delivery_reminders_sent(order_id);
+
+-- ===== 050_tracker_pickup_orders.sql =====
+
+ALTER TABLE tracker_orders
+    ADD COLUMN IF NOT EXISTS order_type TEXT NOT NULL DEFAULT 'outbound'
+        CHECK (order_type IN ('outbound', 'inbound'));
+
+ALTER TABLE tracker_companies
+    ADD COLUMN IF NOT EXISTS default_address     TEXT,
+    ADD COLUMN IF NOT EXISTS default_address_lat DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS default_address_lng DOUBLE PRECISION;
+
+-- ===== 051_tracker_staff_mark_received.sql =====
+
+ALTER TABLE tracker_order_events
+    DROP CONSTRAINT IF EXISTS tracker_order_events_reported_by_check;
+
+ALTER TABLE tracker_order_events
+    ADD CONSTRAINT tracker_order_events_reported_by_check
+    CHECK (reported_by IN ('company', 'driver', 'consignee', 'staff'));

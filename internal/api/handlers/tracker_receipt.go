@@ -11,6 +11,7 @@ package handlers
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"time"
 
@@ -201,6 +202,133 @@ func ConfirmTrackerReceipt(c *gin.Context) {
 
 	cfg := c.MustGet("config").(*config.Config)
 	tryAutoCompleteDelivery(ctx, cfg, orderID, "consignee")
+
+	c.JSON(http.StatusOK, gin.H{"received_confirmed_at": confirmedAt})
+}
+
+// POST /gogoo/tracker/orders/:id/mark-received — company-scoped staff-side
+// "goods received" confirmation, for when the consignee/supplier never uses
+// (or can't use) the public receipt link and the company wants to close out
+// the order itself. Gated identically to ConfirmTrackerReceipt — the driver
+// must have already claimed delivery (a 'delivery_claimed' event plus an
+// uploaded signature) — so staff can't front-run that signal. Idempotent,
+// same as ConfirmTrackerReceipt: a repeat call just returns the existing
+// confirmed timestamp.
+//
+// Body: {"condition": "good"|"bad", "reason": "..."} — optional, mirrors
+// ConfirmTrackerReceipt's shape so the panel can reuse the same good/bad
+// capture UI as the public receipt page; condition defaults to "good" when
+// omitted. The event note is always the fixed "Goods received — confirmed
+// by staff" regardless of condition — condition/reason are recorded on the
+// order's delivery_condition/delivery_condition_reason columns, same as the
+// consignee path.
+func MarkTrackerOrderReceivedByStaff(c *gin.Context) {
+	companyID := c.GetString("company_id")
+	orderID := c.Param("id")
+
+	var req struct {
+		Condition string `json:"condition"`
+		Reason    string `json:"reason"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil && err != io.EOF {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	condition := req.Condition
+	if condition == "" {
+		condition = "good"
+	} else if !validDeliveryConditions[condition] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid condition"})
+		return
+	}
+	if condition == "bad" && req.Reason == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "reason is required for bad condition"})
+		return
+	}
+
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+
+	var status string
+	var receivedConfirmedAt *time.Time
+	var driverClaimed bool
+	err := pool.QueryRow(ctx, `
+		SELECT o.status, o.received_confirmed_at,
+		       EXISTS (
+		         SELECT 1 FROM tracker_order_events e
+		         WHERE e.order_id = o.id AND e.reported_by = 'driver' AND e.event_kind = 'delivery_claimed'
+		       ) AND o.signature_url IS NOT NULL
+		FROM tracker_orders o WHERE o.id = $1 AND o.company_id = $2
+	`, orderID, companyID).Scan(&status, &receivedConfirmedAt, &driverClaimed)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
+		return
+	}
+
+	if receivedConfirmedAt != nil {
+		c.JSON(http.StatusOK, gin.H{"received_confirmed_at": receivedConfirmedAt})
+		return
+	}
+
+	if status == "cancelled" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "order was cancelled and is no longer tracked"})
+		return
+	}
+	if !driverClaimed {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "driver has not claimed delivery yet"})
+		return
+	}
+
+	var reasonVal *string
+	if condition == "bad" {
+		reasonVal = &req.Reason
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	var confirmedAt time.Time
+	err = tx.QueryRow(ctx, `
+		UPDATE tracker_orders
+		SET received_confirmed_at = NOW(), delivery_condition = $3,
+		    delivery_condition_reason = $4, updated_at = NOW()
+		WHERE id = $1 AND company_id = $2 AND received_confirmed_at IS NULL
+		RETURNING received_confirmed_at
+	`, orderID, companyID, condition, reasonVal).Scan(&confirmedAt)
+	if err != nil {
+		// Lost a race with a concurrent confirm — re-read and return that
+		// result instead of erroring, keeping this endpoint idempotent.
+		var existing time.Time
+		if reErr := pool.QueryRow(ctx, `
+			SELECT received_confirmed_at FROM tracker_orders WHERE id = $1 AND company_id = $2
+		`, orderID, companyID).Scan(&existing); reErr == nil {
+			c.JSON(http.StatusOK, gin.H{"received_confirmed_at": existing})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "confirm failed"})
+		return
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO tracker_order_events (id, order_id, status, note, reported_by)
+		VALUES ($1,$2,$3,$4,'staff')
+	`, uuid.New(), orderID, status, "Goods received — confirmed by staff")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to log event"})
+		return
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit"})
+		return
+	}
+
+	cfg := c.MustGet("config").(*config.Config)
+	tryAutoCompleteDelivery(ctx, cfg, orderID, "staff")
 
 	c.JSON(http.StatusOK, gin.H{"received_confirmed_at": confirmedAt})
 }

@@ -59,6 +59,14 @@ var validOrderStatuses = map[string]bool{
 	"cancelled":  true,
 }
 
+// validOrderTypes matches the CHECK constraint added in migration 050.
+// Empty request input defaults to "outbound" (the original/only order
+// shape) rather than being rejected — see CreateTrackerCompanyOrder.
+var validOrderTypes = map[string]bool{
+	"outbound": true,
+	"inbound":  true,
+}
+
 // validOrderPriorities matches the CHECK constraint added in migration 043.
 // Empty request input defaults to "normal" rather than being rejected.
 var validOrderPriorities = map[string]bool{
@@ -403,12 +411,14 @@ func GetTrackerCompanyProfile(c *gin.Context) {
 	err := pool.QueryRow(ctx, `
 		SELECT id, company_name, COALESCE(contact_phone,''), contact_email,
 		       COALESCE(gstin,''), status, approved_by::text, approved_at, created_at,
-		       notification_email, logo_url, current_plan, subscription_expires_at
+		       notification_email, logo_url, current_plan, subscription_expires_at,
+		       default_address, default_address_lat, default_address_lng
 		FROM tracker_companies WHERE id = $1
 	`, companyID).Scan(
 		&comp.ID, &comp.CompanyName, &comp.ContactPhone, &comp.ContactEmail,
 		&comp.GSTIN, &comp.Status, &approvedBy, &comp.ApprovedAt, &comp.CreatedAt,
 		&comp.NotificationEmail, &comp.LogoURL, &comp.CurrentPlan, &comp.SubscriptionExpiresAt,
+		&comp.DefaultAddress, &comp.DefaultAddressLat, &comp.DefaultAddressLng,
 	)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "company not found"})
@@ -426,19 +436,35 @@ func UpdateTrackerCompanyProfile(c *gin.Context) {
 		ContactPhone      string `json:"contact_phone" binding:"required"`
 		GSTIN             string `json:"gstin"`
 		NotificationEmail string `json:"notification_email" binding:"omitempty,email"`
+
+		// DefaultAddress (+ lat/lng, migration 050) — the company's own
+		// address, used to auto-fill dispatch_to on inbound orders. All
+		// optional; clearing the text field also clears the coordinates.
+		DefaultAddress    string   `json:"default_address"`
+		DefaultAddressLat *float64 `json:"default_address_lat"`
+		DefaultAddressLng *float64 `json:"default_address_lng"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
+	defaultAddressLat := req.DefaultAddressLat
+	defaultAddressLng := req.DefaultAddressLng
+	if req.DefaultAddress == "" {
+		defaultAddressLat = nil
+		defaultAddressLng = nil
+	}
+
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 	_, err := pool.Exec(ctx, `
 		UPDATE tracker_companies
-		SET company_name=$1, contact_phone=$2, gstin=$3, notification_email=$4, updated_at=NOW()
-		WHERE id=$5
-	`, req.CompanyName, req.ContactPhone, nullIfEmpty(req.GSTIN), nullIfEmpty(req.NotificationEmail), companyID)
+		SET company_name=$1, contact_phone=$2, gstin=$3, notification_email=$4,
+		    default_address=$5, default_address_lat=$6, default_address_lng=$7, updated_at=NOW()
+		WHERE id=$8
+	`, req.CompanyName, req.ContactPhone, nullIfEmpty(req.GSTIN), nullIfEmpty(req.NotificationEmail),
+		nullIfEmpty(req.DefaultAddress), defaultAddressLat, defaultAddressLng, companyID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "update failed"})
 		return
@@ -772,7 +798,8 @@ func ListTrackerCompanyOwnOrders(c *gin.Context) {
 		       driver_id::text, COALESCE(driver_name,''), COALESCE(driver_phone,''),
 		       vehicle_number, COALESCE(eway_bill_number,''), COALESCE(eway_bill_file_url,''),
 		       status, public_tracking_token, created_at,
-		       consignee_name, material, quantity, dispatch_datetime, documents_enclosed
+		       consignee_name, material, quantity, dispatch_datetime, documents_enclosed,
+		       order_type
 		FROM tracker_orders
 		WHERE company_id = $1`
 	args := []interface{}{companyID}
@@ -801,6 +828,7 @@ func ListTrackerCompanyOwnOrders(c *gin.Context) {
 			&o.VehicleNumber, &o.EwayBillNumber, &o.EwayBillFileURL,
 			&o.Status, &o.PublicTrackingToken, &o.CreatedAt,
 			&o.ConsigneeName, &o.Material, &o.Quantity, &o.DispatchDatetime, &o.DocumentsEnclosed,
+			&o.OrderType,
 		); err != nil {
 			continue
 		}
@@ -885,9 +913,12 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 	preCtx := context.Background()
 	prePool := db.GetDB().GetPool()
 	var currentPlan *string
+	var companyDefaultAddress *string
+	var companyDefaultAddressLat, companyDefaultAddressLng *float64
 	if err := prePool.QueryRow(preCtx, `
-		SELECT current_plan FROM tracker_companies WHERE id = $1
-	`, companyID).Scan(&currentPlan); err != nil {
+		SELECT current_plan, default_address, default_address_lat, default_address_lng
+		FROM tracker_companies WHERE id = $1
+	`, companyID).Scan(&currentPlan, &companyDefaultAddress, &companyDefaultAddressLat, &companyDefaultAddressLng); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load company plan"})
 		return
 	}
@@ -926,19 +957,26 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 	}
 
 	var req struct {
-		BookedForCompanyName string   `json:"booked_for_company_name" binding:"required"`
-		BookedForPhone       string   `json:"booked_for_phone" binding:"required"`
-		DispatchFrom         string   `json:"dispatch_from" binding:"required"`
-		DispatchTo           string   `json:"dispatch_to" binding:"required"`
-		DispatchFromLat      *float64 `json:"dispatch_from_lat"`
-		DispatchFromLng      *float64 `json:"dispatch_from_lng"`
-		DispatchToLat        *float64 `json:"dispatch_to_lat"`
-		DispatchToLng        *float64 `json:"dispatch_to_lng"`
-		TransporterName      string   `json:"transporter_name"`
-		TransporterPhone     string   `json:"transporter_phone"`
-		DriverID             *string  `json:"driver_id"`
-		VehicleNumber        string   `json:"vehicle_number" binding:"required"`
-		EwayBillNumber       string   `json:"eway_bill_number"`
+		// OrderType (migration 050) — "outbound" (default) or "inbound".
+		// Validated below rather than via binding so an empty string falls
+		// back to "outbound" instead of failing the bind.
+		OrderType            string `json:"order_type"`
+		BookedForCompanyName string `json:"booked_for_company_name" binding:"required"`
+		BookedForPhone       string `json:"booked_for_phone" binding:"required"`
+		DispatchFrom         string `json:"dispatch_from" binding:"required"`
+		// DispatchTo is required for outbound orders but may be omitted for
+		// inbound ones, where it auto-fills from the company's
+		// DefaultAddress (see below) — enforced manually, not via binding.
+		DispatchTo       string   `json:"dispatch_to"`
+		DispatchFromLat  *float64 `json:"dispatch_from_lat"`
+		DispatchFromLng  *float64 `json:"dispatch_from_lng"`
+		DispatchToLat    *float64 `json:"dispatch_to_lat"`
+		DispatchToLng    *float64 `json:"dispatch_to_lng"`
+		TransporterName  string   `json:"transporter_name"`
+		TransporterPhone string   `json:"transporter_phone"`
+		DriverID         *string  `json:"driver_id"`
+		VehicleNumber    string   `json:"vehicle_number" binding:"required"`
+		EwayBillNumber   string   `json:"eway_bill_number"`
 
 		// Dispatch details — from the real dispatch sheet, all optional.
 		ConsigneeName     string     `json:"consignee_name"`
@@ -1002,6 +1040,38 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 		return
 	}
 
+	orderType := req.OrderType
+	if orderType == "" {
+		orderType = "outbound"
+	} else if !validOrderTypes[orderType] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid order_type"})
+		return
+	}
+
+	// dispatch_to is required for every order, but on an inbound one (goods
+	// coming back to the company) it auto-fills from the company's own
+	// DefaultAddress when the client didn't send it — that's the one place
+	// DefaultAddress gets used. A company with no DefaultAddress set must
+	// still type a destination by hand.
+	dispatchTo := req.DispatchTo
+	dispatchToLat := req.DispatchToLat
+	dispatchToLng := req.DispatchToLng
+	if orderType == "inbound" && dispatchTo == "" {
+		if companyDefaultAddress == nil || *companyDefaultAddress == "" {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "set a default company address in your profile before creating inbound orders without a destination",
+			})
+			return
+		}
+		dispatchTo = *companyDefaultAddress
+		dispatchToLat = companyDefaultAddressLat
+		dispatchToLng = companyDefaultAddressLng
+	}
+	if dispatchTo == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "dispatch_to is required"})
+		return
+	}
+
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 
@@ -1058,11 +1128,12 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 			 received_confirmation_token,
 			 registered_address, factory_address,
 			 contact_person_name, contact_person_phone, contact_person_email, contact_person_designation,
-			 priority, expected_delivery_date, declared_value, special_handling, internal_reference)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'created',$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42)
+			 priority, expected_delivery_date, declared_value, special_handling, internal_reference,
+			 order_type)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'created',$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43)
 	`, id, companyID, req.BookedForCompanyName, req.BookedForPhone,
-		req.DispatchFrom, req.DispatchTo, req.DispatchFromLat, req.DispatchFromLng,
-		req.DispatchToLat, req.DispatchToLng, nullIfEmpty(req.TransporterName), nullIfEmpty(req.TransporterPhone),
+		req.DispatchFrom, dispatchTo, req.DispatchFromLat, req.DispatchFromLng,
+		dispatchToLat, dispatchToLng, nullIfEmpty(req.TransporterName), nullIfEmpty(req.TransporterPhone),
 		req.DriverID, driverName, driverPhone, req.VehicleNumber,
 		nullIfEmpty(req.EwayBillNumber), token,
 		nullIfEmpty(req.ConsigneeName), nullIfEmpty(req.Material), nullIfEmpty(req.Quantity),
@@ -1073,7 +1144,8 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 		nullIfEmpty(req.RegisteredAddress), nullIfEmpty(req.FactoryAddress),
 		nullIfEmpty(req.ContactPersonName), nullIfEmpty(req.ContactPersonPhone),
 		nullIfEmpty(req.ContactPersonEmail), nullIfEmpty(req.ContactPersonDesignation),
-		priority, req.ExpectedDeliveryDate, req.DeclaredValue, req.SpecialHandling, nullIfEmpty(req.InternalReference))
+		priority, req.ExpectedDeliveryDate, req.DeclaredValue, req.SpecialHandling, nullIfEmpty(req.InternalReference),
+		orderType)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create order: " + err.Error()})
 		return
@@ -1128,9 +1200,9 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 	// Route caching is fire-and-forget: the order is already committed and
 	// creation must not block on (or fail with) the Ola directions call.
 	// The tracking pages just render without a planned route until it lands.
-	if req.DispatchFromLat != nil && req.DispatchFromLng != nil && req.DispatchToLat != nil && req.DispatchToLng != nil {
+	if req.DispatchFromLat != nil && req.DispatchFromLng != nil && dispatchToLat != nil && dispatchToLng != nil {
 		go cacheTrackerOrderRoute(id.String(),
-			*req.DispatchFromLat, *req.DispatchFromLng, *req.DispatchToLat, *req.DispatchToLng)
+			*req.DispatchFromLat, *req.DispatchFromLng, *dispatchToLat, *dispatchToLng)
 	} else {
 		// One or both endpoints arrived as plain text with no coordinates —
 		// the client didn't send lat/lng because the user typed the address
@@ -1142,7 +1214,7 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 		// stays exactly as it is today: routeless, but otherwise unaffected.
 		go geocodeMissingTrackerOrderEndpoints(id.String(),
 			req.DispatchFrom, req.DispatchFromLat, req.DispatchFromLng,
-			req.DispatchTo, req.DispatchToLat, req.DispatchToLng)
+			dispatchTo, dispatchToLat, dispatchToLng)
 	}
 
 	c.JSON(http.StatusCreated, gin.H{"id": id, "public_tracking_token": token, "message": "order created"})
@@ -1249,7 +1321,8 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 		       consignee_gstin, booked_for_gstin, consignee_state, booked_for_state,
 		       registered_address, factory_address,
 		       contact_person_name, contact_person_phone, contact_person_email, contact_person_designation,
-		       priority, expected_delivery_date, declared_value, special_handling, internal_reference
+		       priority, expected_delivery_date, declared_value, special_handling, internal_reference,
+		       order_type
 		FROM tracker_orders
 		WHERE id = $1 AND company_id = $2
 	`, orderID, companyID).Scan(
@@ -1270,6 +1343,7 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 		&o.RegisteredAddress, &o.FactoryAddress,
 		&o.ContactPersonName, &o.ContactPersonPhone, &o.ContactPersonEmail, &o.ContactPersonDesignation,
 		&o.Priority, &o.ExpectedDeliveryDate, &o.DeclaredValue, &o.SpecialHandling, &o.InternalReference,
+		&o.OrderType,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
