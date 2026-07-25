@@ -1394,3 +1394,59 @@ ALTER TABLE tracker_order_events
 ALTER TABLE tracker_order_events
     ADD CONSTRAINT tracker_order_events_reported_by_check
     CHECK (reported_by IN ('company', 'driver', 'consignee', 'staff'));
+
+-- ===== 052_tracker_wallet_subscription.sql =====
+
+ALTER TABLE tracker_companies
+    ADD COLUMN IF NOT EXISTS wallet_balance      DECIMAL(12,2) NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS subscription_amount DECIMAL(10,2),
+    ADD COLUMN IF NOT EXISTS subscription_status TEXT NOT NULL DEFAULT 'active'
+        CHECK (subscription_status IN ('active', 'overdue', 'paused')),
+    ADD COLUMN IF NOT EXISTS next_billing_date   DATE;
+
+UPDATE tracker_companies
+SET next_billing_date = subscription_expires_at::date
+WHERE subscription_expires_at IS NOT NULL
+  AND next_billing_date IS NULL;
+
+UPDATE tracker_companies
+SET subscription_status = 'paused'
+WHERE suspension_reason IS NOT NULL
+  AND subscription_status = 'active';
+
+CREATE TABLE IF NOT EXISTS tracker_wallet_ledger (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    company_id          UUID NOT NULL REFERENCES tracker_companies(id),
+    type                TEXT NOT NULL
+        CHECK (type IN ('topup', 'subscription_charge', 'adjustment')),
+    amount              DECIMAL(10,2) NOT NULL,
+    balance_after       DECIMAL(10,2) NOT NULL,
+    razorpay_payment_id TEXT,
+    status              TEXT NOT NULL DEFAULT 'completed'
+        CHECK (status IN ('pending', 'completed', 'failed')),
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_tracker_wallet_ledger_company_id
+    ON tracker_wallet_ledger(company_id);
+
+CREATE INDEX IF NOT EXISTS idx_tracker_wallet_ledger_created_at
+    ON tracker_wallet_ledger(created_at);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tracker_wallet_ledger_razorpay_payment_id
+    ON tracker_wallet_ledger(razorpay_payment_id)
+    WHERE razorpay_payment_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS tracker_wallet_charge_attempts (
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    company_id       UUID NOT NULL REFERENCES tracker_companies(id) ON DELETE CASCADE,
+    billing_date     DATE NOT NULL,
+    status           TEXT NOT NULL CHECK (status IN ('charged', 'failed')),
+    amount           DECIMAL(10,2) NOT NULL,
+    wallet_ledger_id UUID REFERENCES tracker_wallet_ledger(id),
+    attempted_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (company_id, billing_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tracker_wallet_charge_attempts_company_id
+    ON tracker_wallet_charge_attempts(company_id);

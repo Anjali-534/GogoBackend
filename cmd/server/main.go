@@ -16,6 +16,7 @@ import (
 	"github.com/deploykit/backend/internal/services/ledger"
 	"github.com/deploykit/backend/internal/services/trackerdelivery"
 	"github.com/deploykit/backend/internal/services/trackersub"
+	"github.com/deploykit/backend/internal/services/trackerwalletbilling"
 	"github.com/joho/godotenv"
 )
 
@@ -103,6 +104,11 @@ func main() {
 	// for staff attention after 7 days of no response.
 	go trackerdelivery.StartDeliveryReminderMailer(cfg)
 	log.Println("✓ Tracker delivery reminder mailer running")
+
+	// Bogie Tracker wallet subscription billing — ticks daily, auto-debits
+	// each company's wallet on its next_billing_date.
+	go trackerwalletbilling.StartWalletBillingJob(cfg)
+	log.Println("✓ Tracker wallet billing job running")
 
 	// Setup API router
 	router := api.SetupRouter(cfg)

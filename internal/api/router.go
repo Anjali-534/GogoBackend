@@ -51,6 +51,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		// gateway itself, trust comes from the verified signature inside each handler.
 		public.POST("/gogoo/driver/wallet/topup/webhook", handlers.DriverWalletTopupWebhook)
 		public.POST("/gogoo/driver/wallet/payout-webhook", handlers.DriverPayoutWebhook)
+
+		// Bogie Tracker company wallet top-up webhook — same reasoning as above.
+		public.POST("/gogoo/tracker/wallet/topup/webhook", handlers.TrackerWalletTopupWebhook)
 	}
 
 	// ============================================================
@@ -344,6 +347,8 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.POST("/tracker/orders/:id/messages", middleware.RequireTrackerCompany(), handlers.SendTrackerOrderMessage)
 		gogoo.POST("/tracker/orders/:id/notify", middleware.RequireTrackerCompany(), handlers.NotifyTrackerOrderStakeholders)
 		gogoo.POST("/tracker/orders/:id/mark-received", middleware.RequireTrackerCompany(), handlers.MarkTrackerOrderReceivedByStaff)
+		gogoo.POST("/tracker/wallet/topup/create-order", middleware.RequireTrackerCompany(), handlers.CreateTrackerWalletTopupOrder)
+		gogoo.GET("/tracker/wallet/ledger", middleware.RequireTrackerCompany(), handlers.GetTrackerWalletLedger)
 		gogoo.POST("/tracker/plan-orders", middleware.RequireTrackerCompany(), handlers.CreateTrackerPlanOrder)
 		gogoo.GET("/tracker/plan-orders", middleware.RequireTrackerCompany(), handlers.ListTrackerPlanOrders)
 		gogoo.GET("/tracker/plan-orders/:id/invoice", middleware.RequireTrackerCompany(), handlers.GetTrackerPlanOrderInvoice)
