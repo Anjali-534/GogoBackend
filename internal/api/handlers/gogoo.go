@@ -1,155 +1,165 @@
-﻿package handlers
+package handlers
 
 import (
-    "context"
-    "crypto/rand"
-    "encoding/json"
-    "fmt"
-    "log"
-    "math"
-    "math/big"
-    "net/http"
-    "os"
-    "strings"
-    "time"
+	"context"
+	"crypto/rand"
+	"encoding/json"
+	"fmt"
+	"log"
+	"math"
+	"math/big"
+	"net/http"
+	"os"
+	"strings"
+	"time"
 
-    "github.com/deploykit/backend/internal/config"
-    "github.com/deploykit/backend/internal/dateutil"
-    "github.com/deploykit/backend/internal/db"
-    "github.com/gin-gonic/gin"
-    "github.com/golang-jwt/jwt/v5"
-    "github.com/google/uuid"
-    "github.com/jackc/pgx/v5/pgxpool"
-    "golang.org/x/crypto/bcrypt"
+	"github.com/deploykit/backend/internal/config"
+	"github.com/deploykit/backend/internal/dateutil"
+	"github.com/deploykit/backend/internal/db"
+	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func RiderSignup(c *gin.Context) {
-    var req struct {
-        Email          string `json:"email" binding:"required,email"`
-        Name           string `json:"name" binding:"required"`
-        Password       string `json:"password" binding:"required,min=8"`
-        Phone          string `json:"phone" binding:"required"`
-        ReferredByCode string `json:"referred_by_code"`
-    }
-    if err := c.ShouldBindJSON(&req); err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-        return
-    }
-    ctx := context.Background()
-    pool := db.GetDB().GetPool()
-    var count int
-    pool.QueryRow(ctx, "SELECT COUNT(*) FROM users WHERE email=$1", req.Email).Scan(&count)
-    if count > 0 {
-        c.JSON(http.StatusConflict, gin.H{"error": "email already registered"})
-        return
-    }
-    userID := uuid.New()
-    riderID := uuid.New()
-    referralCode := generateReferralCode(ctx, "riders", "GU")
-    tx, _ := pool.Begin(ctx)
-    defer tx.Rollback(ctx)
-    hashedPassword, _ := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-    tx.Exec(ctx, "INSERT INTO users (id,email,name,password_hash,is_verified) VALUES ($1,$2,$3,$4,true)", userID, req.Email, req.Name, string(hashedPassword))
-    tx.Exec(ctx, "INSERT INTO riders (id,user_id,phone,referral_code) VALUES ($1,$2,$3,$4)", riderID, userID, req.Phone, referralCode)
-    tx.Commit(ctx)
-    applyReferral("rider", riderID, req.ReferredByCode)
-    c.JSON(http.StatusCreated, gin.H{"user_id": userID, "rider_id": riderID, "message": "Rider account created"})
+	var req struct {
+		Email          string `json:"email" binding:"required,email"`
+		Name           string `json:"name" binding:"required"`
+		Password       string `json:"password" binding:"required,min=8"`
+		Phone          string `json:"phone" binding:"required"`
+		ReferredByCode string `json:"referred_by_code"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+	var count int
+	pool.QueryRow(ctx, "SELECT COUNT(*) FROM users WHERE email=$1", req.Email).Scan(&count)
+	if count > 0 {
+		c.JSON(http.StatusConflict, gin.H{"error": "email already registered"})
+		return
+	}
+	userID := uuid.New()
+	riderID := uuid.New()
+	referralCode := generateReferralCode(ctx, "riders", "GU")
+	tx, _ := pool.Begin(ctx)
+	defer tx.Rollback(ctx)
+	hashedPassword, _ := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	tx.Exec(ctx, "INSERT INTO users (id,email,name,password_hash,is_verified) VALUES ($1,$2,$3,$4,true)", userID, req.Email, req.Name, string(hashedPassword))
+	tx.Exec(ctx, "INSERT INTO riders (id,user_id,phone,referral_code) VALUES ($1,$2,$3,$4)", riderID, userID, req.Phone, referralCode)
+	tx.Commit(ctx)
+	applyReferral("rider", riderID, req.ReferredByCode)
+	c.JSON(http.StatusCreated, gin.H{"user_id": userID, "rider_id": riderID, "message": "Rider account created"})
 }
 
 func DriverSignup(c *gin.Context) {
-    var req struct {
-        Email           string `json:"email" binding:"required,email"`
-        Name            string `json:"name" binding:"required"`
-        Password        string `json:"password" binding:"required,min=8"`
-        Phone           string `json:"phone" binding:"required"`
-        LicenseNum      string `json:"license_number"`
-        VehicleType     string `json:"vehicle_type"`
-        VehicleCategory string `json:"vehicle_category"`
-        VehicleNum      string `json:"vehicle_number"`
-        VehicleModel    string `json:"vehicle_model"`
-        VehicleColor    string `json:"vehicle_color"`
-        BankAccountHolder string `json:"bank_account_holder"`
-        BankAccountNumber string `json:"bank_account_number"`
-        BankIFSC          string `json:"bank_ifsc"`
-        BankName          string `json:"bank_name"`
-        UPIID             string `json:"upi_id"`
-        GSTNumber         string `json:"gst_number"`
-        ReferredByCode    string `json:"referred_by_code"`
-        MVAGDeclarationAccepted bool `json:"mvag_declaration_accepted"`
-        DateOfBirth       string `json:"date_of_birth"` // optional, "2006-01-02"
-        Address           string `json:"address"`       // optional
-    }
-    if err := c.ShouldBindJSON(&req); err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-        return
-    }
-    if !req.MVAGDeclarationAccepted {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "You must accept the MVAG self-declaration to sign up"})
-        return
-    }
-    var dateOfBirth interface{}
-    if req.DateOfBirth != "" {
-        parsed, err := time.Parse("2006-01-02", req.DateOfBirth)
-        if err != nil {
-            c.JSON(http.StatusBadRequest, gin.H{"error": "date_of_birth must be in YYYY-MM-DD format"})
-            return
-        }
-        dateOfBirth = parsed
-    }
-    if req.VehicleType == "" { req.VehicleType = "cab_4w" }
-    if req.VehicleCategory == "" {
-        switch {
-        case len(req.VehicleType) >= 6 && req.VehicleType[:6] == "truck_":
-            req.VehicleCategory = "truck"
-        case len(req.VehicleType) >= 9 && req.VehicleType[:9] == "ambulance":
-            req.VehicleCategory = "ambulance"
-        default:
-            req.VehicleCategory = "cab"
-        }
-    }
-    if req.VehicleNum == "" { req.VehicleNum = "PENDING" }
-    if req.VehicleModel == "" { req.VehicleModel = "N/A" }
-    if req.VehicleColor == "" { req.VehicleColor = "N/A" }
-    if req.LicenseNum == "" { req.LicenseNum = "PENDING" }
+	var req struct {
+		Email                   string `json:"email" binding:"required,email"`
+		Name                    string `json:"name" binding:"required"`
+		Password                string `json:"password" binding:"required,min=8"`
+		Phone                   string `json:"phone" binding:"required"`
+		LicenseNum              string `json:"license_number"`
+		VehicleType             string `json:"vehicle_type"`
+		VehicleCategory         string `json:"vehicle_category"`
+		VehicleNum              string `json:"vehicle_number"`
+		VehicleModel            string `json:"vehicle_model"`
+		VehicleColor            string `json:"vehicle_color"`
+		BankAccountHolder       string `json:"bank_account_holder"`
+		BankAccountNumber       string `json:"bank_account_number"`
+		BankIFSC                string `json:"bank_ifsc"`
+		BankName                string `json:"bank_name"`
+		UPIID                   string `json:"upi_id"`
+		GSTNumber               string `json:"gst_number"`
+		ReferredByCode          string `json:"referred_by_code"`
+		MVAGDeclarationAccepted bool   `json:"mvag_declaration_accepted"`
+		DateOfBirth             string `json:"date_of_birth"` // optional, "2006-01-02"
+		Address                 string `json:"address"`       // optional
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !req.MVAGDeclarationAccepted {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "You must accept the MVAG self-declaration to sign up"})
+		return
+	}
+	var dateOfBirth interface{}
+	if req.DateOfBirth != "" {
+		parsed, err := time.Parse("2006-01-02", req.DateOfBirth)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "date_of_birth must be in YYYY-MM-DD format"})
+			return
+		}
+		dateOfBirth = parsed
+	}
+	if req.VehicleType == "" {
+		req.VehicleType = "cab_4w"
+	}
+	if req.VehicleCategory == "" {
+		switch {
+		case len(req.VehicleType) >= 6 && req.VehicleType[:6] == "truck_":
+			req.VehicleCategory = "truck"
+		case len(req.VehicleType) >= 9 && req.VehicleType[:9] == "ambulance":
+			req.VehicleCategory = "ambulance"
+		default:
+			req.VehicleCategory = "cab"
+		}
+	}
+	if req.VehicleNum == "" {
+		req.VehicleNum = "PENDING"
+	}
+	if req.VehicleModel == "" {
+		req.VehicleModel = "N/A"
+	}
+	if req.VehicleColor == "" {
+		req.VehicleColor = "N/A"
+	}
+	if req.LicenseNum == "" {
+		req.LicenseNum = "PENDING"
+	}
 
-    ctx := context.Background()
-    pool := db.GetDB().GetPool()
-    var count int
-    pool.QueryRow(ctx, "SELECT COUNT(*) FROM users WHERE email=$1", req.Email).Scan(&count)
-    if count > 0 {
-        c.JSON(http.StatusConflict, gin.H{"error": "email already registered"})
-        return
-    }
-    userID := uuid.New()
-    driverID := uuid.New()
-    tx, err := pool.Begin(ctx)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-        return
-    }
-    defer tx.Rollback(ctx)
-    referralCode := generateReferralCode(ctx, "drivers", "GD")
-    hashedPassword, _ := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-    if _, err := tx.Exec(ctx, "INSERT INTO users (id,email,name,password_hash,is_verified) VALUES ($1,$2,$3,$4,false)", userID, req.Email, req.Name, string(hashedPassword)); err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create user"})
-        return
-    }
-    if _, err := tx.Exec(ctx,
-        `INSERT INTO drivers (id,user_id,phone,license_number,vehicle_type,vehicle_category,vehicle_number,vehicle_model,vehicle_color,bank_account_holder,bank_account_number,bank_ifsc,bank_name,upi_id,gst_number,referral_code,mvag_declaration_accepted,mvag_declaration_at,date_of_birth,address) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW(),$18,$19)`,
-        driverID, userID, req.Phone, req.LicenseNum, req.VehicleType, req.VehicleCategory, req.VehicleNum, req.VehicleModel, req.VehicleColor,
-        nullIfEmpty(req.BankAccountHolder), nullIfEmpty(req.BankAccountNumber), nullIfEmpty(req.BankIFSC), nullIfEmpty(req.BankName), nullIfEmpty(req.UPIID), nullIfEmpty(req.GSTNumber), referralCode, req.MVAGDeclarationAccepted,
-        dateOfBirth, nullIfEmpty(req.Address),
-    ); err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create driver: " + err.Error()})
-        return
-    }
-    if err := tx.Commit(ctx); err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit"})
-        return
-    }
-    applyReferral("driver", driverID, req.ReferredByCode)
-    // Charge one-time registration fee
-    _, _ = pool.Exec(ctx, `
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+	var count int
+	pool.QueryRow(ctx, "SELECT COUNT(*) FROM users WHERE email=$1", req.Email).Scan(&count)
+	if count > 0 {
+		c.JSON(http.StatusConflict, gin.H{"error": "email already registered"})
+		return
+	}
+	userID := uuid.New()
+	driverID := uuid.New()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	defer tx.Rollback(ctx)
+	referralCode := generateReferralCode(ctx, "drivers", "GD")
+	hashedPassword, _ := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if _, err := tx.Exec(ctx, "INSERT INTO users (id,email,name,password_hash,is_verified) VALUES ($1,$2,$3,$4,false)", userID, req.Email, req.Name, string(hashedPassword)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create user"})
+		return
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO drivers (id,user_id,phone,license_number,vehicle_type,vehicle_category,vehicle_number,vehicle_model,vehicle_color,bank_account_holder,bank_account_number,bank_ifsc,bank_name,upi_id,gst_number,referral_code,mvag_declaration_accepted,mvag_declaration_at,date_of_birth,address) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW(),$18,$19)`,
+		driverID, userID, req.Phone, req.LicenseNum, req.VehicleType, req.VehicleCategory, req.VehicleNum, req.VehicleModel, req.VehicleColor,
+		nullIfEmpty(req.BankAccountHolder), nullIfEmpty(req.BankAccountNumber), nullIfEmpty(req.BankIFSC), nullIfEmpty(req.BankName), nullIfEmpty(req.UPIID), nullIfEmpty(req.GSTNumber), referralCode, req.MVAGDeclarationAccepted,
+		dateOfBirth, nullIfEmpty(req.Address),
+	); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create driver: " + err.Error()})
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit"})
+		return
+	}
+	applyReferral("driver", driverID, req.ReferredByCode)
+	// Charge one-time registration fee
+	_, _ = pool.Exec(ctx, `
         INSERT INTO driver_earnings
             (id, driver_id, amount, type, description, is_debit, debit_type)
         VALUES
@@ -157,33 +167,35 @@ func DriverSignup(c *gin.Context) {
              'One-time registration fee — bogie onboarding',
              true, 'registration_fee')
     `, uuid.New(), driverID)
-    _, _ = pool.Exec(ctx, `UPDATE drivers SET wallet_balance = -700.00 WHERE id = $1`, driverID)
-    c.JSON(http.StatusCreated, gin.H{"user_id": userID, "driver_id": driverID, "message": "Driver account created. Pending verification."})
+	_, _ = pool.Exec(ctx, `UPDATE drivers SET wallet_balance = -700.00 WHERE id = $1`, driverID)
+	c.JSON(http.StatusCreated, gin.H{"user_id": userID, "driver_id": driverID, "message": "Driver account created. Pending verification."})
 }
 
 func nullIfEmpty(s string) interface{} {
-    if s == "" { return nil }
-    return s
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 func ListServiceTypes(c *gin.Context) {
-    ctx := context.Background()
-    pool := db.GetDB().GetPool()
-    rows, err := pool.Query(ctx, `SELECT id,name,slug,vehicle_type,COALESCE(category,''),COALESCE(scope,''),base_fare,per_km_rate,per_min_rate,surge_multiplier,capacity FROM service_types WHERE is_active=true ORDER BY base_fare ASC`)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
-        return
-    }
-    defer rows.Close()
-    var services []map[string]interface{}
-    for rows.Next() {
-        var id, name, slug, vehicleType, category, scope string
-        var baseFare, perKm, perMin, surge float64
-        var capacity int
-        rows.Scan(&id, &name, &slug, &vehicleType, &category, &scope, &baseFare, &perKm, &perMin, &surge, &capacity)
-        services = append(services, map[string]interface{}{"id": id, "name": name, "slug": slug, "vehicle_type": vehicleType, "category": category, "scope": scope, "base_fare": baseFare, "per_km_rate": perKm, "surge_multiplier": surge, "capacity": capacity})
-    }
-    c.JSON(http.StatusOK, services)
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+	rows, err := pool.Query(ctx, `SELECT id,name,slug,vehicle_type,COALESCE(category,''),COALESCE(scope,''),base_fare,per_km_rate,per_min_rate,surge_multiplier,capacity FROM service_types WHERE is_active=true ORDER BY base_fare ASC`)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	defer rows.Close()
+	var services []map[string]interface{}
+	for rows.Next() {
+		var id, name, slug, vehicleType, category, scope string
+		var baseFare, perKm, perMin, surge float64
+		var capacity int
+		rows.Scan(&id, &name, &slug, &vehicleType, &category, &scope, &baseFare, &perKm, &perMin, &surge, &capacity)
+		services = append(services, map[string]interface{}{"id": id, "name": name, "slug": slug, "vehicle_type": vehicleType, "category": category, "scope": scope, "base_fare": baseFare, "per_km_rate": perKm, "surge_multiplier": surge, "capacity": capacity})
+	}
+	c.JSON(http.StatusOK, services)
 }
 
 // cabExtraFareMultipliers mirrors the app's cab/vehicles.tsx EXTRAS table.
@@ -193,9 +205,9 @@ func ListServiceTypes(c *gin.Context) {
 // — never taken from the client — so a request can only select one of these
 // three known, reviewed multipliers, not an arbitrary one.
 var cabExtraFareMultipliers = map[string]float64{
-    "cab_any":        0.88,
-    "cab_prime_sed":  1.15,
-    "cab_mini_nonac": 0.82,
+	"cab_any":        0.88,
+	"cab_prime_sed":  1.15,
+	"cab_mini_nonac": 0.82,
 }
 
 const truckAddonPrice = 200.0
@@ -216,82 +228,82 @@ const roadDistanceFactor = 1.3
 // road distance is a worthwhile future improvement but not required to
 // close the trust-boundary gap this closes.
 func haversineKm(aLat, aLng, bLat, bLng float64) float64 {
-    const R = 6371.0
-    dLat := (bLat - aLat) * math.Pi / 180
-    dLng := (bLng - aLng) * math.Pi / 180
-    x := math.Sin(dLat/2)*math.Sin(dLat/2) +
-        math.Cos(aLat*math.Pi/180)*math.Cos(bLat*math.Pi/180)*math.Sin(dLng/2)*math.Sin(dLng/2)
-    return R * 2 * math.Atan2(math.Sqrt(x), math.Sqrt(1-x))
+	const R = 6371.0
+	dLat := (bLat - aLat) * math.Pi / 180
+	dLng := (bLng - aLng) * math.Pi / 180
+	x := math.Sin(dLat/2)*math.Sin(dLat/2) +
+		math.Cos(aLat*math.Pi/180)*math.Cos(bLat*math.Pi/180)*math.Sin(dLng/2)*math.Sin(dLng/2)
+	return R * 2 * math.Atan2(math.Sqrt(x), math.Sqrt(1-x))
 }
 
 // createBookingRequest is CreateBooking's request body, factored out to a
 // named type so createBookingCore can also be called from
 // CreateTrackerCompanyRide (tracker.go) with the same binding/validation.
 type createBookingRequest struct {
-    ServiceTypeID string  `json:"service_type_id" binding:"required"`
-    PickupLat     float64 `json:"pickup_lat" binding:"required"`
-    PickupLng     float64 `json:"pickup_lng" binding:"required"`
-    PickupAddress string  `json:"pickup_address" binding:"required"`
-    DropLat       float64 `json:"drop_lat" binding:"required"`
-    DropLng       float64 `json:"drop_lng" binding:"required"`
-    DropAddress   string  `json:"drop_address" binding:"required"`
-    EstimatedFare float64 `json:"estimated_fare"`
-    PromoCode     *string `json:"promo_code"`
-    DiscountAmt   float64 `json:"discount_amount"`
-    Source        string  `json:"source" binding:"omitempty,oneof=app website"`
-    // Cab "extra" vehicle variant (cab_any/cab_prime_sed/cab_mini_nonac);
-    // blank or unrecognized means the plain service_type fare applies.
-    VehicleSlug string `json:"vehicle_slug"`
-    // Truck addons (flat ₹200 each, matches truck/addons.tsx)
-    LoadingAddon   bool `json:"loading_addon"`
-    UnloadingAddon bool `json:"unloading_addon"`
-    // Ambulance-specific fields
-    HospitalID       *string `json:"hospital_id"`
-    HospitalName     *string `json:"hospital_name"`
-    AmbulanceSubType *string `json:"ambulance_sub_type"`
-    // is_free_ambulance is deliberately not bound here — it's never
-    // client-controlled. Every ambulance booking is created as paid;
-    // staff flip it via POST /bookings/:id/waive-ambulance-fare.
-    PurposeType      *string `json:"purpose_type"`
-    PatientName      *string `json:"patient_name"`
-    ContactPhone     *string `json:"contact_phone"`
-    MedicalNotes     *string `json:"medical_notes"`
-    // Scheduled rides
-    IsScheduled bool   `json:"is_scheduled"`
-    ScheduledAt string `json:"scheduled_at"` // ISO 8601
-    // Receiver details (truck/parcel deliveries)
-    ReceiverName  *string `json:"receiver_name"`
-    ReceiverPhone *string `json:"receiver_phone"`
-    // Payment method chosen at booking time. Only "wallet" is ever stored
-    // as such — anything else (including blank) is "cash", matching the
-    // column's own DB default. The actual wallet debit doesn't happen here;
-    // it happens atomically at ride completion (see UpdateBookingStatus),
-    // so an insufficient balance can still fall back to cash later.
-    PaymentMethod string `json:"payment_method"`
+	ServiceTypeID string  `json:"service_type_id" binding:"required"`
+	PickupLat     float64 `json:"pickup_lat" binding:"required"`
+	PickupLng     float64 `json:"pickup_lng" binding:"required"`
+	PickupAddress string  `json:"pickup_address" binding:"required"`
+	DropLat       float64 `json:"drop_lat" binding:"required"`
+	DropLng       float64 `json:"drop_lng" binding:"required"`
+	DropAddress   string  `json:"drop_address" binding:"required"`
+	EstimatedFare float64 `json:"estimated_fare"`
+	PromoCode     *string `json:"promo_code"`
+	DiscountAmt   float64 `json:"discount_amount"`
+	Source        string  `json:"source" binding:"omitempty,oneof=app website"`
+	// Cab "extra" vehicle variant (cab_any/cab_prime_sed/cab_mini_nonac);
+	// blank or unrecognized means the plain service_type fare applies.
+	VehicleSlug string `json:"vehicle_slug"`
+	// Truck addons (flat ₹200 each, matches truck/addons.tsx)
+	LoadingAddon   bool `json:"loading_addon"`
+	UnloadingAddon bool `json:"unloading_addon"`
+	// Ambulance-specific fields
+	HospitalID       *string `json:"hospital_id"`
+	HospitalName     *string `json:"hospital_name"`
+	AmbulanceSubType *string `json:"ambulance_sub_type"`
+	// is_free_ambulance is deliberately not bound here — it's never
+	// client-controlled. Every ambulance booking is created as paid;
+	// staff flip it via POST /bookings/:id/waive-ambulance-fare.
+	PurposeType  *string `json:"purpose_type"`
+	PatientName  *string `json:"patient_name"`
+	ContactPhone *string `json:"contact_phone"`
+	MedicalNotes *string `json:"medical_notes"`
+	// Scheduled rides
+	IsScheduled bool   `json:"is_scheduled"`
+	ScheduledAt string `json:"scheduled_at"` // ISO 8601
+	// Receiver details (truck/parcel deliveries)
+	ReceiverName  *string `json:"receiver_name"`
+	ReceiverPhone *string `json:"receiver_phone"`
+	// Payment method chosen at booking time. Only "wallet" is ever stored
+	// as such — anything else (including blank) is "cash", matching the
+	// column's own DB default. The actual wallet debit doesn't happen here;
+	// it happens atomically at ride completion (see UpdateBookingStatus),
+	// so an insufficient balance can still fall back to cash later.
+	PaymentMethod string `json:"payment_method"`
 }
 
 func CreateBooking(c *gin.Context) {
-    var req createBookingRequest
-    if err := c.ShouldBindJSON(&req); err != nil {
-        log.Printf("CreateBooking bind error: %v", err)
-        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body: " + err.Error()})
-        return
-    }
+	var req createBookingRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		log.Printf("CreateBooking bind error: %v", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body: " + err.Error()})
+		return
+	}
 
-    ctx := context.Background()
-    pool := db.GetDB().GetPool()
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
 
-    // rider_id is derived from the caller's JWT, never taken from the
-    // request body — a client can only ever book on behalf of itself.
-    userID := c.GetString("user_id")
-    var riderID string
-    if err := pool.QueryRow(ctx, `SELECT id FROM riders WHERE user_id=$1`, userID).Scan(&riderID); err != nil {
-        log.Printf("CreateBooking: no rider profile for user_id=%s (err=%v)", userID, err)
-        c.JSON(http.StatusBadRequest, gin.H{"error": "rider profile not found"})
-        return
-    }
+	// rider_id is derived from the caller's JWT, never taken from the
+	// request body — a client can only ever book on behalf of itself.
+	userID := c.GetString("user_id")
+	var riderID string
+	if err := pool.QueryRow(ctx, `SELECT id FROM riders WHERE user_id=$1`, userID).Scan(&riderID); err != nil {
+		log.Printf("CreateBooking: no rider profile for user_id=%s (err=%v)", userID, err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "rider profile not found"})
+		return
+	}
 
-    createBookingCore(c, ctx, pool, riderID, req)
+	createBookingCore(c, ctx, pool, riderID, req)
 }
 
 // createBookingCore is CreateBooking's actual booking-creation logic —
@@ -302,104 +314,104 @@ func CreateBooking(c *gin.Context) {
 // callers; add new booking fields to createBookingRequest, not to a
 // per-caller copy.
 func createBookingCore(c *gin.Context, ctx context.Context, pool *pgxpool.Pool, riderID string, req createBookingRequest) {
-    if req.Source == "" {
-        req.Source = "app"
-    }
+	if req.Source == "" {
+		req.Source = "app"
+	}
 
-    // Coordinates are deliberately not logged — precise pickup/drop GPS is
-    // personal location data and doesn't belong in server logs.
-    log.Printf("CreateBooking: rider=%s service=%s fare=%v scheduled=%v",
-        riderID, req.ServiceTypeID, req.EstimatedFare, req.IsScheduled)
+	// Coordinates are deliberately not logged — precise pickup/drop GPS is
+	// personal location data and doesn't belong in server logs.
+	log.Printf("CreateBooking: rider=%s service=%s fare=%v scheduled=%v",
+		riderID, req.ServiceTypeID, req.EstimatedFare, req.IsScheduled)
 
-    // A rider can only ever have one non-terminal booking at a time. The
-    // client is trusted to not double-submit, but a retried request, a
-    // buggy client, or a race between two devices on the same account
-    // could otherwise create two live bookings for the same rider — this
-    // is the defense-in-depth backstop for that.
-    var activeCount int
-    pool.QueryRow(ctx,
-        `SELECT COUNT(*) FROM bookings WHERE rider_id=$1 AND status NOT IN ('completed','cancelled')`,
-        riderID,
-    ).Scan(&activeCount)
-    if activeCount > 0 {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "you have an active booking already"})
-        return
-    }
+	// A rider can only ever have one non-terminal booking at a time. The
+	// client is trusted to not double-submit, but a retried request, a
+	// buggy client, or a race between two devices on the same account
+	// could otherwise create two live bookings for the same rider — this
+	// is the defense-in-depth backstop for that.
+	var activeCount int
+	pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM bookings WHERE rider_id=$1 AND status NOT IN ('completed','cancelled')`,
+		riderID,
+	).Scan(&activeCount)
+	if activeCount > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "you have an active booking already"})
+		return
+	}
 
-    // Validate service_type exists and fetch its official pricing — the
-    // client never gets to declare its own base_fare/per_km_rate.
-    var svcCategory, svcSlug string
-    var svcBaseFare, svcPerKmRate float64
-    if err := pool.QueryRow(ctx,
-        `SELECT COALESCE(category,''), slug, base_fare, per_km_rate FROM service_types WHERE id=$1`,
-        req.ServiceTypeID,
-    ).Scan(&svcCategory, &svcSlug, &svcBaseFare, &svcPerKmRate); err != nil {
-        log.Printf("CreateBooking: service_type not found: %s (err=%v)", req.ServiceTypeID, err)
-        c.JSON(http.StatusBadRequest, gin.H{"error": "service_type not found: " + req.ServiceTypeID})
-        return
-    }
+	// Validate service_type exists and fetch its official pricing — the
+	// client never gets to declare its own base_fare/per_km_rate.
+	var svcCategory, svcSlug string
+	var svcBaseFare, svcPerKmRate float64
+	if err := pool.QueryRow(ctx,
+		`SELECT COALESCE(category,''), slug, base_fare, per_km_rate FROM service_types WHERE id=$1`,
+		req.ServiceTypeID,
+	).Scan(&svcCategory, &svcSlug, &svcBaseFare, &svcPerKmRate); err != nil {
+		log.Printf("CreateBooking: service_type not found: %s (err=%v)", req.ServiceTypeID, err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "service_type not found: " + req.ServiceTypeID})
+		return
+	}
 
-    // Scheduled rides: validate the pickup window. Ambulance is emergency-only
-    // and must never be scheduled, regardless of what the client sends.
-    status := "searching"
-    var scheduledAt *time.Time
-    if req.IsScheduled && svcCategory != "ambulance" {
-        parsed, err := time.Parse(time.RFC3339, req.ScheduledAt)
-        if err != nil {
-            c.JSON(http.StatusBadRequest, gin.H{"error": "scheduled_at must be a valid ISO 8601 timestamp"})
-            return
-        }
-        now := time.Now()
-        if parsed.Before(now.Add(30*time.Minute)) || parsed.After(now.Add(7*24*time.Hour)) {
-            c.JSON(http.StatusBadRequest, gin.H{"error": "scheduled_at must be between 30 minutes and 7 days from now"})
-            return
-        }
-        status = "scheduled"
-        scheduledAt = &parsed
-    }
+	// Scheduled rides: validate the pickup window. Ambulance is emergency-only
+	// and must never be scheduled, regardless of what the client sends.
+	status := "searching"
+	var scheduledAt *time.Time
+	if req.IsScheduled && svcCategory != "ambulance" {
+		parsed, err := time.Parse(time.RFC3339, req.ScheduledAt)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "scheduled_at must be a valid ISO 8601 timestamp"})
+			return
+		}
+		now := time.Now()
+		if parsed.Before(now.Add(30*time.Minute)) || parsed.After(now.Add(7*24*time.Hour)) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "scheduled_at must be between 30 minutes and 7 days from now"})
+			return
+		}
+		status = "scheduled"
+		scheduledAt = &parsed
+	}
 
-    // Fold in any outstanding cancellation fee from a previous ride — folded
-    // into THIS booking's fare, never silently dropped. Only reset once a
-    // booking actually completes (see UpdateBookingStatus).
-    var outstandingFee float64
-    pool.QueryRow(ctx, `SELECT COALESCE(outstanding_cancellation_fee,0) FROM riders WHERE id=$1`, riderID).Scan(&outstandingFee)
+	// Fold in any outstanding cancellation fee from a previous ride — folded
+	// into THIS booking's fare, never silently dropped. Only reset once a
+	// booking actually completes (see UpdateBookingStatus).
+	var outstandingFee float64
+	pool.QueryRow(ctx, `SELECT COALESCE(outstanding_cancellation_fee,0) FROM riders WHERE id=$1`, riderID).Scan(&outstandingFee)
 
-    // Server-side fare engine — the client's estimated_fare is never trusted
-    // outright. Distance is recomputed server-side from pickup/drop
-    // coordinates (haversine, straight-line) rather than trusting a
-    // client-reported distance, so fare and the stored booking row can't
-    // be manipulated by sending a fake distance.
-    // Every ambulance booking is priced and created as paid, including
-    // Patient Transport/BLS/ALS — there is no client-side "free" path.
-    // Free-ambulance status is only ever granted afterward by staff via
-    // POST /bookings/:id/waive-ambulance-fare.
-    serverDistanceKm := haversineKm(req.PickupLat, req.PickupLng, req.DropLat, req.DropLng) * roadDistanceFactor
-    serverFare := math.Round(svcBaseFare + serverDistanceKm*svcPerKmRate)
-    if mult, ok := cabExtraFareMultipliers[req.VehicleSlug]; ok && req.VehicleSlug != svcSlug {
-        serverFare = math.Round(serverFare * mult)
-    }
-    if svcCategory == "truck" {
-        if req.LoadingAddon {
-            serverFare += truckAddonPrice
-        }
-        if req.UnloadingAddon {
-            serverFare += truckAddonPrice
-        }
-    }
-    // Promo code is validated and priced entirely server-side — the
-    // client's discount_amount is never trusted, only promo_code (if any)
-    // is looked up against the promo_codes table.
-    var discount float64
-    var appliedPromoCodeID *uuid.UUID
-    var appliedPromoCode string
-    if req.PromoCode != nil && strings.TrimSpace(*req.PromoCode) != "" {
-        code := strings.ToUpper(strings.TrimSpace(*req.PromoCode))
-        var promoID uuid.UUID
-        var discountType string
-        var discountValue, minFare float64
-        var maxDiscount *float64
-        var usageLimitTotal, usageLimitPerUser *int
-        err := pool.QueryRow(ctx, `
+	// Server-side fare engine — the client's estimated_fare is never trusted
+	// outright. Distance is recomputed server-side from pickup/drop
+	// coordinates (haversine, straight-line) rather than trusting a
+	// client-reported distance, so fare and the stored booking row can't
+	// be manipulated by sending a fake distance.
+	// Every ambulance booking is priced and created as paid, including
+	// Patient Transport/BLS/ALS — there is no client-side "free" path.
+	// Free-ambulance status is only ever granted afterward by staff via
+	// POST /bookings/:id/waive-ambulance-fare.
+	serverDistanceKm := haversineKm(req.PickupLat, req.PickupLng, req.DropLat, req.DropLng) * roadDistanceFactor
+	serverFare := math.Round(svcBaseFare + serverDistanceKm*svcPerKmRate)
+	if mult, ok := cabExtraFareMultipliers[req.VehicleSlug]; ok && req.VehicleSlug != svcSlug {
+		serverFare = math.Round(serverFare * mult)
+	}
+	if svcCategory == "truck" {
+		if req.LoadingAddon {
+			serverFare += truckAddonPrice
+		}
+		if req.UnloadingAddon {
+			serverFare += truckAddonPrice
+		}
+	}
+	// Promo code is validated and priced entirely server-side — the
+	// client's discount_amount is never trusted, only promo_code (if any)
+	// is looked up against the promo_codes table.
+	var discount float64
+	var appliedPromoCodeID *uuid.UUID
+	var appliedPromoCode string
+	if req.PromoCode != nil && strings.TrimSpace(*req.PromoCode) != "" {
+		code := strings.ToUpper(strings.TrimSpace(*req.PromoCode))
+		var promoID uuid.UUID
+		var discountType string
+		var discountValue, minFare float64
+		var maxDiscount *float64
+		var usageLimitTotal, usageLimitPerUser *int
+		err := pool.QueryRow(ctx, `
             SELECT id, discount_type, discount_value, min_fare, max_discount,
                    usage_limit_total, usage_limit_per_user
             FROM promo_codes
@@ -410,99 +422,99 @@ func createBookingCore(c *gin.Context, ctx context.Context, pool *pgxpool.Pool, 
             ORDER BY applies_to NULLS LAST
             LIMIT 1
         `, code, svcCategory).Scan(&promoID, &discountType, &discountValue, &minFare, &maxDiscount,
-            &usageLimitTotal, &usageLimitPerUser)
-        if err != nil {
-            c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or expired promo code"})
-            return
-        }
-        if serverFare < minFare {
-            c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("promo code requires a minimum fare of ₹%.0f", minFare)})
-            return
-        }
-        if usageLimitTotal != nil {
-            var totalUses int
-            pool.QueryRow(ctx, `SELECT COUNT(*) FROM promo_redemptions WHERE promo_code_id=$1`, promoID).Scan(&totalUses)
-            if totalUses >= *usageLimitTotal {
-                c.JSON(http.StatusBadRequest, gin.H{"error": "promo code usage limit reached"})
-                return
-            }
-        }
-        if usageLimitPerUser != nil {
-            var userUses int
-            pool.QueryRow(ctx, `SELECT COUNT(*) FROM promo_redemptions WHERE promo_code_id=$1 AND rider_id=$2`, promoID, riderID).Scan(&userUses)
-            if userUses >= *usageLimitPerUser {
-                c.JSON(http.StatusBadRequest, gin.H{"error": "you have already used this promo code"})
-                return
-            }
-        }
-        if discountType == "percent" {
-            discount = math.Round(serverFare * discountValue / 100)
-        } else {
-            discount = discountValue
-        }
-        if maxDiscount != nil && discount > *maxDiscount {
-            discount = *maxDiscount
-        }
-        if discount > serverFare {
-            discount = serverFare
-        }
-        serverFare -= discount
-        appliedPromoCodeID = &promoID
-        appliedPromoCode = code
-    }
+			&usageLimitTotal, &usageLimitPerUser)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or expired promo code"})
+			return
+		}
+		if serverFare < minFare {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("promo code requires a minimum fare of ₹%.0f", minFare)})
+			return
+		}
+		if usageLimitTotal != nil {
+			var totalUses int
+			pool.QueryRow(ctx, `SELECT COUNT(*) FROM promo_redemptions WHERE promo_code_id=$1`, promoID).Scan(&totalUses)
+			if totalUses >= *usageLimitTotal {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "promo code usage limit reached"})
+				return
+			}
+		}
+		if usageLimitPerUser != nil {
+			var userUses int
+			pool.QueryRow(ctx, `SELECT COUNT(*) FROM promo_redemptions WHERE promo_code_id=$1 AND rider_id=$2`, promoID, riderID).Scan(&userUses)
+			if userUses >= *usageLimitPerUser {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "you have already used this promo code"})
+				return
+			}
+		}
+		if discountType == "percent" {
+			discount = math.Round(serverFare * discountValue / 100)
+		} else {
+			discount = discountValue
+		}
+		if maxDiscount != nil && discount > *maxDiscount {
+			discount = *maxDiscount
+		}
+		if discount > serverFare {
+			discount = serverFare
+		}
+		serverFare -= discount
+		appliedPromoCodeID = &promoID
+		appliedPromoCode = code
+	}
 
-    expected := serverFare + outstandingFee
-    tolerance := math.Max(expected*0.05, 5.0)
-    if math.Abs(req.EstimatedFare-expected) > tolerance {
-        log.Printf("CreateBooking: fare mismatch rider=%s service=%s client_fare=%.2f server_fare=%.2f",
-            riderID, req.ServiceTypeID, req.EstimatedFare, expected)
-        c.JSON(http.StatusBadRequest, gin.H{"error": "fare could not be verified — please go back and try booking again"})
-        return
-    }
-    finalFareEstimate := expected
+	expected := serverFare + outstandingFee
+	tolerance := math.Max(expected*0.05, 5.0)
+	if math.Abs(req.EstimatedFare-expected) > tolerance {
+		log.Printf("CreateBooking: fare mismatch rider=%s service=%s client_fare=%.2f server_fare=%.2f",
+			riderID, req.ServiceTypeID, req.EstimatedFare, expected)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "fare could not be verified — please go back and try booking again"})
+		return
+	}
+	finalFareEstimate := expected
 
-    paymentMethod := "cash"
-    if req.PaymentMethod == "wallet" {
-        paymentMethod = "wallet"
-    }
-    // Ambulance never shows a payment-method toggle — asking someone to pick
-    // cash vs. wallet in an emergency flow is exactly the friction that
-    // shouldn't exist there. Instead, silently prefer wallet whenever the
-    // rider's real-time balance actually covers the fare; otherwise it's
-    // cash, same as before. This is a server-side default, never a client
-    // choice — req.PaymentMethod is ignored entirely for this category.
-    if svcCategory == "ambulance" {
-        paymentMethod = "cash"
-        var walletBalance float64
-        pool.QueryRow(ctx, `SELECT COALESCE(wallet_balance,0) FROM riders WHERE id=$1`, riderID).Scan(&walletBalance)
-        if walletBalance >= finalFareEstimate {
-            paymentMethod = "wallet"
-        }
-    }
+	paymentMethod := "cash"
+	if req.PaymentMethod == "wallet" {
+		paymentMethod = "wallet"
+	}
+	// Ambulance never shows a payment-method toggle — asking someone to pick
+	// cash vs. wallet in an emergency flow is exactly the friction that
+	// shouldn't exist there. Instead, silently prefer wallet whenever the
+	// rider's real-time balance actually covers the fare; otherwise it's
+	// cash, same as before. This is a server-side default, never a client
+	// choice — req.PaymentMethod is ignored entirely for this category.
+	if svcCategory == "ambulance" {
+		paymentMethod = "cash"
+		var walletBalance float64
+		pool.QueryRow(ctx, `SELECT COALESCE(wallet_balance,0) FROM riders WHERE id=$1`, riderID).Scan(&walletBalance)
+		if walletBalance >= finalFareEstimate {
+			paymentMethod = "wallet"
+		}
+	}
 
-    bookingID := uuid.New()
-    n, _ := rand.Int(rand.Reader, big.NewInt(10000))
-    otp := fmt.Sprintf("%04d", n.Int64())
-    _, err := pool.Exec(ctx, `
+	bookingID := uuid.New()
+	n, _ := rand.Int(rand.Reader, big.NewInt(10000))
+	otp := fmt.Sprintf("%04d", n.Int64())
+	_, err := pool.Exec(ctx, `
         INSERT INTO bookings
             (id,rider_id,service_type_id,status,pickup_lat,pickup_lng,pickup_address,
              drop_lat,drop_lng,drop_address,estimated_fare,distance_km,ride_otp,source,
              is_scheduled,scheduled_at,receiver_name,receiver_phone,payment_method)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
     `,
-        bookingID, riderID, req.ServiceTypeID, status, req.PickupLat, req.PickupLng, req.PickupAddress,
-        req.DropLat, req.DropLng, req.DropAddress, finalFareEstimate, serverDistanceKm, otp, req.Source,
-        req.IsScheduled && svcCategory != "ambulance", scheduledAt, req.ReceiverName, req.ReceiverPhone, paymentMethod)
-    if err != nil {
-        log.Printf("CreateBooking insert error: %v", err)
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create booking: " + err.Error()})
-        return
-    }
+		bookingID, riderID, req.ServiceTypeID, status, req.PickupLat, req.PickupLng, req.PickupAddress,
+		req.DropLat, req.DropLng, req.DropAddress, finalFareEstimate, serverDistanceKm, otp, req.Source,
+		req.IsScheduled && svcCategory != "ambulance", scheduledAt, req.ReceiverName, req.ReceiverPhone, paymentMethod)
+	if err != nil {
+		log.Printf("CreateBooking insert error: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create booking: " + err.Error()})
+		return
+	}
 
-    // Update ambulance-specific fields if present (uses IF EXISTS safe pattern).
-    // is_free_ambulance is hardcoded false here — it's never set at creation
-    // time, only later by a staff waiver (WaiveAmbulanceFare).
-    _, _ = pool.Exec(ctx, `
+	// Update ambulance-specific fields if present (uses IF EXISTS safe pattern).
+	// is_free_ambulance is hardcoded false here — it's never set at creation
+	// time, only later by a staff waiver (WaiveAmbulanceFare).
+	_, _ = pool.Exec(ctx, `
         UPDATE bookings
         SET hospital_id        = $1,
             hospital_name      = $2,
@@ -514,52 +526,52 @@ func createBookingCore(c *gin.Context, ctx context.Context, pool *pgxpool.Pool, 
             medical_notes      = $7
         WHERE id = $8
     `, req.HospitalID, req.HospitalName, req.AmbulanceSubType,
-        req.PurposeType, req.PatientName, req.ContactPhone, req.MedicalNotes,
-        bookingID)
+		req.PurposeType, req.PatientName, req.ContactPhone, req.MedicalNotes,
+		bookingID)
 
-    if appliedPromoCodeID != nil {
-        _, err := pool.Exec(ctx, `
+	if appliedPromoCodeID != nil {
+		_, err := pool.Exec(ctx, `
             INSERT INTO promo_redemptions (promo_code_id, code, rider_id, booking_id)
             VALUES ($1,$2,$3,$4)
         `, *appliedPromoCodeID, appliedPromoCode, riderID, bookingID)
-        if err != nil {
-            log.Printf("CreateBooking: failed to record promo redemption for booking=%s promo=%s: %v", bookingID, appliedPromoCode, err)
-        }
-    }
+		if err != nil {
+			log.Printf("CreateBooking: failed to record promo redemption for booking=%s promo=%s: %v", bookingID, appliedPromoCode, err)
+		}
+	}
 
-    log.Printf("CreateBooking success: %s (status=%s)", bookingID, status)
+	log.Printf("CreateBooking success: %s (status=%s)", bookingID, status)
 
-    // Scheduled bookings are NOT dispatched now — the scheduler ticks them
-    // into 'searching' 15 minutes before pickup, and the normal matching
-    // flow (this same notify call, from the dispatcher) takes over then.
-    if status == "searching" {
-        notifyDriversOfNewRide(bookingID.String(), svcCategory, req.PickupAddress, finalFareEstimate)
-    }
+	// Scheduled bookings are NOT dispatched now — the scheduler ticks them
+	// into 'searching' 15 minutes before pickup, and the normal matching
+	// flow (this same notify call, from the dispatcher) takes over then.
+	if status == "searching" {
+		notifyDriversOfNewRide(bookingID.String(), svcCategory, req.PickupAddress, finalFareEstimate)
+	}
 
-    resp := gin.H{"booking_id": bookingID, "status": status, "is_scheduled": status == "scheduled", "payment_method": paymentMethod}
-    if scheduledAt != nil {
-        resp["scheduled_at"] = scheduledAt
-    }
-    if outstandingFee > 0 {
-        resp["outstanding_fee_applied"] = outstandingFee
-    }
-    if appliedPromoCodeID != nil {
-        resp["promo_code"] = appliedPromoCode
-        resp["discount_amount"] = discount
-    }
-    c.JSON(http.StatusCreated, resp)
+	resp := gin.H{"booking_id": bookingID, "status": status, "is_scheduled": status == "scheduled", "payment_method": paymentMethod}
+	if scheduledAt != nil {
+		resp["scheduled_at"] = scheduledAt
+	}
+	if outstandingFee > 0 {
+		resp["outstanding_fee_applied"] = outstandingFee
+	}
+	if appliedPromoCodeID != nil {
+		resp["promo_code"] = appliedPromoCode
+		resp["discount_amount"] = discount
+	}
+	c.JSON(http.StatusCreated, resp)
 }
 
 func ListBookings(c *gin.Context) {
-    ctx := context.Background()
-    pool := db.GetDB().GetPool()
-    status := c.Query("status")
-    limit := 50
-    if c.Query("range") == "all_time" {
-        limit = 2000
-    }
-    sortDir := dateutil.ParseSort(c.Query("sort"))
-    query := `SELECT b.id, b.status, b.pickup_address, b.drop_address, b.estimated_fare, b.final_fare, b.created_at,
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+	status := c.Query("status")
+	limit := 50
+	if c.Query("range") == "all_time" {
+		limit = 2000
+	}
+	sortDir := dateutil.ParseSort(c.Query("sort"))
+	query := `SELECT b.id, b.status, b.pickup_address, b.drop_address, b.estimated_fare, b.final_fare, b.created_at,
         u_r.name as rider_name, COALESCE(r.phone,'') as rider_phone,
         COALESCE(u_d.name,'') as driver_name, COALESCE(d.phone,'') as driver_phone,
         COALESCE(d.vehicle_number,'') as vehicle_number,
@@ -579,87 +591,89 @@ func ListBookings(c *gin.Context) {
         LEFT JOIN drivers d ON d.id=b.driver_id
         LEFT JOIN users u_d ON u_d.id=d.user_id
         JOIN service_types st ON st.id=b.service_type_id`
-    conds := []string{}
-    args := []interface{}{}
-    if status != "" {
-        args = append(args, status)
-        conds = append(conds, "b.status=$"+fmt.Sprintf("%d", len(args)))
-    }
-    if rangeKey := c.Query("range"); rangeKey != "" {
-        _, dr := dateutil.Resolve(rangeKey, time.Time{}, c.Query("from"), c.Query("to"))
-        args = append(args, dr.Start)
-        conds = append(conds, "b.created_at>=$"+fmt.Sprintf("%d", len(args)))
-        args = append(args, dr.End)
-        conds = append(conds, "b.created_at<=$"+fmt.Sprintf("%d", len(args)))
-    }
-    if len(conds) > 0 {
-        query += " WHERE " + strings.Join(conds, " AND ")
-    }
-    query += " ORDER BY b.created_at " + sortDir + " LIMIT $" + fmt.Sprintf("%d", len(args)+1)
-    args = append(args, limit)
-    rows, err := pool.Query(ctx, query, args...)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
-        return
-    }
-    defer rows.Close()
-    var bookings []map[string]interface{}
-    for rows.Next() {
-        var id, status, pickup, drop, riderName, riderPhone, driverName, driverPhone, vehicleNumber, serviceName, serviceCategory, serviceSlug, vehicleType, rideOTP string
-        var estFare, finalFare *float64
-        var distanceKm float64
-        var createdAt time.Time
-        var hospitalName, ambulanceSubType, patientName, purposeType *string
-        var isFreeAmbulance bool
-        var source string
-        var acceptedAt, cancelledAt, scheduledAt *time.Time
-        var cancelledBy, cancelReason string
-        var cancellationFee float64
-        var isScheduled bool
-        var receiverName, receiverPhone *string
-        rows.Scan(&id, &status, &pickup, &drop, &estFare, &finalFare, &createdAt,
-            &riderName, &riderPhone, &driverName, &driverPhone, &vehicleNumber,
-            &serviceName, &serviceCategory, &serviceSlug, &vehicleType, &distanceKm, &rideOTP,
-            &hospitalName, &ambulanceSubType, &isFreeAmbulance, &patientName, &purposeType, &source,
-            &acceptedAt, &cancelledAt, &cancelledBy, &cancelReason, &cancellationFee,
-            &isScheduled, &scheduledAt, &receiverName, &receiverPhone)
-        bookings = append(bookings, map[string]interface{}{
-            "id": id, "status": status, "pickup_address": pickup, "drop_address": drop,
-            "estimated_fare": estFare, "final_fare": finalFare, "created_at": createdAt,
-            "rider_name": riderName, "rider_phone": riderPhone,
-            "driver_name": driverName, "driver_phone": driverPhone, "vehicle_number": vehicleNumber,
-            "service_name": serviceName, "service_category": serviceCategory, "service_slug": serviceSlug,
-            "vehicle_type": vehicleType, "distance_km": distanceKm, "ride_otp": rideOTP,
-            "hospital_name": hospitalName, "ambulance_sub_type": ambulanceSubType,
-            "is_free_ambulance": isFreeAmbulance, "patient_name": patientName, "purpose_type": purposeType,
-            "source": source,
-            "accepted_at": acceptedAt, "cancelled_at": cancelledAt, "cancelled_by": cancelledBy,
-            "cancel_reason": cancelReason, "cancellation_fee": cancellationFee,
-            "is_scheduled": isScheduled, "scheduled_at": scheduledAt,
-            "receiver_name": receiverName, "receiver_phone": receiverPhone,
-        })
-    }
-    if bookings == nil { bookings = []map[string]interface{}{} }
-    c.JSON(http.StatusOK, bookings)
+	conds := []string{}
+	args := []interface{}{}
+	if status != "" {
+		args = append(args, status)
+		conds = append(conds, "b.status=$"+fmt.Sprintf("%d", len(args)))
+	}
+	if rangeKey := c.Query("range"); rangeKey != "" {
+		_, dr := dateutil.Resolve(rangeKey, time.Time{}, c.Query("from"), c.Query("to"))
+		args = append(args, dr.Start)
+		conds = append(conds, "b.created_at>=$"+fmt.Sprintf("%d", len(args)))
+		args = append(args, dr.End)
+		conds = append(conds, "b.created_at<=$"+fmt.Sprintf("%d", len(args)))
+	}
+	if len(conds) > 0 {
+		query += " WHERE " + strings.Join(conds, " AND ")
+	}
+	query += " ORDER BY b.created_at " + sortDir + " LIMIT $" + fmt.Sprintf("%d", len(args)+1)
+	args = append(args, limit)
+	rows, err := pool.Query(ctx, query, args...)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	defer rows.Close()
+	var bookings []map[string]interface{}
+	for rows.Next() {
+		var id, status, pickup, drop, riderName, riderPhone, driverName, driverPhone, vehicleNumber, serviceName, serviceCategory, serviceSlug, vehicleType, rideOTP string
+		var estFare, finalFare *float64
+		var distanceKm float64
+		var createdAt time.Time
+		var hospitalName, ambulanceSubType, patientName, purposeType *string
+		var isFreeAmbulance bool
+		var source string
+		var acceptedAt, cancelledAt, scheduledAt *time.Time
+		var cancelledBy, cancelReason string
+		var cancellationFee float64
+		var isScheduled bool
+		var receiverName, receiverPhone *string
+		rows.Scan(&id, &status, &pickup, &drop, &estFare, &finalFare, &createdAt,
+			&riderName, &riderPhone, &driverName, &driverPhone, &vehicleNumber,
+			&serviceName, &serviceCategory, &serviceSlug, &vehicleType, &distanceKm, &rideOTP,
+			&hospitalName, &ambulanceSubType, &isFreeAmbulance, &patientName, &purposeType, &source,
+			&acceptedAt, &cancelledAt, &cancelledBy, &cancelReason, &cancellationFee,
+			&isScheduled, &scheduledAt, &receiverName, &receiverPhone)
+		bookings = append(bookings, map[string]interface{}{
+			"id": id, "status": status, "pickup_address": pickup, "drop_address": drop,
+			"estimated_fare": estFare, "final_fare": finalFare, "created_at": createdAt,
+			"rider_name": riderName, "rider_phone": riderPhone,
+			"driver_name": driverName, "driver_phone": driverPhone, "vehicle_number": vehicleNumber,
+			"service_name": serviceName, "service_category": serviceCategory, "service_slug": serviceSlug,
+			"vehicle_type": vehicleType, "distance_km": distanceKm, "ride_otp": rideOTP,
+			"hospital_name": hospitalName, "ambulance_sub_type": ambulanceSubType,
+			"is_free_ambulance": isFreeAmbulance, "patient_name": patientName, "purpose_type": purposeType,
+			"source":      source,
+			"accepted_at": acceptedAt, "cancelled_at": cancelledAt, "cancelled_by": cancelledBy,
+			"cancel_reason": cancelReason, "cancellation_fee": cancellationFee,
+			"is_scheduled": isScheduled, "scheduled_at": scheduledAt,
+			"receiver_name": receiverName, "receiver_phone": receiverPhone,
+		})
+	}
+	if bookings == nil {
+		bookings = []map[string]interface{}{}
+	}
+	c.JSON(http.StatusOK, bookings)
 }
 
 func ListRiderBookings(c *gin.Context) {
-    userID := c.GetString("user_id")
-    ctx := context.Background()
-    pool := db.GetDB().GetPool()
+	userID := c.GetString("user_id")
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
 
-    var riderID string
-    if err := pool.QueryRow(ctx, `SELECT r.id FROM riders r JOIN users u ON u.id = r.user_id WHERE u.id = $1`, userID).Scan(&riderID); err != nil {
-        c.JSON(http.StatusOK, []map[string]interface{}{})
-        return
-    }
+	var riderID string
+	if err := pool.QueryRow(ctx, `SELECT r.id FROM riders r JOIN users u ON u.id = r.user_id WHERE u.id = $1`, userID).Scan(&riderID); err != nil {
+		c.JSON(http.StatusOK, []map[string]interface{}{})
+		return
+	}
 
-    bookings, err := listBookingsForRider(ctx, pool, riderID)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
-        return
-    }
-    c.JSON(http.StatusOK, bookings)
+	bookings, err := listBookingsForRider(ctx, pool, riderID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	c.JSON(http.StatusOK, bookings)
 }
 
 // listBookingsForRider is ListRiderBookings' query/row-mapping logic, shared
@@ -667,55 +681,57 @@ func ListRiderBookings(c *gin.Context) {
 // which resolves riderID via the company's synthetic_rider_id instead of a
 // rider JWT's user_id.
 func listBookingsForRider(ctx context.Context, pool *pgxpool.Pool, riderID string) ([]map[string]interface{}, error) {
-    rows, err := pool.Query(ctx, `SELECT b.id, b.status, b.pickup_address, b.drop_address, COALESCE(b.estimated_fare,0), COALESCE(b.final_fare,0), COALESCE(b.distance_km,0), b.created_at, COALESCE(u_d.name,'') as driver_name, st.name as service_name, b.source, COALESCE(b.cancellation_fee,0), COALESCE(b.is_scheduled,false), b.scheduled_at FROM bookings b LEFT JOIN drivers d ON d.id = b.driver_id LEFT JOIN users u_d ON u_d.id = d.user_id JOIN service_types st ON st.id = b.service_type_id WHERE b.rider_id = $1 ORDER BY b.created_at DESC LIMIT 100`, riderID)
-    if err != nil {
-        return nil, err
-    }
-    defer rows.Close()
-    var bookings []map[string]interface{}
-    for rows.Next() {
-        var id, status, pickup, drop, driverName, serviceName, source string
-        var estimatedFare, finalFare, distanceKm, cancellationFee float64
-        var createdAt time.Time
-        var isScheduled bool
-        var scheduledAt *time.Time
-        rows.Scan(&id, &status, &pickup, &drop, &estimatedFare, &finalFare, &distanceKm, &createdAt, &driverName, &serviceName, &source, &cancellationFee, &isScheduled, &scheduledAt)
-        bookings = append(bookings, map[string]interface{}{
-            "id": id, "status": status, "pickup_address": pickup, "drop_address": drop,
-            "estimated_fare": estimatedFare, "final_fare": finalFare, "distance_km": distanceKm,
-            "created_at": createdAt, "driver_name": driverName, "service_name": serviceName, "source": source,
-            "cancellation_fee": cancellationFee, "is_scheduled": isScheduled, "scheduled_at": scheduledAt,
-        })
-    }
-    if bookings == nil { bookings = []map[string]interface{}{} }
-    return bookings, nil
+	rows, err := pool.Query(ctx, `SELECT b.id, b.status, b.pickup_address, b.drop_address, COALESCE(b.estimated_fare,0), COALESCE(b.final_fare,0), COALESCE(b.distance_km,0), b.created_at, COALESCE(u_d.name,'') as driver_name, st.name as service_name, b.source, COALESCE(b.cancellation_fee,0), COALESCE(b.is_scheduled,false), b.scheduled_at FROM bookings b LEFT JOIN drivers d ON d.id = b.driver_id LEFT JOIN users u_d ON u_d.id = d.user_id JOIN service_types st ON st.id = b.service_type_id WHERE b.rider_id = $1 ORDER BY b.created_at DESC LIMIT 100`, riderID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var bookings []map[string]interface{}
+	for rows.Next() {
+		var id, status, pickup, drop, driverName, serviceName, source string
+		var estimatedFare, finalFare, distanceKm, cancellationFee float64
+		var createdAt time.Time
+		var isScheduled bool
+		var scheduledAt *time.Time
+		rows.Scan(&id, &status, &pickup, &drop, &estimatedFare, &finalFare, &distanceKm, &createdAt, &driverName, &serviceName, &source, &cancellationFee, &isScheduled, &scheduledAt)
+		bookings = append(bookings, map[string]interface{}{
+			"id": id, "status": status, "pickup_address": pickup, "drop_address": drop,
+			"estimated_fare": estimatedFare, "final_fare": finalFare, "distance_km": distanceKm,
+			"created_at": createdAt, "driver_name": driverName, "service_name": serviceName, "source": source,
+			"cancellation_fee": cancellationFee, "is_scheduled": isScheduled, "scheduled_at": scheduledAt,
+		})
+	}
+	if bookings == nil {
+		bookings = []map[string]interface{}{}
+	}
+	return bookings, nil
 }
 
 func vehicleCategoryFromType(vType string) string {
-    switch {
-    case len(vType) >= 5 && vType[:5] == "truck":
-        return "truck"
-    case len(vType) >= 9 && vType[:9] == "ambulance":
-        return "ambulance"
-    case vType == "cab_2w" || vType == "cab_3w" || vType == "cab_4w" || vType == "cab_4w_suv":
-        return "cab"
-    default:
-        return "cab"
-    }
+	switch {
+	case len(vType) >= 5 && vType[:5] == "truck":
+		return "truck"
+	case len(vType) >= 9 && vType[:9] == "ambulance":
+		return "ambulance"
+	case vType == "cab_2w" || vType == "cab_3w" || vType == "cab_4w" || vType == "cab_4w_suv":
+		return "cab"
+	default:
+		return "cab"
+	}
 }
 
 func ListDrivers(c *gin.Context) {
-    categoryFilter := c.Query("category") // "cab" | "truck" | "ambulance" — empty means no filter
-    // cab/truck/ambulance panels are locked to their own category regardless
-    // of what they pass in ?category= — master and support may query any.
-    if role := c.GetString("role"); role != "master_admin" {
-        if panel := c.GetString("panel"); panel == "cab" || panel == "truck" || panel == "ambulance" {
-            categoryFilter = panel
-        }
-    }
-    ctx := context.Background()
-    pool := db.GetDB().GetPool()
-    rows, err := pool.Query(ctx, `
+	categoryFilter := c.Query("category") // "cab" | "truck" | "ambulance" — empty means no filter
+	// cab/truck/ambulance panels are locked to their own category regardless
+	// of what they pass in ?category= — master and support may query any.
+	if role := c.GetString("role"); role != "master_admin" {
+		if panel := c.GetString("panel"); panel == "cab" || panel == "truck" || panel == "ambulance" {
+			categoryFilter = panel
+		}
+	}
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+	rows, err := pool.Query(ctx, `
         SELECT
             d.id,
             COALESCE(d.user_id::text,'') AS user_id,
@@ -763,124 +779,124 @@ func ListDrivers(c *gin.Context) {
         LEFT JOIN users u ON u.id = d.user_id
         ORDER BY d.created_at DESC
         LIMIT 500`)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "db error: " + err.Error()})
-        return
-    }
-    defer rows.Close()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error: " + err.Error()})
+		return
+	}
+	defer rows.Close()
 
-    var dr dateutil.Range
-    hasRange := c.Query("range") != ""
-    if hasRange {
-        _, dr = dateutil.Resolve(c.Query("range"), time.Time{}, c.Query("from"), c.Query("to"))
-    }
+	var dr dateutil.Range
+	hasRange := c.Query("range") != ""
+	if hasRange {
+		_, dr = dateutil.Resolve(c.Query("range"), time.Time{}, c.Query("from"), c.Query("to"))
+	}
 
-    var drivers []map[string]interface{}
-    for rows.Next() {
-        var id, userID, name, email, phone, vType, vNum, vModel, blockReason string
-        var isVerified, isOnline, isActive, isBlocked bool
-        var rating, earnings, walletBalance float64
-        var totalRides int
-        var createdAt time.Time
-        var blockedUntil *time.Time
-        var isWalletBlocked, registrationFeePaid bool
-        var documentsStatus *string
-        var bgStatus, bgNotes, bgCheckedBy string
-        var bgCheckedAt *time.Time
-        var dateOfBirth *time.Time
-        var address *string
-        if err := rows.Scan(
-            &id, &userID, &name, &email, &phone, &vType, &vNum, &vModel,
-            &isVerified, &isOnline, &isActive, &isBlocked, &blockedUntil, &blockReason,
-            &rating, &totalRides, &earnings, &createdAt,
-            &walletBalance, &isWalletBlocked, &registrationFeePaid, &documentsStatus,
-            &bgStatus, &bgNotes, &bgCheckedBy, &bgCheckedAt,
-            &dateOfBirth, &address,
-        ); err != nil {
-            log.Printf("ListDrivers scan error: %v", err)
-            continue
-        }
-        docStatus := "incomplete"
-        if documentsStatus != nil {
-            docStatus = *documentsStatus
-        }
-        vCategory := vehicleCategoryFromType(vType)
-        if categoryFilter != "" && vCategory != categoryFilter {
-            continue
-        }
-        if hasRange && (createdAt.Before(dr.Start) || createdAt.After(dr.End)) {
-            continue
-        }
-        drivers = append(drivers, map[string]interface{}{
-            "id":                    id,
-            "user_id":               userID,
-            "name":                  name,
-            "email":                 email,
-            "phone":                 phone,
-            "vehicle_type":          vType,
-            "vehicle_category":      vCategory,
-            "vehicle_number":        vNum,
-            "vehicle_model":         vModel,
-            "is_verified":           isVerified,
-            "is_online":             isOnline,
-            "is_active":             isActive,
-            "is_blocked":            isBlocked,
-            "blocked_until":         blockedUntil,
-            "block_reason":          blockReason,
-            "rating":                rating,
-            "total_rides":           totalRides,
-            "total_earnings":        earnings,
-            "wallet_balance":        walletBalance,
-            "is_wallet_blocked":     isWalletBlocked,
-            "registration_fee_paid": registrationFeePaid,
-            "created_at":            createdAt,
-            "documents_status":      docStatus,
-            "background_check_status": bgStatus,
-            "background_check_notes":  bgNotes,
-            "background_checked_by":   bgCheckedBy,
-            "background_checked_at":   bgCheckedAt,
-            "date_of_birth":           dateOfBirth,
-            "address":                 address,
-        })
-    }
-    if drivers == nil {
-        drivers = []map[string]interface{}{}
-    }
-    // Rows arrive newest-first from SQL; reverse in place for oldest-first.
-    if dateutil.ParseSort(c.Query("sort")) == "ASC" {
-        for i, j := 0, len(drivers)-1; i < j; i, j = i+1, j-1 {
-            drivers[i], drivers[j] = drivers[j], drivers[i]
-        }
-    }
-    c.JSON(http.StatusOK, drivers)
+	var drivers []map[string]interface{}
+	for rows.Next() {
+		var id, userID, name, email, phone, vType, vNum, vModel, blockReason string
+		var isVerified, isOnline, isActive, isBlocked bool
+		var rating, earnings, walletBalance float64
+		var totalRides int
+		var createdAt time.Time
+		var blockedUntil *time.Time
+		var isWalletBlocked, registrationFeePaid bool
+		var documentsStatus *string
+		var bgStatus, bgNotes, bgCheckedBy string
+		var bgCheckedAt *time.Time
+		var dateOfBirth *time.Time
+		var address *string
+		if err := rows.Scan(
+			&id, &userID, &name, &email, &phone, &vType, &vNum, &vModel,
+			&isVerified, &isOnline, &isActive, &isBlocked, &blockedUntil, &blockReason,
+			&rating, &totalRides, &earnings, &createdAt,
+			&walletBalance, &isWalletBlocked, &registrationFeePaid, &documentsStatus,
+			&bgStatus, &bgNotes, &bgCheckedBy, &bgCheckedAt,
+			&dateOfBirth, &address,
+		); err != nil {
+			log.Printf("ListDrivers scan error: %v", err)
+			continue
+		}
+		docStatus := "incomplete"
+		if documentsStatus != nil {
+			docStatus = *documentsStatus
+		}
+		vCategory := vehicleCategoryFromType(vType)
+		if categoryFilter != "" && vCategory != categoryFilter {
+			continue
+		}
+		if hasRange && (createdAt.Before(dr.Start) || createdAt.After(dr.End)) {
+			continue
+		}
+		drivers = append(drivers, map[string]interface{}{
+			"id":                      id,
+			"user_id":                 userID,
+			"name":                    name,
+			"email":                   email,
+			"phone":                   phone,
+			"vehicle_type":            vType,
+			"vehicle_category":        vCategory,
+			"vehicle_number":          vNum,
+			"vehicle_model":           vModel,
+			"is_verified":             isVerified,
+			"is_online":               isOnline,
+			"is_active":               isActive,
+			"is_blocked":              isBlocked,
+			"blocked_until":           blockedUntil,
+			"block_reason":            blockReason,
+			"rating":                  rating,
+			"total_rides":             totalRides,
+			"total_earnings":          earnings,
+			"wallet_balance":          walletBalance,
+			"is_wallet_blocked":       isWalletBlocked,
+			"registration_fee_paid":   registrationFeePaid,
+			"created_at":              createdAt,
+			"documents_status":        docStatus,
+			"background_check_status": bgStatus,
+			"background_check_notes":  bgNotes,
+			"background_checked_by":   bgCheckedBy,
+			"background_checked_at":   bgCheckedAt,
+			"date_of_birth":           dateOfBirth,
+			"address":                 address,
+		})
+	}
+	if drivers == nil {
+		drivers = []map[string]interface{}{}
+	}
+	// Rows arrive newest-first from SQL; reverse in place for oldest-first.
+	if dateutil.ParseSort(c.Query("sort")) == "ASC" {
+		for i, j := 0, len(drivers)-1; i < j; i, j = i+1, j-1 {
+			drivers[i], drivers[j] = drivers[j], drivers[i]
+		}
+	}
+	c.JSON(http.StatusOK, drivers)
 }
 
 // GET /gogoo/drivers/:id — single driver with full profile
 func GetDriverByID(c *gin.Context) {
-    driverID := c.Param("id")
-    ctx := context.Background()
-    pool := db.GetDB().GetPool()
+	driverID := c.Param("id")
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
 
-    var id, userID, name, email, phone, vType, vCategory, vNum, vModel, blockReason string
-    var isVerified, isOnline, isActive, isBlocked bool
-    var rating, earnings float64
-    var totalRides int
-    var createdAt time.Time
-    var blockedUntil *time.Time
-    var licenseNumber, vehicleColor, bankHolder, bankNum, bankIFSC, upiID, bankName, gstNumber *string
-    var mvagAccepted bool
-    var mvagAt *time.Time
-    var bgStatus, bgNotes, bgCheckedBy string
-    var bgCheckedAt *time.Time
-    var walletBalance float64
-    var isWalletBlocked, registrationFeePaid, firstTripCompleted bool
-    var walletBlockedReason *string
-    var referralCode, referredByCode *string
-    var locationUpdatedAt *time.Time
-    var dateOfBirth *time.Time
-    var address *string
+	var id, userID, name, email, phone, vType, vCategory, vNum, vModel, blockReason string
+	var isVerified, isOnline, isActive, isBlocked bool
+	var rating, earnings float64
+	var totalRides int
+	var createdAt time.Time
+	var blockedUntil *time.Time
+	var licenseNumber, vehicleColor, bankHolder, bankNum, bankIFSC, upiID, bankName, gstNumber *string
+	var mvagAccepted bool
+	var mvagAt *time.Time
+	var bgStatus, bgNotes, bgCheckedBy string
+	var bgCheckedAt *time.Time
+	var walletBalance float64
+	var isWalletBlocked, registrationFeePaid, firstTripCompleted bool
+	var walletBlockedReason *string
+	var referralCode, referredByCode *string
+	var locationUpdatedAt *time.Time
+	var dateOfBirth *time.Time
+	var address *string
 
-    err := pool.QueryRow(ctx, `
+	err := pool.QueryRow(ctx, `
         SELECT
             d.id,
             COALESCE(d.user_id::text,''),
@@ -929,80 +945,80 @@ func GetDriverByID(c *gin.Context) {
         LEFT JOIN users u ON u.id = d.user_id
         WHERE d.id = $1
     `, driverID).Scan(
-        &id, &userID, &name, &email, &phone,
-        &vType, &vCategory, &vNum, &vModel,
-        &isVerified, &isOnline, &isActive,
-        &rating, &totalRides, &earnings, &createdAt,
-        &isBlocked, &blockedUntil, &blockReason,
-        &licenseNumber, &vehicleColor,
-        &bankHolder, &bankNum, &bankIFSC, &upiID,
-        &mvagAccepted, &mvagAt,
-        &bgStatus, &bgNotes, &bgCheckedBy, &bgCheckedAt,
-        &walletBalance, &isWalletBlocked, &registrationFeePaid, &walletBlockedReason,
-        &bankName, &gstNumber, &referralCode, &referredByCode,
-        &firstTripCompleted, &locationUpdatedAt,
-        &dateOfBirth, &address,
-    )
-    if err != nil {
-        c.JSON(http.StatusNotFound, gin.H{"error": "driver not found: " + err.Error()})
-        return
-    }
+		&id, &userID, &name, &email, &phone,
+		&vType, &vCategory, &vNum, &vModel,
+		&isVerified, &isOnline, &isActive,
+		&rating, &totalRides, &earnings, &createdAt,
+		&isBlocked, &blockedUntil, &blockReason,
+		&licenseNumber, &vehicleColor,
+		&bankHolder, &bankNum, &bankIFSC, &upiID,
+		&mvagAccepted, &mvagAt,
+		&bgStatus, &bgNotes, &bgCheckedBy, &bgCheckedAt,
+		&walletBalance, &isWalletBlocked, &registrationFeePaid, &walletBlockedReason,
+		&bankName, &gstNumber, &referralCode, &referredByCode,
+		&firstTripCompleted, &locationUpdatedAt,
+		&dateOfBirth, &address,
+	)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "driver not found: " + err.Error()})
+		return
+	}
 
-    c.JSON(http.StatusOK, map[string]interface{}{
-        "id": id, "user_id": userID, "name": name, "email": email, "phone": phone,
-        "vehicle_type": vType, "vehicle_category": vCategory,
-        "vehicle_number": vNum, "vehicle_model": vModel,
-        "is_verified": isVerified, "is_online": isOnline, "is_active": isActive,
-        "rating": rating, "total_rides": totalRides, "total_earnings": earnings,
-        "created_at": createdAt,
-        "mvag_declaration_accepted": mvagAccepted,
-        "mvag_declaration_at":       mvagAt,
-        "background_check_status":  bgStatus,
-        "background_check_notes":   bgNotes,
-        "background_checked_by":    bgCheckedBy,
-        "background_checked_at":    bgCheckedAt,
-        "is_blocked": isBlocked, "blocked_until": blockedUntil, "block_reason": blockReason,
-        "license_number": licenseNumber, "vehicle_color": vehicleColor,
-        "bank_account_holder": bankHolder, "bank_account_number": bankNum,
-        "bank_ifsc": bankIFSC, "upi_id": upiID, "bank_name": bankName, "gst_number": gstNumber,
-        "wallet_balance":        walletBalance,
-        "is_wallet_blocked":     isWalletBlocked,
-        "wallet_blocked_reason": walletBlockedReason,
-        "registration_fee_paid": registrationFeePaid,
-        "referral_code":         referralCode,
-        "referred_by_code":      referredByCode,
-        "first_trip_completed":  firstTripCompleted,
-        "location_updated_at":   locationUpdatedAt,
-        "date_of_birth":         dateOfBirth,
-        "address":               address,
-    })
+	c.JSON(http.StatusOK, map[string]interface{}{
+		"id": id, "user_id": userID, "name": name, "email": email, "phone": phone,
+		"vehicle_type": vType, "vehicle_category": vCategory,
+		"vehicle_number": vNum, "vehicle_model": vModel,
+		"is_verified": isVerified, "is_online": isOnline, "is_active": isActive,
+		"rating": rating, "total_rides": totalRides, "total_earnings": earnings,
+		"created_at":                createdAt,
+		"mvag_declaration_accepted": mvagAccepted,
+		"mvag_declaration_at":       mvagAt,
+		"background_check_status":   bgStatus,
+		"background_check_notes":    bgNotes,
+		"background_checked_by":     bgCheckedBy,
+		"background_checked_at":     bgCheckedAt,
+		"is_blocked":                isBlocked, "blocked_until": blockedUntil, "block_reason": blockReason,
+		"license_number": licenseNumber, "vehicle_color": vehicleColor,
+		"bank_account_holder": bankHolder, "bank_account_number": bankNum,
+		"bank_ifsc": bankIFSC, "upi_id": upiID, "bank_name": bankName, "gst_number": gstNumber,
+		"wallet_balance":        walletBalance,
+		"is_wallet_blocked":     isWalletBlocked,
+		"wallet_blocked_reason": walletBlockedReason,
+		"registration_fee_paid": registrationFeePaid,
+		"referral_code":         referralCode,
+		"referred_by_code":      referredByCode,
+		"first_trip_completed":  firstTripCompleted,
+		"location_updated_at":   locationUpdatedAt,
+		"date_of_birth":         dateOfBirth,
+		"address":               address,
+	})
 }
 
 func VerifyDriver(c *gin.Context) {
-    driverID := c.Param("id")
-    ctx := context.Background()
-    pool := db.GetDB().GetPool()
+	driverID := c.Param("id")
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
 
-    var bgStatus string
-    pool.QueryRow(ctx, "SELECT COALESCE(background_check_status,'pending') FROM drivers WHERE id=$1", driverID).Scan(&bgStatus)
-    if bgStatus == "flagged" {
-        c.JSON(http.StatusConflict, gin.H{
-            "error":   "background_check_flagged",
-            "message": "This driver's background check is flagged. Clear the flag before verifying.",
-        })
-        return
-    }
+	var bgStatus string
+	pool.QueryRow(ctx, "SELECT COALESCE(background_check_status,'pending') FROM drivers WHERE id=$1", driverID).Scan(&bgStatus)
+	if bgStatus == "flagged" {
+		c.JSON(http.StatusConflict, gin.H{
+			"error":   "background_check_flagged",
+			"message": "This driver's background check is flagged. Clear the flag before verifying.",
+		})
+		return
+	}
 
-    _, err := pool.Exec(ctx, "UPDATE drivers SET is_verified=true,updated_at=NOW() WHERE id=$1", driverID)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify driver"})
-        return
-    }
-    c.JSON(http.StatusOK, gin.H{"message": "Driver verified"})
+	_, err := pool.Exec(ctx, "UPDATE drivers SET is_verified=true,updated_at=NOW() WHERE id=$1", driverID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify driver"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Driver verified"})
 }
 
 var validBGStatuses = map[string]bool{
-    "pending": true, "in_review": true, "clear": true, "flagged": true,
+	"pending": true, "in_review": true, "clear": true, "flagged": true,
 }
 
 // PATCH /gogoo/drivers/:id/background-check — panel-only manual BGV review.
@@ -1010,100 +1026,100 @@ var validBGStatuses = map[string]bool{
 // and timestamp. This is the seam future automated checks (see
 // internal/services/bgv) will eventually write to as well.
 func UpdateDriverBackgroundCheck(c *gin.Context) {
-    driverID := c.Param("id")
-    var req struct {
-        Status string `json:"status" binding:"required"`
-        Notes  string `json:"notes"`
-    }
-    if err := c.ShouldBindJSON(&req); err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-        return
-    }
-    if !validBGStatuses[req.Status] {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "status must be one of pending, in_review, clear, flagged"})
-        return
-    }
-    if req.Status == "flagged" && strings.TrimSpace(req.Notes) == "" {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "notes are required when flagging a driver"})
-        return
-    }
+	driverID := c.Param("id")
+	var req struct {
+		Status string `json:"status" binding:"required"`
+		Notes  string `json:"notes"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !validBGStatuses[req.Status] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "status must be one of pending, in_review, clear, flagged"})
+		return
+	}
+	if req.Status == "flagged" && strings.TrimSpace(req.Notes) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "notes are required when flagging a driver"})
+		return
+	}
 
-    reviewer := c.GetString("user_email")
-    ctx := context.Background()
-    pool := db.GetDB().GetPool()
+	reviewer := c.GetString("user_email")
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
 
-    _, err := pool.Exec(ctx, `
+	_, err := pool.Exec(ctx, `
         UPDATE drivers
         SET background_check_status=$1, background_check_notes=$2,
             background_checked_by=$3, background_checked_at=NOW(), updated_at=NOW()
         WHERE id=$4
     `, req.Status, nullIfEmpty(req.Notes), reviewer, driverID)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update background check status"})
-        return
-    }
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update background check status"})
+		return
+	}
 
-    // Flagging always unverifies the driver immediately — this is the one
-    // path (besides blocking) that DOES flip is_verified back to false, since
-    // a flagged background check is a hard stop regardless of document state.
-    if req.Status == "flagged" {
-        pool.Exec(ctx, "UPDATE drivers SET is_verified=false, updated_at=NOW() WHERE id=$1", driverID)
-    }
+	// Flagging always unverifies the driver immediately — this is the one
+	// path (besides blocking) that DOES flip is_verified back to false, since
+	// a flagged background check is a hard stop regardless of document state.
+	if req.Status == "flagged" {
+		pool.Exec(ctx, "UPDATE drivers SET is_verified=false, updated_at=NOW() WHERE id=$1", driverID)
+	}
 
-    c.JSON(http.StatusOK, gin.H{"message": "Background check status updated", "status": req.Status})
+	c.JSON(http.StatusOK, gin.H{"message": "Background check status updated", "status": req.Status})
 }
 
 func GetAnalytics(c *gin.Context) {
-    ctx := context.Background()
-    pool := db.GetDB().GetPool()
-    var totalBookings, activeDrivers, onlineDrivers, totalRiders int
-    var totalRevenue float64
-    var todayBookings, todayCompleted, todayCancelled int
-    var todayRevenue float64
-    pool.QueryRow(ctx, "SELECT COUNT(*) FROM bookings").Scan(&totalBookings)
-    pool.QueryRow(ctx, "SELECT COUNT(*) FROM drivers WHERE is_verified=true").Scan(&activeDrivers)
-    pool.QueryRow(ctx, "SELECT COUNT(*) FROM drivers WHERE is_online=true").Scan(&onlineDrivers)
-    pool.QueryRow(ctx, "SELECT COUNT(*) FROM riders").Scan(&totalRiders)
-    pool.QueryRow(ctx, `SELECT COALESCE(SUM(COALESCE(final_fare, estimated_fare, 0)),0) FROM bookings WHERE status='completed'`).Scan(&totalRevenue)
-    pool.QueryRow(ctx, "SELECT COUNT(*) FROM bookings WHERE DATE(created_at)=CURRENT_DATE").Scan(&todayBookings)
-    pool.QueryRow(ctx, "SELECT COUNT(*) FROM bookings WHERE DATE(created_at)=CURRENT_DATE AND status='completed'").Scan(&todayCompleted)
-    pool.QueryRow(ctx, "SELECT COUNT(*) FROM bookings WHERE DATE(created_at)=CURRENT_DATE AND status='cancelled'").Scan(&todayCancelled)
-    pool.QueryRow(ctx, `SELECT COALESCE(SUM(COALESCE(final_fare, estimated_fare, 0)),0) FROM bookings WHERE status='completed' AND DATE(created_at)=CURRENT_DATE`).Scan(&todayRevenue)
-    rows, _ := pool.Query(ctx, `SELECT DATE(created_at) as day, COUNT(*) as count FROM bookings WHERE created_at > NOW() - INTERVAL '7 days' GROUP BY day ORDER BY day`)
-    var dailyBookings []map[string]interface{}
-    if rows != nil {
-        for rows.Next() {
-            var day time.Time
-            var count int
-            rows.Scan(&day, &count)
-            dailyBookings = append(dailyBookings, map[string]interface{}{"day": day.Format("Mon"), "count": count})
-        }
-        rows.Close()
-    }
-    byCategory := map[string]interface{}{}
-    catRows, _ := pool.Query(ctx, `SELECT COALESCE(st.category,'other'), COUNT(*), COALESCE(SUM(b.final_fare),0) FROM bookings b JOIN service_types st ON st.id=b.service_type_id WHERE DATE(b.created_at)=CURRENT_DATE GROUP BY st.category`)
-    if catRows != nil {
-        for catRows.Next() {
-            var cat string
-            var count int
-            var rev float64
-            catRows.Scan(&cat, &count, &rev)
-            byCategory[cat] = map[string]interface{}{"bookings": count, "revenue": rev}
-        }
-        catRows.Close()
-    }
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+	var totalBookings, activeDrivers, onlineDrivers, totalRiders int
+	var totalRevenue float64
+	var todayBookings, todayCompleted, todayCancelled int
+	var todayRevenue float64
+	pool.QueryRow(ctx, "SELECT COUNT(*) FROM bookings").Scan(&totalBookings)
+	pool.QueryRow(ctx, "SELECT COUNT(*) FROM drivers WHERE is_verified=true").Scan(&activeDrivers)
+	pool.QueryRow(ctx, "SELECT COUNT(*) FROM drivers WHERE is_online=true").Scan(&onlineDrivers)
+	pool.QueryRow(ctx, "SELECT COUNT(*) FROM riders").Scan(&totalRiders)
+	pool.QueryRow(ctx, `SELECT COALESCE(SUM(COALESCE(final_fare, estimated_fare, 0)),0) FROM bookings WHERE status='completed'`).Scan(&totalRevenue)
+	pool.QueryRow(ctx, "SELECT COUNT(*) FROM bookings WHERE DATE(created_at)=CURRENT_DATE").Scan(&todayBookings)
+	pool.QueryRow(ctx, "SELECT COUNT(*) FROM bookings WHERE DATE(created_at)=CURRENT_DATE AND status='completed'").Scan(&todayCompleted)
+	pool.QueryRow(ctx, "SELECT COUNT(*) FROM bookings WHERE DATE(created_at)=CURRENT_DATE AND status='cancelled'").Scan(&todayCancelled)
+	pool.QueryRow(ctx, `SELECT COALESCE(SUM(COALESCE(final_fare, estimated_fare, 0)),0) FROM bookings WHERE status='completed' AND DATE(created_at)=CURRENT_DATE`).Scan(&todayRevenue)
+	rows, _ := pool.Query(ctx, `SELECT DATE(created_at) as day, COUNT(*) as count FROM bookings WHERE created_at > NOW() - INTERVAL '7 days' GROUP BY day ORDER BY day`)
+	var dailyBookings []map[string]interface{}
+	if rows != nil {
+		for rows.Next() {
+			var day time.Time
+			var count int
+			rows.Scan(&day, &count)
+			dailyBookings = append(dailyBookings, map[string]interface{}{"day": day.Format("Mon"), "count": count})
+		}
+		rows.Close()
+	}
+	byCategory := map[string]interface{}{}
+	catRows, _ := pool.Query(ctx, `SELECT COALESCE(st.category,'other'), COUNT(*), COALESCE(SUM(b.final_fare),0) FROM bookings b JOIN service_types st ON st.id=b.service_type_id WHERE DATE(b.created_at)=CURRENT_DATE GROUP BY st.category`)
+	if catRows != nil {
+		for catRows.Next() {
+			var cat string
+			var count int
+			var rev float64
+			catRows.Scan(&cat, &count, &rev)
+			byCategory[cat] = map[string]interface{}{"bookings": count, "revenue": rev}
+		}
+		catRows.Close()
+	}
 
-    // App analytics from analytics_events table (safe — checks existence first)
-    var appBookingsStarted, appBookingsCompleted, appBookingsCancelled, appUsersToday, appCrashesToday int
-    var tableExists bool
-    pool.QueryRow(ctx, `
+	// App analytics from analytics_events table (safe — checks existence first)
+	var appBookingsStarted, appBookingsCompleted, appBookingsCancelled, appUsersToday, appCrashesToday int
+	var tableExists bool
+	pool.QueryRow(ctx, `
         SELECT EXISTS (
             SELECT FROM information_schema.tables
             WHERE table_name = 'analytics_events'
         )
     `).Scan(&tableExists)
-    if tableExists {
-        pool.QueryRow(ctx, `
+	if tableExists {
+		pool.QueryRow(ctx, `
             SELECT
                 COUNT(*) FILTER (WHERE event_name='booking_started'   AND DATE(created_at)=CURRENT_DATE),
                 COUNT(*) FILTER (WHERE event_name='booking_completed' AND DATE(created_at)=CURRENT_DATE),
@@ -1113,301 +1129,301 @@ func GetAnalytics(c *gin.Context) {
             FROM analytics_events
             WHERE DATE(created_at)=CURRENT_DATE
         `).Scan(&appBookingsStarted, &appBookingsCompleted, &appBookingsCancelled, &appUsersToday, &appCrashesToday)
-    }
-    var appCompletionRate float64
-    if appBookingsStarted > 0 {
-        appCompletionRate = float64(appBookingsCompleted) / float64(appBookingsStarted) * 100
-    }
+	}
+	var appCompletionRate float64
+	if appBookingsStarted > 0 {
+		appCompletionRate = float64(appBookingsCompleted) / float64(appBookingsStarted) * 100
+	}
 
-    c.JSON(http.StatusOK, gin.H{
-        "total_bookings":          totalBookings,
-        "active_drivers":          activeDrivers,
-        "online_drivers":          onlineDrivers,
-        "total_riders":            totalRiders,
-        "total_revenue":           totalRevenue,
-        "today_bookings":          todayBookings,
-        "today_completed":         todayCompleted,
-        "today_cancelled":         todayCancelled,
-        "today_revenue":           todayRevenue,
-        "by_category":             byCategory,
-        "daily_bookings":          dailyBookings,
-        "app_bookings_started":    appBookingsStarted,
-        "app_bookings_completed":  appBookingsCompleted,
-        "app_bookings_cancelled":  appBookingsCancelled,
-        "app_users_today":         appUsersToday,
-        "app_crashes_today":       appCrashesToday,
-        "app_completion_rate":     appCompletionRate,
-    })
+	c.JSON(http.StatusOK, gin.H{
+		"total_bookings":         totalBookings,
+		"active_drivers":         activeDrivers,
+		"online_drivers":         onlineDrivers,
+		"total_riders":           totalRiders,
+		"total_revenue":          totalRevenue,
+		"today_bookings":         todayBookings,
+		"today_completed":        todayCompleted,
+		"today_cancelled":        todayCancelled,
+		"today_revenue":          todayRevenue,
+		"by_category":            byCategory,
+		"daily_bookings":         dailyBookings,
+		"app_bookings_started":   appBookingsStarted,
+		"app_bookings_completed": appBookingsCompleted,
+		"app_bookings_cancelled": appBookingsCancelled,
+		"app_users_today":        appUsersToday,
+		"app_crashes_today":      appCrashesToday,
+		"app_completion_rate":    appCompletionRate,
+	})
 }
 
 // GetPublicStats returns aggregate platform counts for the public marketing
 // site. PUBLIC (no auth): exposes three integers only — no PII, no lists.
 // GET /gogoo/stats/public
 func GetPublicStats(c *gin.Context) {
-    ctx := context.Background()
-    pool := db.GetDB().GetPool()
-    var totalRiders, totalDrivers, totalCompletedRides int
-    pool.QueryRow(ctx, "SELECT COUNT(*) FROM riders").Scan(&totalRiders)
-    pool.QueryRow(ctx, "SELECT COUNT(*) FROM drivers WHERE is_verified=true").Scan(&totalDrivers)
-    pool.QueryRow(ctx, "SELECT COUNT(*) FROM bookings WHERE status='completed'").Scan(&totalCompletedRides)
-    c.JSON(http.StatusOK, gin.H{
-        "total_riders":          totalRiders,
-        "total_drivers":         totalDrivers,
-        "total_completed_rides": totalCompletedRides,
-    })
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+	var totalRiders, totalDrivers, totalCompletedRides int
+	pool.QueryRow(ctx, "SELECT COUNT(*) FROM riders").Scan(&totalRiders)
+	pool.QueryRow(ctx, "SELECT COUNT(*) FROM drivers WHERE is_verified=true").Scan(&totalDrivers)
+	pool.QueryRow(ctx, "SELECT COUNT(*) FROM bookings WHERE status='completed'").Scan(&totalCompletedRides)
+	c.JSON(http.StatusOK, gin.H{
+		"total_riders":          totalRiders,
+		"total_drivers":         totalDrivers,
+		"total_completed_rides": totalCompletedRides,
+	})
 }
 
 // GET /gogoo/payments?range=&from=&to=&sort=
 func ListPayments(c *gin.Context) {
-    ctx := context.Background()
-    pool := db.GetDB().GetPool()
-    query := `SELECT p.id, p.amount, p.platform_fee, p.driver_earnings, p.method, p.status, p.created_at, u.name as rider_name, b.pickup_address, b.drop_address FROM payments p JOIN riders r ON r.id=p.rider_id JOIN users u ON u.id=r.user_id JOIN bookings b ON b.id=p.booking_id`
-    args := []interface{}{}
-    if rangeKey := c.Query("range"); rangeKey != "" {
-        _, dr := dateutil.Resolve(rangeKey, time.Time{}, c.Query("from"), c.Query("to"))
-        args = append(args, dr.Start, dr.End)
-        query += " WHERE p.created_at >= $1 AND p.created_at <= $2"
-    }
-    query += " ORDER BY p.created_at " + dateutil.ParseSort(c.Query("sort")) + " LIMIT 100"
-    rows, err := pool.Query(ctx, query, args...)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
-        return
-    }
-    defer rows.Close()
-    var payments []map[string]interface{}
-    for rows.Next() {
-        var id, method, status, riderName, pickup, drop string
-        var amount, fee, earnings float64
-        var createdAt time.Time
-        rows.Scan(&id, &amount, &fee, &earnings, &method, &status, &createdAt, &riderName, &pickup, &drop)
-        payments = append(payments, map[string]interface{}{"id": id, "amount": amount, "platform_fee": fee, "driver_earnings": earnings, "method": method, "status": status, "created_at": createdAt, "rider_name": riderName, "pickup_address": pickup, "drop_address": drop})
-    }
-    c.JSON(http.StatusOK, payments)
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+	query := `SELECT p.id, p.amount, p.platform_fee, p.driver_earnings, p.method, p.status, p.created_at, u.name as rider_name, b.pickup_address, b.drop_address FROM payments p JOIN riders r ON r.id=p.rider_id JOIN users u ON u.id=r.user_id JOIN bookings b ON b.id=p.booking_id`
+	args := []interface{}{}
+	if rangeKey := c.Query("range"); rangeKey != "" {
+		_, dr := dateutil.Resolve(rangeKey, time.Time{}, c.Query("from"), c.Query("to"))
+		args = append(args, dr.Start, dr.End)
+		query += " WHERE p.created_at >= $1 AND p.created_at <= $2"
+	}
+	query += " ORDER BY p.created_at " + dateutil.ParseSort(c.Query("sort")) + " LIMIT 100"
+	rows, err := pool.Query(ctx, query, args...)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	defer rows.Close()
+	var payments []map[string]interface{}
+	for rows.Next() {
+		var id, method, status, riderName, pickup, drop string
+		var amount, fee, earnings float64
+		var createdAt time.Time
+		rows.Scan(&id, &amount, &fee, &earnings, &method, &status, &createdAt, &riderName, &pickup, &drop)
+		payments = append(payments, map[string]interface{}{"id": id, "amount": amount, "platform_fee": fee, "driver_earnings": earnings, "method": method, "status": status, "created_at": createdAt, "rider_name": riderName, "pickup_address": pickup, "drop_address": drop})
+	}
+	c.JSON(http.StatusOK, payments)
 }
 
 // MVAG 2020: drivers must complete document verification before they can go
 // online or receive rides. This only gates turning ONLINE on — going offline
 // is always allowed regardless of verification state.
 func ToggleDriverOnline(c *gin.Context) {
-    driverID := c.Param("id")
-    var req struct {
-        IsOnline bool    `json:"is_online"`
-        Lat      float64 `json:"lat"`
-        Lng      float64 `json:"lng"`
-    }
-    c.ShouldBindJSON(&req)
-    ctx := context.Background()
-    pool := db.GetDB().GetPool()
+	driverID := c.Param("id")
+	var req struct {
+		IsOnline bool    `json:"is_online"`
+		Lat      float64 `json:"lat"`
+		Lng      float64 `json:"lng"`
+	}
+	c.ShouldBindJSON(&req)
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
 
-    // A driver can only toggle their own online status — no panel calls
-    // this on a driver's behalf.
-    if !isDriverOwner(ctx, pool, driverID, c.GetString("user_id")) {
-        c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
-        return
-    }
+	// A driver can only toggle their own online status — no panel calls
+	// this on a driver's behalf.
+	if !isDriverOwner(ctx, pool, driverID, c.GetString("user_id")) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		return
+	}
 
-    if req.IsOnline {
-        var isVerified bool
-        pool.QueryRow(ctx, "SELECT COALESCE(is_verified,false) FROM drivers WHERE id=$1", driverID).Scan(&isVerified)
-        if !isVerified {
-            c.JSON(http.StatusForbidden, gin.H{
-                "error":   "verification_pending",
-                "message": "Complete document verification to start taking rides",
-            })
-            return
-        }
-    }
+	if req.IsOnline {
+		var isVerified bool
+		pool.QueryRow(ctx, "SELECT COALESCE(is_verified,false) FROM drivers WHERE id=$1", driverID).Scan(&isVerified)
+		if !isVerified {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":   "verification_pending",
+				"message": "Complete document verification to start taking rides",
+			})
+			return
+		}
+	}
 
-    pool.Exec(ctx, "UPDATE drivers SET is_online=$1,current_lat=$2,current_lng=$3,updated_at=NOW() WHERE id=$4", req.IsOnline, req.Lat, req.Lng, driverID)
-    c.JSON(http.StatusOK, gin.H{"is_online": req.IsOnline})
+	pool.Exec(ctx, "UPDATE drivers SET is_online=$1,current_lat=$2,current_lng=$3,updated_at=NOW() WHERE id=$4", req.IsOnline, req.Lat, req.Lng, driverID)
+	c.JSON(http.StatusOK, gin.H{"is_online": req.IsOnline})
 }
 
 // GET /gogoo/driver/active-booking
 // Returns the driver's current active booking (if any) and their driver_id.
 // Uses minimal JOINs so it never fails due to orphaned rider/service records.
 func GetDriverActiveBooking(c *gin.Context) {
-    userID := c.GetString("user_id")
-    ctx    := context.Background()
-    pool   := db.GetDB().GetPool()
+	userID := c.GetString("user_id")
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
 
-    var driverID string
-    if err := pool.QueryRow(ctx, `SELECT id FROM drivers WHERE user_id=$1`, userID).Scan(&driverID); err != nil {
-        c.JSON(http.StatusOK, gin.H{"driver_id": nil, "booking_id": nil})
-        return
-    }
+	var driverID string
+	if err := pool.QueryRow(ctx, `SELECT id FROM drivers WHERE user_id=$1`, userID).Scan(&driverID); err != nil {
+		c.JSON(http.StatusOK, gin.H{"driver_id": nil, "booking_id": nil})
+		return
+	}
 
-    var bookingID string
-    err := pool.QueryRow(ctx, `
+	var bookingID string
+	err := pool.QueryRow(ctx, `
         SELECT id FROM bookings
         WHERE driver_id = $1 AND status NOT IN ('completed','cancelled')
         ORDER BY created_at DESC LIMIT 1
     `, driverID).Scan(&bookingID)
 
-    if err != nil {
-        // No active booking — still return driver_id so app can save it
-        c.JSON(http.StatusOK, gin.H{"driver_id": driverID, "booking_id": nil})
-        return
-    }
-    c.JSON(http.StatusOK, gin.H{"driver_id": driverID, "booking_id": bookingID})
+	if err != nil {
+		// No active booking — still return driver_id so app can save it
+		c.JSON(http.StatusOK, gin.H{"driver_id": driverID, "booking_id": nil})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"driver_id": driverID, "booking_id": bookingID})
 }
 
 func AcceptBooking(c *gin.Context) {
-    bookingID := c.Param("id")
-    userID    := c.GetString("user_id") // from JWT — never trust client-sent ID
-    ctx  := context.Background()
-    pool := db.GetDB().GetPool()
+	bookingID := c.Param("id")
+	userID := c.GetString("user_id") // from JWT — never trust client-sent ID
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
 
-    // Resolve driver record from the authenticated user
-    var driverID string
-    var isBlocked, isVerified bool
-    var blockedUntil *time.Time
-    err := pool.QueryRow(ctx,
-        `SELECT id, COALESCE(is_blocked,FALSE), blocked_until, COALESCE(is_verified,FALSE) FROM drivers WHERE user_id=$1`,
-        userID,
-    ).Scan(&driverID, &isBlocked, &blockedUntil, &isVerified)
-    if err != nil || driverID == "" {
-        c.JSON(http.StatusNotFound, gin.H{"error": "Driver profile not found"})
-        return
-    }
+	// Resolve driver record from the authenticated user
+	var driverID string
+	var isBlocked, isVerified bool
+	var blockedUntil *time.Time
+	err := pool.QueryRow(ctx,
+		`SELECT id, COALESCE(is_blocked,FALSE), blocked_until, COALESCE(is_verified,FALSE) FROM drivers WHERE user_id=$1`,
+		userID,
+	).Scan(&driverID, &isBlocked, &blockedUntil, &isVerified)
+	if err != nil || driverID == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Driver profile not found"})
+		return
+	}
 
-    // MVAG 2020: unverified drivers must never be assigned rides, even if
-    // is_online was somehow left true from before verification was required.
-    if !isVerified {
-        c.JSON(http.StatusForbidden, gin.H{
-            "error":   "verification_pending",
-            "message": "Complete document verification to start taking rides",
-        })
-        return
-    }
+	// MVAG 2020: unverified drivers must never be assigned rides, even if
+	// is_online was somehow left true from before verification was required.
+	if !isVerified {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":   "verification_pending",
+			"message": "Complete document verification to start taking rides",
+		})
+		return
+	}
 
-    // Reject blocked drivers
-    if isBlocked && blockedUntil != nil && blockedUntil.After(time.Now()) {
-        c.JSON(http.StatusForbidden, gin.H{
-            "error":         "You are temporarily blocked due to excessive cancellations",
-            "blocked_until": blockedUntil,
-        })
-        return
-    }
+	// Reject blocked drivers
+	if isBlocked && blockedUntil != nil && blockedUntil.After(time.Now()) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":         "You are temporarily blocked due to excessive cancellations",
+			"blocked_until": blockedUntil,
+		})
+		return
+	}
 
-    // Auto-lift expired blocks
-    if isBlocked && (blockedUntil == nil || !blockedUntil.After(time.Now())) {
-        pool.Exec(ctx, `UPDATE drivers SET is_blocked=FALSE, blocked_until=NULL, block_reason=NULL WHERE id=$1`, driverID)
-    }
+	// Auto-lift expired blocks
+	if isBlocked && (blockedUntil == nil || !blockedUntil.After(time.Now())) {
+		pool.Exec(ctx, `UPDATE drivers SET is_blocked=FALSE, blocked_until=NULL, block_reason=NULL WHERE id=$1`, driverID)
+	}
 
-    // Reject if driver already has an active ride
-    var activeCount int
-    pool.QueryRow(ctx,
-        `SELECT COUNT(*) FROM bookings WHERE driver_id=$1 AND status NOT IN ('completed','cancelled')`,
-        driverID,
-    ).Scan(&activeCount)
-    if activeCount > 0 {
-        c.JSON(http.StatusConflict, gin.H{"error": "You already have an active ride. Complete it before accepting a new one."})
-        return
-    }
+	// Reject if driver already has an active ride
+	var activeCount int
+	pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM bookings WHERE driver_id=$1 AND status NOT IN ('completed','cancelled')`,
+		driverID,
+	).Scan(&activeCount)
+	if activeCount > 0 {
+		c.JSON(http.StatusConflict, gin.H{"error": "You already have an active ride. Complete it before accepting a new one."})
+		return
+	}
 
-    tag, _ := pool.Exec(ctx, `UPDATE bookings SET driver_id=$1,status='accepted',accepted_at=NOW() WHERE id=$2 AND status='searching'`, driverID, bookingID)
-    if tag.RowsAffected() == 0 {
-        c.JSON(http.StatusConflict, gin.H{"error": "This ride was already accepted by another driver"})
-        return
-    }
-    c.JSON(http.StatusOK, gin.H{"status": "accepted", "driver_id": driverID})
+	tag, _ := pool.Exec(ctx, `UPDATE bookings SET driver_id=$1,status='accepted',accepted_at=NOW() WHERE id=$2 AND status='searching'`, driverID, bookingID)
+	if tag.RowsAffected() == 0 {
+		c.JSON(http.StatusConflict, gin.H{"error": "This ride was already accepted by another driver"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "accepted", "driver_id": driverID})
 }
 
 func UpdateBookingStatus(c *gin.Context) {
-    bookingID := c.Param("id")
-    var req struct {
-        Status       string  `json:"status"`
-        FinalFare    float64 `json:"final_fare"`
-        CancelBy     string  `json:"cancelled_by"`
-        CancelReason string  `json:"cancel_reason"`
-    }
-    c.ShouldBindJSON(&req)
-    ctx  := context.Background()
-    pool := db.GetDB().GetPool()
+	bookingID := c.Param("id")
+	var req struct {
+		Status       string  `json:"status"`
+		FinalFare    float64 `json:"final_fare"`
+		CancelBy     string  `json:"cancelled_by"`
+		CancelReason string  `json:"cancel_reason"`
+	}
+	c.ShouldBindJSON(&req)
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
 
-    // Ownership check: only the booking's rider or assigned driver may
-    // drive its state machine (plus panel/master oversight). Without this,
-    // any authenticated account could complete, cancel, or fast-forward
-    // someone else's ride.
-    callerRole, _, isParty := bookingCallerRole(ctx, pool, bookingID, c.GetString("user_id"))
-    isPanel := c.GetString("role") == "master_admin"
-    switch c.GetString("panel") {
-    case "support", "cab", "truck", "ambulance":
-        isPanel = true
-    }
-    if !isParty && !isPanel {
-        c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
-        return
-    }
-    // arriving/in_progress/completed are driver-driven transitions; only
-    // "cancelled" may come from the rider side.
-    if req.Status != "cancelled" && callerRole == "rider" {
-        c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
-        return
-    }
-    // Trust the caller's own identity for who's cancelling, not the request
-    // body — a rider/driver token can only ever be cancelling as themself.
-    // This also drives the cancellation-fee and driver-auto-block logic
-    // below, so a client can no longer misreport it to dodge a fee or a
-    // 2-strikes block.
-    if isParty {
-        req.CancelBy = callerRole
-    }
+	// Ownership check: only the booking's rider or assigned driver may
+	// drive its state machine (plus panel/master oversight). Without this,
+	// any authenticated account could complete, cancel, or fast-forward
+	// someone else's ride.
+	callerRole, _, isParty := bookingCallerRole(ctx, pool, bookingID, c.GetString("user_id"))
+	isPanel := c.GetString("role") == "master_admin"
+	switch c.GetString("panel") {
+	case "support", "cab", "truck", "ambulance":
+		isPanel = true
+	}
+	if !isParty && !isPanel {
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		return
+	}
+	// arriving/in_progress/completed are driver-driven transitions; only
+	// "cancelled" may come from the rider side.
+	if req.Status != "cancelled" && callerRole == "rider" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		return
+	}
+	// Trust the caller's own identity for who's cancelling, not the request
+	// body — a rider/driver token can only ever be cancelling as themself.
+	// This also drives the cancellation-fee and driver-auto-block logic
+	// below, so a client can no longer misreport it to dodge a fee or a
+	// 2-strikes block.
+	if isParty {
+		req.CancelBy = callerRole
+	}
 
-    switch req.Status {
-    case "arriving":
-        pool.Exec(ctx, `UPDATE bookings SET status='arriving',arrived_at=NOW() WHERE id=$1`, bookingID)
-    case "in_progress":
-        pool.Exec(ctx, `UPDATE bookings SET status='in_progress',started_at=NOW() WHERE id=$1`, bookingID)
-    case "completed":
-        // final_fare is never taken from the client — no legitimate caller
-        // sends it (the app always relies on the estimated_fare fallback),
-        // so accepting it here was a pure fare-tampering hole.
-        var finalFare float64
-        pool.QueryRow(ctx, `SELECT COALESCE(estimated_fare,0) FROM bookings WHERE id=$1`, bookingID).Scan(&finalFare)
-        pool.Exec(ctx, `UPDATE bookings SET status='completed',completed_at=NOW(),final_fare=$1 WHERE id=$2`, finalFare, bookingID)
+	switch req.Status {
+	case "arriving":
+		pool.Exec(ctx, `UPDATE bookings SET status='arriving',arrived_at=NOW() WHERE id=$1`, bookingID)
+	case "in_progress":
+		pool.Exec(ctx, `UPDATE bookings SET status='in_progress',started_at=NOW() WHERE id=$1`, bookingID)
+	case "completed":
+		// final_fare is never taken from the client — no legitimate caller
+		// sends it (the app always relies on the estimated_fare fallback),
+		// so accepting it here was a pure fare-tampering hole.
+		var finalFare float64
+		pool.QueryRow(ctx, `SELECT COALESCE(estimated_fare,0) FROM bookings WHERE id=$1`, bookingID).Scan(&finalFare)
+		pool.Exec(ctx, `UPDATE bookings SET status='completed',completed_at=NOW(),final_fare=$1 WHERE id=$2`, finalFare, bookingID)
 
-        // Wallet debit — the only place a ride's fare is actually collected
-        // from a rider's wallet. Booked as payment_method='wallet' but the
-        // balance has since dropped below the final fare? Fall back to cash
-        // rather than blocking completion — the driver has already done the
-        // work, so the ride is never left half-paid.
-        var completedRiderID, completedDriverIDForPayment, bookingPaymentMethod string
-        pool.QueryRow(ctx, `SELECT rider_id, COALESCE(driver_id::text,''), payment_method FROM bookings WHERE id=$1`, bookingID).
-            Scan(&completedRiderID, &completedDriverIDForPayment, &bookingPaymentMethod)
+		// Wallet debit — the only place a ride's fare is actually collected
+		// from a rider's wallet. Booked as payment_method='wallet' but the
+		// balance has since dropped below the final fare? Fall back to cash
+		// rather than blocking completion — the driver has already done the
+		// work, so the ride is never left half-paid.
+		var completedRiderID, completedDriverIDForPayment, bookingPaymentMethod string
+		pool.QueryRow(ctx, `SELECT rider_id, COALESCE(driver_id::text,''), payment_method FROM bookings WHERE id=$1`, bookingID).
+			Scan(&completedRiderID, &completedDriverIDForPayment, &bookingPaymentMethod)
 
-        walletFallbackToCash := false
-        if bookingPaymentMethod == "wallet" && finalFare > 0 {
-            if !debitWalletForRide(ctx, pool, completedRiderID, bookingID, finalFare) {
-                walletFallbackToCash = true
-                bookingPaymentMethod = "cash"
-                pool.Exec(ctx, `UPDATE bookings SET payment_method='cash' WHERE id=$1`, bookingID)
-            }
-        }
+		walletFallbackToCash := false
+		if bookingPaymentMethod == "wallet" && finalFare > 0 {
+			if !debitWalletForRide(ctx, pool, completedRiderID, bookingID, finalFare) {
+				walletFallbackToCash = true
+				bookingPaymentMethod = "cash"
+				pool.Exec(ctx, `UPDATE bookings SET payment_method='cash' WHERE id=$1`, bookingID)
+			}
+		}
 
-        // Credit driver wallet: 80% earnings, 20% gogoo commission
-        if finalFare > 0 {
-            driverNet  := finalFare * 0.80
-            commission := finalFare * 0.20
-            pool.Exec(ctx, `
+		// Credit driver wallet: 80% earnings, 20% gogoo commission
+		if finalFare > 0 {
+			driverNet := finalFare * 0.80
+			commission := finalFare * 0.20
+			pool.Exec(ctx, `
                 INSERT INTO driver_earnings (id, driver_id, booking_id, amount, type, description, is_debit, created_at)
                 SELECT $1, driver_id, $2, $3, 'ride', 'Trip earnings (80% of fare)', false, NOW()
                 FROM bookings WHERE id=$2
             `, uuid.New(), bookingID, driverNet)
-            pool.Exec(ctx, `
+			pool.Exec(ctx, `
                 INSERT INTO driver_earnings (id, driver_id, booking_id, amount, type, description, is_debit, debit_type, created_at)
                 SELECT $1, driver_id, $2, $3, 'adjustment', 'bogie commission (20%)', true, 'commission', NOW()
                 FROM bookings WHERE id=$2
             `, uuid.New(), bookingID, commission)
-            pool.Exec(ctx, `
+			pool.Exec(ctx, `
                 UPDATE drivers
                 SET wallet_balance = COALESCE(wallet_balance, -700.00) + $1,
                     total_earnings  = COALESCE(total_earnings, 0) + $2,
                     total_rides     = COALESCE(total_rides, 0) + 1
                 WHERE id = (SELECT driver_id FROM bookings WHERE id=$3)
             `, driverNet-commission, driverNet, bookingID)
-            pool.Exec(ctx, `
+			pool.Exec(ctx, `
                 UPDATE drivers
                 SET is_wallet_blocked     = true,
                     is_blocked            = true,
@@ -1416,88 +1432,88 @@ func UpdateBookingStatus(c *gin.Context) {
                 WHERE id = (SELECT driver_id FROM bookings WHERE id=$1)
                 AND COALESCE(wallet_balance, -700.00) < -1000
             `, bookingID)
-        }
+		}
 
-        creditReferralRewards("rider", completedRiderID)
-        creditReferralRewards("driver", completedDriverIDForPayment)
+		creditReferralRewards("rider", completedRiderID)
+		creditReferralRewards("driver", completedDriverIDForPayment)
 
-        // Simple v1 fee settlement: a completed ride always clears whatever
-        // outstanding cancellation fee the rider owes, since it was already
-        // folded into THIS booking's fare at creation (see CreateBooking).
-        pool.Exec(ctx, `UPDATE riders SET outstanding_cancellation_fee=0 WHERE id=$1 AND outstanding_cancellation_fee > 0`, completedRiderID)
+		// Simple v1 fee settlement: a completed ride always clears whatever
+		// outstanding cancellation fee the rider owes, since it was already
+		// folded into THIS booking's fare at creation (see CreateBooking).
+		pool.Exec(ctx, `UPDATE riders SET outstanding_cancellation_fee=0 WHERE id=$1 AND outstanding_cancellation_fee > 0`, completedRiderID)
 
-        c.JSON(http.StatusOK, gin.H{
-            "status":                  "completed",
-            "final_fare":              finalFare,
-            "payment_method":          bookingPaymentMethod,
-            "wallet_payment_fallback": walletFallbackToCash,
-        })
-        return
-    case "cancelled":
-        // Fee is computed server-side ONLY — never trust a client-supplied
-        // amount. Driver/support/system cancellations are always free for
-        // the rider; only a rider-initiated cancel can carry a fee.
-        var fee float64
-        if req.CancelBy == "rider" {
-            var status string
-            var acceptedAt *time.Time
-            var category, vehicleType string
-            pool.QueryRow(ctx, `
+		c.JSON(http.StatusOK, gin.H{
+			"status":                  "completed",
+			"final_fare":              finalFare,
+			"payment_method":          bookingPaymentMethod,
+			"wallet_payment_fallback": walletFallbackToCash,
+		})
+		return
+	case "cancelled":
+		// Fee is computed server-side ONLY — never trust a client-supplied
+		// amount. Driver/support/system cancellations are always free for
+		// the rider; only a rider-initiated cancel can carry a fee.
+		var fee float64
+		if req.CancelBy == "rider" {
+			var status string
+			var acceptedAt *time.Time
+			var category, vehicleType string
+			pool.QueryRow(ctx, `
                 SELECT b.status, b.accepted_at, COALESCE(st.category,''), COALESCE(st.vehicle_type,'')
                 FROM bookings b JOIN service_types st ON st.id = b.service_type_id
                 WHERE b.id = $1
             `, bookingID).Scan(&status, &acceptedAt, &category, &vehicleType)
-            fee, _, _, _ = calcCancellationFee(status, category, vehicleType, acceptedAt)
-        }
+			fee, _, _, _ = calcCancellationFee(status, category, vehicleType, acceptedAt)
+		}
 
-        pool.Exec(ctx, `
+		pool.Exec(ctx, `
             UPDATE bookings
             SET status='cancelled', cancelled_at=NOW(), cancelled_by=$1, cancel_reason=$2, cancellation_fee=$3
             WHERE id=$4
         `, req.CancelBy, req.CancelReason, fee, bookingID)
 
-        var cancelRiderID string
-        pool.QueryRow(ctx, `SELECT rider_id FROM bookings WHERE id=$1`, bookingID).Scan(&cancelRiderID)
+		var cancelRiderID string
+		pool.QueryRow(ctx, `SELECT rider_id FROM bookings WHERE id=$1`, bookingID).Scan(&cancelRiderID)
 
-        if fee > 0 && cancelRiderID != "" {
-            pool.Exec(ctx, `UPDATE riders SET outstanding_cancellation_fee = COALESCE(outstanding_cancellation_fee,0) + $1 WHERE id=$2`, fee, cancelRiderID)
-        }
+		if fee > 0 && cancelRiderID != "" {
+			pool.Exec(ctx, `UPDATE riders SET outstanding_cancellation_fee = COALESCE(outstanding_cancellation_fee,0) + $1 WHERE id=$2`, fee, cancelRiderID)
+		}
 
-        // Wallet refund: normal cancels happen before a ride is ever paid
-        // (wallet debit only happens at completion), so this is a no-op for
-        // the ordinary flow. It only fires when this booking already has a
-        // completed ride_payment ledger row — e.g. a support-initiated
-        // cancel/dispute on a ride that had already been charged to the
-        // wallet — refunding (amount paid - cancellation fee).
-        if cancelRiderID != "" {
-            var paidAmount float64
-            pool.QueryRow(ctx, `
+		// Wallet refund: normal cancels happen before a ride is ever paid
+		// (wallet debit only happens at completion), so this is a no-op for
+		// the ordinary flow. It only fires when this booking already has a
+		// completed ride_payment ledger row — e.g. a support-initiated
+		// cancel/dispute on a ride that had already been charged to the
+		// wallet — refunding (amount paid - cancellation fee).
+		if cancelRiderID != "" {
+			var paidAmount float64
+			pool.QueryRow(ctx, `
                 SELECT COALESCE(-amount,0) FROM wallet_ledger
                 WHERE booking_id=$1 AND type='ride_payment' AND status='completed'
                 ORDER BY created_at DESC LIMIT 1
             `, bookingID).Scan(&paidAmount)
-            if refundAmount := paidAmount - fee; paidAmount > 0 && refundAmount > 0 {
-                refundWalletToRider(ctx, pool, cancelRiderID, bookingID, refundAmount)
-            }
-        }
+			if refundAmount := paidAmount - fee; paidAmount > 0 && refundAmount > 0 {
+				refundWalletToRider(ctx, pool, cancelRiderID, bookingID, refundAmount)
+			}
+		}
 
-        // Auto-block driver if they cancel 2+ rides within 1 hour
-        if req.CancelBy == "driver" {
-            var driverID string
-            err := pool.QueryRow(ctx, `SELECT driver_id FROM bookings WHERE id=$1`, bookingID).Scan(&driverID)
-            if err == nil && driverID != "" {
-                var cancelCount int
-                pool.QueryRow(ctx, `
+		// Auto-block driver if they cancel 2+ rides within 1 hour
+		if req.CancelBy == "driver" {
+			var driverID string
+			err := pool.QueryRow(ctx, `SELECT driver_id FROM bookings WHERE id=$1`, bookingID).Scan(&driverID)
+			if err == nil && driverID != "" {
+				var cancelCount int
+				pool.QueryRow(ctx, `
                     SELECT COUNT(*) FROM bookings
                     WHERE driver_id   = $1
                       AND cancelled_by = 'driver'
                       AND cancelled_at > NOW() - INTERVAL '1 hour'
                 `, driverID).Scan(&cancelCount)
 
-                if cancelCount >= 2 {
-                    blockedUntil := time.Now().Add(48 * time.Hour)
-                    reason := fmt.Sprintf("Auto-blocked: %d cancellations within 1 hour", cancelCount)
-                    pool.Exec(ctx, `
+				if cancelCount >= 2 {
+					blockedUntil := time.Now().Add(48 * time.Hour)
+					reason := fmt.Sprintf("Auto-blocked: %d cancellations within 1 hour", cancelCount)
+					pool.Exec(ctx, `
                         UPDATE drivers
                         SET is_blocked    = TRUE,
                             blocked_until = $1,
@@ -1506,21 +1522,21 @@ func UpdateBookingStatus(c *gin.Context) {
                         WHERE id = $3
                     `, blockedUntil, reason, driverID)
 
-                    c.JSON(http.StatusOK, gin.H{
-                        "status":        "cancelled",
-                        "cancellation_fee": fee,
-                        "driver_blocked": true,
-                        "blocked_until":  blockedUntil,
-                        "block_reason":   reason,
-                    })
-                    return
-                }
-            }
-        }
-        c.JSON(http.StatusOK, gin.H{"status": req.Status, "cancellation_fee": fee})
-        return
-    }
-    c.JSON(http.StatusOK, gin.H{"status": req.Status})
+					c.JSON(http.StatusOK, gin.H{
+						"status":           "cancelled",
+						"cancellation_fee": fee,
+						"driver_blocked":   true,
+						"blocked_until":    blockedUntil,
+						"block_reason":     reason,
+					})
+					return
+				}
+			}
+		}
+		c.JSON(http.StatusOK, gin.H{"status": req.Status, "cancellation_fee": fee})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": req.Status})
 }
 
 // GET /gogoo/bookings/:id/cancel-preview
@@ -1528,31 +1544,31 @@ func UpdateBookingStatus(c *gin.Context) {
 // cancel path (UpdateBookingStatus, case "cancelled") calls the exact same
 // calcCancellationFee helper, so preview and charge can never disagree.
 func GetCancelPreview(c *gin.Context) {
-    bookingID := c.Param("id")
-    ctx := context.Background()
-    pool := db.GetDB().GetPool()
+	bookingID := c.Param("id")
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
 
-    var status string
-    var acceptedAt *time.Time
-    var category, vehicleType string
-    err := pool.QueryRow(ctx, `
+	var status string
+	var acceptedAt *time.Time
+	var category, vehicleType string
+	err := pool.QueryRow(ctx, `
         SELECT b.status, b.accepted_at, COALESCE(st.category,''), COALESCE(st.vehicle_type,'')
         FROM bookings b
         JOIN service_types st ON st.id = b.service_type_id
         WHERE b.id = $1
     `, bookingID).Scan(&status, &acceptedAt, &category, &vehicleType)
-    if err != nil {
-        c.JSON(http.StatusNotFound, gin.H{"error": "booking not found"})
-        return
-    }
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "booking not found"})
+		return
+	}
 
-    fee, freeCancel, secondsSinceAccept, reason := calcCancellationFee(status, category, vehicleType, acceptedAt)
-    c.JSON(http.StatusOK, gin.H{
-        "fee":                  fee,
-        "free_cancel":          freeCancel,
-        "seconds_since_accept": secondsSinceAccept,
-        "reason":               reason,
-    })
+	fee, freeCancel, secondsSinceAccept, reason := calcCancellationFee(status, category, vehicleType, acceptedAt)
+	c.JSON(http.StatusOK, gin.H{
+		"fee":                  fee,
+		"free_cancel":          freeCancel,
+		"seconds_since_accept": secondsSinceAccept,
+		"reason":               reason,
+	})
 }
 
 // calcCancellationFee is the single source of truth for cancellation
@@ -1561,263 +1577,263 @@ func GetCancelPreview(c *gin.Context) {
 // driver has accepted yet (searching/scheduled); after that, a flat
 // category-based fee applies.
 func calcCancellationFee(status, category, vehicleType string, acceptedAt *time.Time) (fee float64, freeCancel bool, secondsSinceAccept int, reason string) {
-    if category == "ambulance" {
-        return 0, true, 0, "Ambulance rides are always free to cancel"
-    }
-    if status == "searching" {
-        return 0, true, 0, "No driver assigned yet"
-    }
-    if status == "scheduled" {
-        return 0, true, 0, "Scheduled rides can be cancelled free before dispatch"
-    }
-    if acceptedAt == nil {
-        return 0, true, 0, "No driver assigned yet"
-    }
-    secondsSinceAccept = int(time.Since(*acceptedAt).Seconds())
-    if secondsSinceAccept < 120 {
-        return 0, true, secondsSinceAccept, "Within the free cancellation window"
-    }
-    fee = cancellationFeeForVehicle(vehicleType)
-    if fee == 0 {
-        return 0, true, secondsSinceAccept, "No cancellation fee for this service"
-    }
-    return fee, false, secondsSinceAccept, fmt.Sprintf("₹%.0f cancellation fee applies after the free window", fee)
+	if category == "ambulance" {
+		return 0, true, 0, "Ambulance rides are always free to cancel"
+	}
+	if status == "searching" {
+		return 0, true, 0, "No driver assigned yet"
+	}
+	if status == "scheduled" {
+		return 0, true, 0, "Scheduled rides can be cancelled free before dispatch"
+	}
+	if acceptedAt == nil {
+		return 0, true, 0, "No driver assigned yet"
+	}
+	secondsSinceAccept = int(time.Since(*acceptedAt).Seconds())
+	if secondsSinceAccept < 120 {
+		return 0, true, secondsSinceAccept, "Within the free cancellation window"
+	}
+	fee = cancellationFeeForVehicle(vehicleType)
+	if fee == 0 {
+		return 0, true, secondsSinceAccept, "No cancellation fee for this service"
+	}
+	return fee, false, secondsSinceAccept, fmt.Sprintf("₹%.0f cancellation fee applies after the free window", fee)
 }
 
 func cancellationFeeForVehicle(vehicleType string) float64 {
-    switch vehicleType {
-    case "cab_2w", "cab_3w":
-        return 20
-    case "cab_4w", "cab_4w_suv":
-        return 30
-    }
-    if strings.HasPrefix(vehicleType, "truck_") {
-        return 50
-    }
-    return 0
+	switch vehicleType {
+	case "cab_2w", "cab_3w":
+		return 20
+	case "cab_4w", "cab_4w_suv":
+		return 30
+	}
+	if strings.HasPrefix(vehicleType, "truck_") {
+		return 50
+	}
+	return 0
 }
 
 // POST /gogoo/bookings/:id/verify-otp
 // Driver submits the 4-digit OTP shown on the rider's screen.
 // On success the booking transitions to in_progress (trip starts).
 func VerifyRideOTP(c *gin.Context) {
-    bookingID := c.Param("id")
-    var req struct {
-        OTP string `json:"otp" binding:"required"`
-    }
-    if err := c.ShouldBindJSON(&req); err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "otp is required"})
-        return
-    }
-    ctx := context.Background()
-    pool := db.GetDB().GetPool()
+	bookingID := c.Param("id")
+	var req struct {
+		OTP string `json:"otp" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "otp is required"})
+		return
+	}
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
 
-    // Only the assigned driver may attempt OTP verification for this
-    // booking. The OTP is a 4-digit code with no attempt limiting, so
-    // leaving this open to any authenticated account would let it be
-    // brute-forced to hijack ride starts.
-    if callerRole, _, isParty := bookingCallerRole(ctx, pool, bookingID, c.GetString("user_id")); !isParty || callerRole != "driver" {
-        c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
-        return
-    }
+	// Only the assigned driver may attempt OTP verification for this
+	// booking. The OTP is a 4-digit code with no attempt limiting, so
+	// leaving this open to any authenticated account would let it be
+	// brute-forced to hijack ride starts.
+	if callerRole, _, isParty := bookingCallerRole(ctx, pool, bookingID, c.GetString("user_id")); !isParty || callerRole != "driver" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		return
+	}
 
-    var storedOTP *string
-    var status string
-    var otpAttempts int
-    var otpLockedUntil *time.Time
-    if err := pool.QueryRow(ctx,
-        `SELECT ride_otp, status, otp_attempts, otp_locked_until FROM bookings WHERE id=$1`, bookingID,
-    ).Scan(&storedOTP, &status, &otpAttempts, &otpLockedUntil); err != nil {
-        c.JSON(http.StatusNotFound, gin.H{"error": "booking not found"})
-        return
-    }
-    if status != "arriving" {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "booking is not awaiting OTP verification"})
-        return
-    }
+	var storedOTP *string
+	var status string
+	var otpAttempts int
+	var otpLockedUntil *time.Time
+	if err := pool.QueryRow(ctx,
+		`SELECT ride_otp, status, otp_attempts, otp_locked_until FROM bookings WHERE id=$1`, bookingID,
+	).Scan(&storedOTP, &status, &otpAttempts, &otpLockedUntil); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "booking not found"})
+		return
+	}
+	if status != "arriving" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "booking is not awaiting OTP verification"})
+		return
+	}
 
-    const maxOTPAttempts = 5
-    const otpLockoutDuration = 15 * time.Minute
+	const maxOTPAttempts = 5
+	const otpLockoutDuration = 15 * time.Minute
 
-    // A previous lockout only blocks while it's still in effect — once it
-    // expires the driver gets a fresh set of attempts rather than being
-    // stuck forever or needing support to intervene.
-    if otpLockedUntil != nil && time.Now().Before(*otpLockedUntil) {
-        c.JSON(http.StatusTooManyRequests, gin.H{
-            "error":       "too many incorrect attempts, try again later",
-            "locked":      true,
-            "locked_until": otpLockedUntil.Format(time.RFC3339),
-        })
-        return
-    }
+	// A previous lockout only blocks while it's still in effect — once it
+	// expires the driver gets a fresh set of attempts rather than being
+	// stuck forever or needing support to intervene.
+	if otpLockedUntil != nil && time.Now().Before(*otpLockedUntil) {
+		c.JSON(http.StatusTooManyRequests, gin.H{
+			"error":        "too many incorrect attempts, try again later",
+			"locked":       true,
+			"locked_until": otpLockedUntil.Format(time.RFC3339),
+		})
+		return
+	}
 
-    if storedOTP == nil || *storedOTP != req.OTP {
-        otpAttempts++
-        if otpAttempts >= maxOTPAttempts {
-            lockUntil := time.Now().Add(otpLockoutDuration)
-            pool.Exec(ctx, `UPDATE bookings SET otp_attempts=$1, otp_locked_until=$2 WHERE id=$3`, otpAttempts, lockUntil, bookingID)
-            c.JSON(http.StatusTooManyRequests, gin.H{
-                "error":       "too many incorrect attempts, locked for 15 minutes",
-                "locked":      true,
-                "locked_until": lockUntil.Format(time.RFC3339),
-            })
-            return
-        }
-        pool.Exec(ctx, `UPDATE bookings SET otp_attempts=$1 WHERE id=$2`, otpAttempts, bookingID)
-        c.JSON(http.StatusBadRequest, gin.H{
-            "error":              "invalid OTP",
-            "locked":             false,
-            "attempts_remaining": maxOTPAttempts - otpAttempts,
-        })
-        return
-    }
+	if storedOTP == nil || *storedOTP != req.OTP {
+		otpAttempts++
+		if otpAttempts >= maxOTPAttempts {
+			lockUntil := time.Now().Add(otpLockoutDuration)
+			pool.Exec(ctx, `UPDATE bookings SET otp_attempts=$1, otp_locked_until=$2 WHERE id=$3`, otpAttempts, lockUntil, bookingID)
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"error":        "too many incorrect attempts, locked for 15 minutes",
+				"locked":       true,
+				"locked_until": lockUntil.Format(time.RFC3339),
+			})
+			return
+		}
+		pool.Exec(ctx, `UPDATE bookings SET otp_attempts=$1 WHERE id=$2`, otpAttempts, bookingID)
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":              "invalid OTP",
+			"locked":             false,
+			"attempts_remaining": maxOTPAttempts - otpAttempts,
+		})
+		return
+	}
 
-    pool.Exec(ctx, `UPDATE bookings SET status='in_progress', started_at=NOW(), otp_attempts=0, otp_locked_until=NULL WHERE id=$1`, bookingID)
-    c.JSON(http.StatusOK, gin.H{"status": "in_progress"})
+	pool.Exec(ctx, `UPDATE bookings SET status='in_progress', started_at=NOW(), otp_attempts=0, otp_locked_until=NULL WHERE id=$1`, bookingID)
+	c.JSON(http.StatusOK, gin.H{"status": "in_progress"})
 }
 
 func RateBooking(c *gin.Context) {
-    bookingID := c.Param("id")
-    var req struct {
-        RaterType string `json:"rater_type"`
-        Rating    int    `json:"rating"`
-        Review    string `json:"review"`
-    }
-    c.ShouldBindJSON(&req)
-    ctx := context.Background()
-    pool := db.GetDB().GetPool()
+	bookingID := c.Param("id")
+	var req struct {
+		RaterType string `json:"rater_type"`
+		Rating    int    `json:"rating"`
+		Review    string `json:"review"`
+	}
+	c.ShouldBindJSON(&req)
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
 
-    // A caller can only submit the rating for the side they actually are on
-    // this booking — otherwise any authenticated account could inflate or
-    // tank any driver's/rider's rating on a booking they had nothing to do
-    // with. rater_type must match who they are, not what they claim.
-    callerRole, _, isParty := bookingCallerRole(ctx, pool, bookingID, c.GetString("user_id"))
-    if !isParty || callerRole != req.RaterType {
-        c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
-        return
-    }
+	// A caller can only submit the rating for the side they actually are on
+	// this booking — otherwise any authenticated account could inflate or
+	// tank any driver's/rider's rating on a booking they had nothing to do
+	// with. rater_type must match who they are, not what they claim.
+	callerRole, _, isParty := bookingCallerRole(ctx, pool, bookingID, c.GetString("user_id"))
+	if !isParty || callerRole != req.RaterType {
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		return
+	}
 
-    var status string
-    var existingDriverRating, existingRiderRating *int
-    if err := pool.QueryRow(ctx,
-        `SELECT status, driver_rating, rider_rating FROM bookings WHERE id=$1`, bookingID,
-    ).Scan(&status, &existingDriverRating, &existingRiderRating); err != nil {
-        c.JSON(http.StatusNotFound, gin.H{"error": "booking not found"})
-        return
-    }
-    if status != "completed" {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "booking must be completed before it can be rated"})
-        return
-    }
+	var status string
+	var existingDriverRating, existingRiderRating *int
+	if err := pool.QueryRow(ctx,
+		`SELECT status, driver_rating, rider_rating FROM bookings WHERE id=$1`, bookingID,
+	).Scan(&status, &existingDriverRating, &existingRiderRating); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "booking not found"})
+		return
+	}
+	if status != "completed" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "booking must be completed before it can be rated"})
+		return
+	}
 
-    // A rating is one-shot per side — no silent overwrite of an existing
-    // rating/review by a second submission.
-    if req.RaterType == "rider" {
-        if existingDriverRating != nil {
-            c.JSON(http.StatusBadRequest, gin.H{"error": "you have already rated this ride"})
-            return
-        }
-        pool.Exec(ctx, "UPDATE bookings SET driver_rating=$1,driver_review=$2 WHERE id=$3", req.Rating, req.Review, bookingID)
-        pool.Exec(ctx, `UPDATE drivers SET rating=(SELECT ROUND(AVG(driver_rating)::numeric,2) FROM bookings WHERE driver_id=(SELECT driver_id FROM bookings WHERE id=$1) AND driver_rating IS NOT NULL) WHERE id=(SELECT driver_id FROM bookings WHERE id=$1)`, bookingID)
-    } else {
-        if existingRiderRating != nil {
-            c.JSON(http.StatusBadRequest, gin.H{"error": "you have already rated this ride"})
-            return
-        }
-        pool.Exec(ctx, "UPDATE bookings SET rider_rating=$1,rider_review=$2 WHERE id=$3", req.Rating, req.Review, bookingID)
-        pool.Exec(ctx, `UPDATE riders SET rating=(SELECT ROUND(AVG(rider_rating)::numeric,2) FROM bookings WHERE rider_id=(SELECT rider_id FROM bookings WHERE id=$1) AND rider_rating IS NOT NULL) WHERE id=(SELECT rider_id FROM bookings WHERE id=$1)`, bookingID)
-    }
-    c.JSON(http.StatusOK, gin.H{"message": "Rating submitted"})
+	// A rating is one-shot per side — no silent overwrite of an existing
+	// rating/review by a second submission.
+	if req.RaterType == "rider" {
+		if existingDriverRating != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "you have already rated this ride"})
+			return
+		}
+		pool.Exec(ctx, "UPDATE bookings SET driver_rating=$1,driver_review=$2 WHERE id=$3", req.Rating, req.Review, bookingID)
+		pool.Exec(ctx, `UPDATE drivers SET rating=(SELECT ROUND(AVG(driver_rating)::numeric,2) FROM bookings WHERE driver_id=(SELECT driver_id FROM bookings WHERE id=$1) AND driver_rating IS NOT NULL) WHERE id=(SELECT driver_id FROM bookings WHERE id=$1)`, bookingID)
+	} else {
+		if existingRiderRating != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "you have already rated this ride"})
+			return
+		}
+		pool.Exec(ctx, "UPDATE bookings SET rider_rating=$1,rider_review=$2 WHERE id=$3", req.Rating, req.Review, bookingID)
+		pool.Exec(ctx, `UPDATE riders SET rating=(SELECT ROUND(AVG(rider_rating)::numeric,2) FROM bookings WHERE rider_id=(SELECT rider_id FROM bookings WHERE id=$1) AND rider_rating IS NOT NULL) WHERE id=(SELECT rider_id FROM bookings WHERE id=$1)`, bookingID)
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Rating submitted"})
 }
 
 func GetRiderProfile(c *gin.Context) {
-    userID := c.GetString("user_id")
-    ctx := context.Background()
-    pool := db.GetDB().GetPool()
-    var riderID, phone string
-    var rating, walletBalance, outstandingCancellationFee float64
-    var totalRides int
-    err := pool.QueryRow(ctx, `SELECT r.id, COALESCE(r.phone,''), COALESCE(r.rating,0), COALESCE(r.total_rides,0), COALESCE(r.wallet_balance,0), COALESCE(r.outstanding_cancellation_fee,0) FROM riders r WHERE r.user_id=$1`, userID).Scan(&riderID, &phone, &rating, &totalRides, &walletBalance, &outstandingCancellationFee)
-    if err != nil {
-        c.JSON(http.StatusNotFound, gin.H{"error": "rider profile not found"})
-        return
-    }
-    c.JSON(http.StatusOK, gin.H{
-        "rider_id": riderID, "phone": phone, "rating": rating, "total_rides": totalRides, "wallet_balance": walletBalance,
-        "outstanding_cancellation_fee": outstandingCancellationFee,
-    })
+	userID := c.GetString("user_id")
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+	var riderID, phone string
+	var rating, walletBalance, outstandingCancellationFee float64
+	var totalRides int
+	err := pool.QueryRow(ctx, `SELECT r.id, COALESCE(r.phone,''), COALESCE(r.rating,0), COALESCE(r.total_rides,0), COALESCE(r.wallet_balance,0), COALESCE(r.outstanding_cancellation_fee,0) FROM riders r WHERE r.user_id=$1`, userID).Scan(&riderID, &phone, &rating, &totalRides, &walletBalance, &outstandingCancellationFee)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "rider profile not found"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"rider_id": riderID, "phone": phone, "rating": rating, "total_rides": totalRides, "wallet_balance": walletBalance,
+		"outstanding_cancellation_fee": outstandingCancellationFee,
+	})
 }
 
 func GetSavedPlaces(c *gin.Context) {
-    userID := c.GetString("user_id")
-    ctx := context.Background()
-    pool := db.GetDB().GetPool()
-    var savedAddresses []byte
-    err := pool.QueryRow(ctx, `SELECT COALESCE(saved_addresses, '[]'::jsonb) FROM riders WHERE user_id=$1`, userID).Scan(&savedAddresses)
-    if err != nil {
-        c.JSON(http.StatusOK, []interface{}{})
-        return
-    }
-    if len(savedAddresses) == 0 || string(savedAddresses) == "null" {
-        c.JSON(http.StatusOK, []interface{}{})
-        return
-    }
-    c.Data(http.StatusOK, "application/json", savedAddresses)
+	userID := c.GetString("user_id")
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+	var savedAddresses []byte
+	err := pool.QueryRow(ctx, `SELECT COALESCE(saved_addresses, '[]'::jsonb) FROM riders WHERE user_id=$1`, userID).Scan(&savedAddresses)
+	if err != nil {
+		c.JSON(http.StatusOK, []interface{}{})
+		return
+	}
+	if len(savedAddresses) == 0 || string(savedAddresses) == "null" {
+		c.JSON(http.StatusOK, []interface{}{})
+		return
+	}
+	c.Data(http.StatusOK, "application/json", savedAddresses)
 }
 
 func SavePlace(c *gin.Context) {
-    userID := c.GetString("user_id")
-    var req struct {
-        Label   string  `json:"label"`
-        Address string  `json:"address"`
-        Lat     float64 `json:"lat"`
-        Lng     float64 `json:"lng"`
-    }
-    if err := c.ShouldBindJSON(&req); err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-        return
-    }
-    if req.Label == "" || req.Address == "" {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "label and address required"})
-        return
-    }
-    ctx := context.Background()
-    pool := db.GetDB().GetPool()
-    var existing []byte
-    err := pool.QueryRow(ctx, `SELECT COALESCE(saved_addresses, '[]'::jsonb) FROM riders WHERE user_id=$1`, userID).Scan(&existing)
-    if err != nil {
-        c.JSON(http.StatusNotFound, gin.H{"error": "rider not found"})
-        return
-    }
-    newEntry := fmt.Sprintf(`{"label":%q,"address":%q,"lat":%f,"lng":%f}`, req.Label, req.Address, req.Lat, req.Lng)
-    _, err = pool.Exec(ctx, `UPDATE riders SET saved_addresses=(COALESCE((SELECT jsonb_agg(elem) FROM jsonb_array_elements(COALESCE(saved_addresses,'[]'::jsonb)) elem WHERE elem->>'label' != $2),'[]'::jsonb))||$3::jsonb,updated_at=NOW() WHERE user_id=$1`, userID, req.Label, "["+newEntry+"]")
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save: " + err.Error()})
-        return
-    }
-    c.JSON(http.StatusOK, gin.H{"message": "place saved", "label": req.Label})
+	userID := c.GetString("user_id")
+	var req struct {
+		Label   string  `json:"label"`
+		Address string  `json:"address"`
+		Lat     float64 `json:"lat"`
+		Lng     float64 `json:"lng"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if req.Label == "" || req.Address == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "label and address required"})
+		return
+	}
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+	var existing []byte
+	err := pool.QueryRow(ctx, `SELECT COALESCE(saved_addresses, '[]'::jsonb) FROM riders WHERE user_id=$1`, userID).Scan(&existing)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "rider not found"})
+		return
+	}
+	newEntry := fmt.Sprintf(`{"label":%q,"address":%q,"lat":%f,"lng":%f}`, req.Label, req.Address, req.Lat, req.Lng)
+	_, err = pool.Exec(ctx, `UPDATE riders SET saved_addresses=(COALESCE((SELECT jsonb_agg(elem) FROM jsonb_array_elements(COALESCE(saved_addresses,'[]'::jsonb)) elem WHERE elem->>'label' != $2),'[]'::jsonb))||$3::jsonb,updated_at=NOW() WHERE user_id=$1`, userID, req.Label, "["+newEntry+"]")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save: " + err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "place saved", "label": req.Label})
 }
 
 func DeleteSavedPlace(c *gin.Context) {
-    userID := c.GetString("user_id")
-    label := c.Param("label")
-    ctx := context.Background()
-    pool := db.GetDB().GetPool()
-    _, err := pool.Exec(ctx, `UPDATE riders SET saved_addresses=(SELECT COALESCE(jsonb_agg(elem),'[]'::jsonb) FROM jsonb_array_elements(COALESCE(saved_addresses,'[]'::jsonb)) elem WHERE elem->>'label' != $2),updated_at=NOW() WHERE user_id=$1`, userID, label)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete place"})
-        return
-    }
-    c.JSON(http.StatusOK, gin.H{"message": "place deleted"})
+	userID := c.GetString("user_id")
+	label := c.Param("label")
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+	_, err := pool.Exec(ctx, `UPDATE riders SET saved_addresses=(SELECT COALESCE(jsonb_agg(elem),'[]'::jsonb) FROM jsonb_array_elements(COALESCE(saved_addresses,'[]'::jsonb)) elem WHERE elem->>'label' != $2),updated_at=NOW() WHERE user_id=$1`, userID, label)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete place"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "place deleted"})
 }
 
 // GET /gogoo/driver/bookings
 func ListDriverBookings(c *gin.Context) {
-    userID := c.GetString("user_id")
-    ctx := context.Background()
-    pool := db.GetDB().GetPool()
+	userID := c.GetString("user_id")
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
 
-    rows, err := pool.Query(ctx, `
+	rows, err := pool.Query(ctx, `
         SELECT b.id, b.status, b.pickup_address, b.drop_address,
                COALESCE(b.final_fare, b.estimated_fare, 0),
                COALESCE(b.distance_km, 0),
@@ -1835,53 +1851,53 @@ func ListDriverBookings(c *gin.Context) {
         ORDER BY b.created_at DESC
         LIMIT 50
     `, userID)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
-        return
-    }
-    defer rows.Close()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	defer rows.Close()
 
-    var bookings []map[string]interface{}
-    for rows.Next() {
-        var id, status, pickup, drop, riderName, serviceName string
-        var fare, distanceKm float64
-        var createdAt time.Time
-        var completedAt *time.Time
-        rows.Scan(&id, &status, &pickup, &drop, &fare, &distanceKm, &createdAt, &completedAt, &riderName, &serviceName)
-        bookings = append(bookings, map[string]interface{}{
-            "id":             id,
-            "status":         status,
-            "pickup_address": pickup,
-            "drop_address":   drop,
-            "fare":           fare,
-            "distance_km":    distanceKm,
-            "created_at":     createdAt,
-            "completed_at":   completedAt,
-            "rider_name":     riderName,
-            "service_name":   serviceName,
-        })
-    }
-    if bookings == nil {
-        bookings = []map[string]interface{}{}
-    }
-    c.JSON(http.StatusOK, bookings)
+	var bookings []map[string]interface{}
+	for rows.Next() {
+		var id, status, pickup, drop, riderName, serviceName string
+		var fare, distanceKm float64
+		var createdAt time.Time
+		var completedAt *time.Time
+		rows.Scan(&id, &status, &pickup, &drop, &fare, &distanceKm, &createdAt, &completedAt, &riderName, &serviceName)
+		bookings = append(bookings, map[string]interface{}{
+			"id":             id,
+			"status":         status,
+			"pickup_address": pickup,
+			"drop_address":   drop,
+			"fare":           fare,
+			"distance_km":    distanceKm,
+			"created_at":     createdAt,
+			"completed_at":   completedAt,
+			"rider_name":     riderName,
+			"service_name":   serviceName,
+		})
+	}
+	if bookings == nil {
+		bookings = []map[string]interface{}{}
+	}
+	c.JSON(http.StatusOK, bookings)
 }
 
 // GET /gogoo/driver/wallet
 func GetDriverWallet(c *gin.Context) {
-    userID := c.GetString("user_id")
-    ctx    := context.Background()
-    pool   := db.GetDB().GetPool()
+	userID := c.GetString("user_id")
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
 
-    var (
-        balance       float64
-        totalEarnings float64
-        totalRides    int
-        isBlocked     bool
-        blockedReason *string
-        regFeePaid    bool
-    )
-    err := pool.QueryRow(ctx, `
+	var (
+		balance       float64
+		totalEarnings float64
+		totalRides    int
+		isBlocked     bool
+		blockedReason *string
+		regFeePaid    bool
+	)
+	err := pool.QueryRow(ctx, `
         SELECT
             COALESCE(wallet_balance, -700.00),
             COALESCE(total_earnings, 0),
@@ -1891,29 +1907,29 @@ func GetDriverWallet(c *gin.Context) {
             COALESCE(registration_fee_paid, false)
         FROM drivers WHERE user_id = $1
     `, userID).Scan(&balance, &totalEarnings, &totalRides, &isBlocked, &blockedReason, &regFeePaid)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch wallet"})
-        return
-    }
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch wallet"})
+		return
+	}
 
-    canWithdraw     := balance > 500
-    withdrawableAmt := 0.0
-    if canWithdraw {
-        withdrawableAmt = balance - 500
-    }
-    c.JSON(http.StatusOK, gin.H{
-        "wallet_balance":        balance,
-        "total_earnings":        totalEarnings,
-        "total_rides":           totalRides,
-        "is_wallet_blocked":     isBlocked,
-        "wallet_blocked_reason": blockedReason,
-        "registration_fee_paid": regFeePaid,
-        "minimum_balance":       500.00,
-        "can_withdraw":          canWithdraw,
-        "withdrawable_amount":   withdrawableAmt,
-        "payments_available":    rzp != nil,
-        "payouts_available":     payoutClient != nil,
-    })
+	canWithdraw := balance > 500
+	withdrawableAmt := 0.0
+	if canWithdraw {
+		withdrawableAmt = balance - 500
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"wallet_balance":        balance,
+		"total_earnings":        totalEarnings,
+		"total_rides":           totalRides,
+		"is_wallet_blocked":     isBlocked,
+		"wallet_blocked_reason": blockedReason,
+		"registration_fee_paid": regFeePaid,
+		"minimum_balance":       500.00,
+		"can_withdraw":          canWithdraw,
+		"withdrawable_amount":   withdrawableAmt,
+		"payments_available":    rzp != nil,
+		"payouts_available":     payoutClient != nil,
+	})
 }
 
 // istLocation/dateRange/resolveDateRange are thin aliases over the shared
@@ -1927,22 +1943,22 @@ var istLocation = dateutil.ISTLocation
 type dateRange = dateutil.Range
 
 func resolveDateRange(rangeKey string, joinedAt time.Time) (string, dateRange) {
-    return dateutil.Resolve(rangeKey, joinedAt, "", "")
+	return dateutil.Resolve(rangeKey, joinedAt, "", "")
 }
 
 // GET /gogoo/driver/ledger?range=this_week|last_week|this_month|last_month|this_year|last_year|all_time
 func GetDriverLedger(c *gin.Context) {
-    userID := c.GetString("user_id")
-    ctx    := context.Background()
-    pool   := db.GetDB().GetPool()
+	userID := c.GetString("user_id")
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
 
-    var driverID string
-    var joinedAt time.Time
-    pool.QueryRow(ctx, `SELECT id, created_at FROM drivers WHERE user_id = $1`, userID).Scan(&driverID, &joinedAt)
+	var driverID string
+	var joinedAt time.Time
+	pool.QueryRow(ctx, `SELECT id, created_at FROM drivers WHERE user_id = $1`, userID).Scan(&driverID, &joinedAt)
 
-    rangeKey, dr := resolveDateRange(c.Query("range"), joinedAt)
+	rangeKey, dr := resolveDateRange(c.Query("range"), joinedAt)
 
-    rows, err := pool.Query(ctx, `
+	rows, err := pool.Query(ctx, `
         SELECT
             de.id,
             de.amount,
@@ -1957,86 +1973,86 @@ func GetDriverLedger(c *gin.Context) {
         ORDER BY de.created_at DESC
         LIMIT 500
     `, driverID, dr.Start, dr.End)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch ledger"})
-        return
-    }
-    defer rows.Close()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch ledger"})
+		return
+	}
+	defer rows.Close()
 
-    type LedgerEntry struct {
-        ID          string    `json:"id"`
-        Amount      float64   `json:"amount"`
-        Type        string    `json:"type"`
-        Description string    `json:"description"`
-        IsDebit     bool      `json:"is_debit"`
-        DebitType   string    `json:"debit_type"`
-        CreatedAt   time.Time `json:"created_at"`
-        BookingID   *string   `json:"booking_id"`
-    }
-    var entries []LedgerEntry
-    var totalEarned, totalDebited float64
-    for rows.Next() {
-        var e LedgerEntry
-        rows.Scan(&e.ID, &e.Amount, &e.Type, &e.Description,
-            &e.IsDebit, &e.DebitType, &e.CreatedAt, &e.BookingID)
-        entries = append(entries, e)
-        if e.IsDebit {
-            totalDebited += e.Amount
-        } else {
-            totalEarned += e.Amount
-        }
-    }
-    if entries == nil {
-        entries = []LedgerEntry{}
-    }
-    c.JSON(http.StatusOK, gin.H{
-        "range":         rangeKey,
-        "range_label":   dr.Label,
-        "start_date":    dr.Start,
-        "end_date":      dr.End,
-        "total_earned":  totalEarned,
-        "total_debited": totalDebited,
-        "net":           totalEarned - totalDebited,
-        "transactions":  entries,
-    })
+	type LedgerEntry struct {
+		ID          string    `json:"id"`
+		Amount      float64   `json:"amount"`
+		Type        string    `json:"type"`
+		Description string    `json:"description"`
+		IsDebit     bool      `json:"is_debit"`
+		DebitType   string    `json:"debit_type"`
+		CreatedAt   time.Time `json:"created_at"`
+		BookingID   *string   `json:"booking_id"`
+	}
+	var entries []LedgerEntry
+	var totalEarned, totalDebited float64
+	for rows.Next() {
+		var e LedgerEntry
+		rows.Scan(&e.ID, &e.Amount, &e.Type, &e.Description,
+			&e.IsDebit, &e.DebitType, &e.CreatedAt, &e.BookingID)
+		entries = append(entries, e)
+		if e.IsDebit {
+			totalDebited += e.Amount
+		} else {
+			totalEarned += e.Amount
+		}
+	}
+	if entries == nil {
+		entries = []LedgerEntry{}
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"range":         rangeKey,
+		"range_label":   dr.Label,
+		"start_date":    dr.Start,
+		"end_date":      dr.End,
+		"total_earned":  totalEarned,
+		"total_debited": totalDebited,
+		"net":           totalEarned - totalDebited,
+		"transactions":  entries,
+	})
 }
 
 // GET /gogoo/driver/earnings/summary
 func GetEarningsSummary(c *gin.Context) {
-    userID := c.GetString("user_id")
-    ctx    := context.Background()
-    pool   := db.GetDB().GetPool()
+	userID := c.GetString("user_id")
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
 
-    var driverID string
-    pool.QueryRow(ctx, `SELECT id FROM drivers WHERE user_id = $1`, userID).Scan(&driverID)
+	var driverID string
+	pool.QueryRow(ctx, `SELECT id FROM drivers WHERE user_id = $1`, userID).Scan(&driverID)
 
-    var todayEarnings float64
-    var todayTrips    int
-    pool.QueryRow(ctx, `
+	var todayEarnings float64
+	var todayTrips int
+	pool.QueryRow(ctx, `
         SELECT COALESCE(SUM(amount),0), COUNT(*)
         FROM driver_earnings
         WHERE driver_id = $1 AND is_debit = false AND type = 'ride'
         AND created_at >= CURRENT_DATE
     `, driverID).Scan(&todayEarnings, &todayTrips)
 
-    var weekEarnings float64
-    var weekTrips    int
-    pool.QueryRow(ctx, `
+	var weekEarnings float64
+	var weekTrips int
+	pool.QueryRow(ctx, `
         SELECT COALESCE(SUM(amount),0), COUNT(*)
         FROM driver_earnings
         WHERE driver_id = $1 AND is_debit = false AND type = 'ride'
         AND created_at >= date_trunc('week', CURRENT_DATE)
     `, driverID).Scan(&weekEarnings, &weekTrips)
 
-    var monthEarnings float64
-    pool.QueryRow(ctx, `
+	var monthEarnings float64
+	pool.QueryRow(ctx, `
         SELECT COALESCE(SUM(amount),0)
         FROM driver_earnings
         WHERE driver_id = $1 AND is_debit = false AND type = 'ride'
         AND created_at >= date_trunc('month', CURRENT_DATE)
     `, driverID).Scan(&monthEarnings)
 
-    dRows, _ := pool.Query(ctx, `
+	dRows, _ := pool.Query(ctx, `
         SELECT DATE(created_at) AS day, COALESCE(SUM(amount),0) AS earnings, COUNT(*) AS trips
         FROM driver_earnings
         WHERE driver_id = $1 AND is_debit = false AND type = 'ride'
@@ -2044,40 +2060,42 @@ func GetEarningsSummary(c *gin.Context) {
         GROUP BY DATE(created_at)
         ORDER BY day
     `, driverID)
-    defer func() {
-        if dRows != nil { dRows.Close() }
-    }()
+	defer func() {
+		if dRows != nil {
+			dRows.Close()
+		}
+	}()
 
-    type DayEarning struct {
-        Day      string  `json:"day"`
-        Earnings float64 `json:"earnings"`
-        Trips    int     `json:"trips"`
-    }
-    var daily []DayEarning
-    if dRows != nil {
-        for dRows.Next() {
-            var d DayEarning
-            dRows.Scan(&d.Day, &d.Earnings, &d.Trips)
-            daily = append(daily, d)
-        }
-    }
-    if daily == nil {
-        daily = []DayEarning{}
-    }
-    c.JSON(http.StatusOK, gin.H{
-        "today": gin.H{"earnings": todayEarnings, "trips": todayTrips},
-        "week":  gin.H{"earnings": weekEarnings,  "trips": weekTrips},
-        "month": gin.H{"earnings": monthEarnings},
-        "daily": daily,
-    })
+	type DayEarning struct {
+		Day      string  `json:"day"`
+		Earnings float64 `json:"earnings"`
+		Trips    int     `json:"trips"`
+	}
+	var daily []DayEarning
+	if dRows != nil {
+		for dRows.Next() {
+			var d DayEarning
+			dRows.Scan(&d.Day, &d.Earnings, &d.Trips)
+			daily = append(daily, d)
+		}
+	}
+	if daily == nil {
+		daily = []DayEarning{}
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"today": gin.H{"earnings": todayEarnings, "trips": todayTrips},
+		"week":  gin.H{"earnings": weekEarnings, "trips": weekTrips},
+		"month": gin.H{"earnings": monthEarnings},
+		"daily": daily,
+	})
 }
 
 // GET /gogoo/admin/driver-payments
 func AdminDriverPayments(c *gin.Context) {
-    ctx  := context.Background()
-    pool := db.GetDB().GetPool()
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
 
-    rows, err := pool.Query(ctx, `
+	rows, err := pool.Query(ctx, `
         SELECT
             d.id,
             u.name,
@@ -2097,61 +2115,61 @@ func AdminDriverPayments(c *gin.Context) {
         JOIN users u ON u.id = d.user_id
         ORDER BY d.created_at DESC
     `)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
-        return
-    }
-    defer rows.Close()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	defer rows.Close()
 
-    var result []map[string]interface{}
-    for rows.Next() {
-        var id, name, email, phone, vehicleType string
-        var walletBalance, totalEarnings, grossEarnings, totalCommission float64
-        var totalRides    int
-        var isBlocked, regPaid bool
-        rows.Scan(&id, &name, &email, &phone, &vehicleType,
-            &walletBalance, &totalEarnings, &totalRides,
-            &isBlocked, &regPaid, &grossEarnings, &totalCommission)
-        result = append(result, map[string]interface{}{
-            "id":               id,
-            "name":             name,
-            "email":            email,
-            "phone":            phone,
-            "vehicle_type":     vehicleType,
-            "wallet_balance":   walletBalance,
-            "total_earnings":   totalEarnings,
-            "total_rides":      totalRides,
-            "is_blocked":       isBlocked,
-            "reg_paid":         regPaid,
-            "gross_earnings":   grossEarnings,
-            "total_commission": totalCommission,
-        })
-    }
-    if result == nil {
-        result = []map[string]interface{}{}
-    }
-    c.JSON(http.StatusOK, gin.H{"drivers": result})
+	var result []map[string]interface{}
+	for rows.Next() {
+		var id, name, email, phone, vehicleType string
+		var walletBalance, totalEarnings, grossEarnings, totalCommission float64
+		var totalRides int
+		var isBlocked, regPaid bool
+		rows.Scan(&id, &name, &email, &phone, &vehicleType,
+			&walletBalance, &totalEarnings, &totalRides,
+			&isBlocked, &regPaid, &grossEarnings, &totalCommission)
+		result = append(result, map[string]interface{}{
+			"id":               id,
+			"name":             name,
+			"email":            email,
+			"phone":            phone,
+			"vehicle_type":     vehicleType,
+			"wallet_balance":   walletBalance,
+			"total_earnings":   totalEarnings,
+			"total_rides":      totalRides,
+			"is_blocked":       isBlocked,
+			"reg_paid":         regPaid,
+			"gross_earnings":   grossEarnings,
+			"total_commission": totalCommission,
+		})
+	}
+	if result == nil {
+		result = []map[string]interface{}{}
+	}
+	c.JSON(http.StatusOK, gin.H{"drivers": result})
 }
 
 // PATCH /gogoo/drivers/:id/block  (admin — manually block or unblock a driver)
 func ManageDriverBlock(c *gin.Context) {
-    driverID := c.Param("id")
-    var req struct {
-        Action      string `json:"action"`       // "block" | "unblock"
-        Reason      string `json:"reason"`
-        DurationHrs int    `json:"duration_hrs"` // default 48 if omitted
-    }
-    if err := c.ShouldBindJSON(&req); err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
-        return
-    }
+	driverID := c.Param("id")
+	var req struct {
+		Action      string `json:"action"` // "block" | "unblock"
+		Reason      string `json:"reason"`
+		DurationHrs int    `json:"duration_hrs"` // default 48 if omitted
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
 
-    ctx  := context.Background()
-    pool := db.GetDB().GetPool()
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
 
-    switch req.Action {
-    case "unblock":
-        _, err := pool.Exec(ctx, `
+	switch req.Action {
+	case "unblock":
+		_, err := pool.Exec(ctx, `
             UPDATE drivers
             SET is_blocked    = FALSE,
                 blocked_until = NULL,
@@ -2159,23 +2177,23 @@ func ManageDriverBlock(c *gin.Context) {
                 updated_at    = NOW()
             WHERE id = $1
         `, driverID)
-        if err != nil {
-            c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
-            return
-        }
-        c.JSON(http.StatusOK, gin.H{"message": "Driver unblocked"})
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "Driver unblocked"})
 
-    case "block":
-        hrs := req.DurationHrs
-        if hrs <= 0 {
-            hrs = 48
-        }
-        reason := req.Reason
-        if reason == "" {
-            reason = "Manually blocked by admin"
-        }
-        blockedUntil := time.Now().Add(time.Duration(hrs) * time.Hour)
-        _, err := pool.Exec(ctx, `
+	case "block":
+		hrs := req.DurationHrs
+		if hrs <= 0 {
+			hrs = 48
+		}
+		reason := req.Reason
+		if reason == "" {
+			reason = "Manually blocked by admin"
+		}
+		blockedUntil := time.Now().Add(time.Duration(hrs) * time.Hour)
+		_, err := pool.Exec(ctx, `
             UPDATE drivers
             SET is_blocked    = TRUE,
                 blocked_until = $1,
@@ -2183,25 +2201,25 @@ func ManageDriverBlock(c *gin.Context) {
                 updated_at    = NOW()
             WHERE id = $3
         `, blockedUntil, reason, driverID)
-        if err != nil {
-            c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
-            return
-        }
-        c.JSON(http.StatusOK, gin.H{"message": "Driver blocked", "blocked_until": blockedUntil})
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "Driver blocked", "blocked_until": blockedUntil})
 
-    default:
-        c.JSON(http.StatusBadRequest, gin.H{"error": "action must be 'block' or 'unblock'"})
-    }
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "action must be 'block' or 'unblock'"})
+	}
 }
 
 // GET /gogoo/riders/:id/bookings  (admin — fetch any rider's ride history by rider UUID)
 func ListRiderBookingsByID(c *gin.Context) {
-    riderID      := c.Param("id")
-    statusFilter := c.Query("status")
-    ctx  := context.Background()
-    pool := db.GetDB().GetPool()
+	riderID := c.Param("id")
+	statusFilter := c.Query("status")
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
 
-    query := `
+	query := `
         SELECT b.id, b.status, b.pickup_address, b.drop_address,
                COALESCE(b.final_fare, b.estimated_fare, 0),
                COALESCE(b.distance_km, 0),
@@ -2219,61 +2237,61 @@ func ListRiderBookingsByID(c *gin.Context) {
         LEFT JOIN users u_d   ON u_d.id = d.user_id
         WHERE b.rider_id = $1`
 
-    args := []interface{}{riderID}
-    if statusFilter != "" {
-        query += " AND b.status = $2"
-        args = append(args, statusFilter)
-    }
-    query += " ORDER BY b.created_at DESC LIMIT 100"
+	args := []interface{}{riderID}
+	if statusFilter != "" {
+		query += " AND b.status = $2"
+		args = append(args, statusFilter)
+	}
+	query += " ORDER BY b.created_at DESC LIMIT 100"
 
-    rows, err := pool.Query(ctx, query, args...)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
-        return
-    }
-    defer rows.Close()
+	rows, err := pool.Query(ctx, query, args...)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	defer rows.Close()
 
-    var bookings []map[string]interface{}
-    for rows.Next() {
-        var id, status, pickup, drop, driverName, serviceName, cancelledBy, cancelReason string
-        var fare, distanceKm, cancellationFee float64
-        var createdAt time.Time
-        var acceptedAt, cancelledAt, scheduledAt *time.Time
-        var isScheduled bool
-        rows.Scan(&id, &status, &pickup, &drop, &fare, &distanceKm, &createdAt, &driverName, &serviceName,
-            &cancelledBy, &cancelReason, &cancellationFee, &acceptedAt, &cancelledAt, &isScheduled, &scheduledAt)
-        bookings = append(bookings, map[string]interface{}{
-            "id":             id,
-            "status":         status,
-            "pickup_address": pickup,
-            "drop_address":   drop,
-            "fare":           fare,
-            "distance_km":    distanceKm,
-            "created_at":     createdAt,
-            "driver_name":    driverName,
-            "service_name":   serviceName,
-            "cancelled_by":   cancelledBy,
-            "cancel_reason":  cancelReason,
-            "cancellation_fee": cancellationFee,
-            "accepted_at":    acceptedAt,
-            "cancelled_at":   cancelledAt,
-            "is_scheduled":   isScheduled,
-            "scheduled_at":   scheduledAt,
-        })
-    }
-    if bookings == nil {
-        bookings = []map[string]interface{}{}
-    }
-    c.JSON(http.StatusOK, bookings)
+	var bookings []map[string]interface{}
+	for rows.Next() {
+		var id, status, pickup, drop, driverName, serviceName, cancelledBy, cancelReason string
+		var fare, distanceKm, cancellationFee float64
+		var createdAt time.Time
+		var acceptedAt, cancelledAt, scheduledAt *time.Time
+		var isScheduled bool
+		rows.Scan(&id, &status, &pickup, &drop, &fare, &distanceKm, &createdAt, &driverName, &serviceName,
+			&cancelledBy, &cancelReason, &cancellationFee, &acceptedAt, &cancelledAt, &isScheduled, &scheduledAt)
+		bookings = append(bookings, map[string]interface{}{
+			"id":               id,
+			"status":           status,
+			"pickup_address":   pickup,
+			"drop_address":     drop,
+			"fare":             fare,
+			"distance_km":      distanceKm,
+			"created_at":       createdAt,
+			"driver_name":      driverName,
+			"service_name":     serviceName,
+			"cancelled_by":     cancelledBy,
+			"cancel_reason":    cancelReason,
+			"cancellation_fee": cancellationFee,
+			"accepted_at":      acceptedAt,
+			"cancelled_at":     cancelledAt,
+			"is_scheduled":     isScheduled,
+			"scheduled_at":     scheduledAt,
+		})
+	}
+	if bookings == nil {
+		bookings = []map[string]interface{}{}
+	}
+	c.JSON(http.StatusOK, bookings)
 }
 
 // GET /gogoo/driver/reviews
 func GetDriverReviews(c *gin.Context) {
-    userID := c.GetString("user_id")
-    ctx    := context.Background()
-    pool   := db.GetDB().GetPool()
+	userID := c.GetString("user_id")
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
 
-    rows, err := pool.Query(ctx, `
+	rows, err := pool.Query(ctx, `
         SELECT b.driver_rating, COALESCE(b.driver_review,''), b.created_at, u.name as rider_name
         FROM bookings b
         JOIN drivers d ON d.id = b.driver_id
@@ -2285,39 +2303,39 @@ func GetDriverReviews(c *gin.Context) {
         ORDER BY b.created_at DESC
         LIMIT 10
     `, userID)
-    if err != nil {
-        c.JSON(http.StatusOK, []interface{}{})
-        return
-    }
-    defer rows.Close()
+	if err != nil {
+		c.JSON(http.StatusOK, []interface{}{})
+		return
+	}
+	defer rows.Close()
 
-    var reviews []map[string]interface{}
-    for rows.Next() {
-        var riderName, driverReview string
-        var driverRating int
-        var createdAt time.Time
-        rows.Scan(&driverRating, &driverReview, &createdAt, &riderName)
-        reviews = append(reviews, map[string]interface{}{
-            "driver_rating": driverRating,
-            "driver_review": driverReview,
-            "created_at":    createdAt,
-            "rider_name":    riderName,
-        })
-    }
-    if reviews == nil {
-        reviews = []map[string]interface{}{}
-    }
-    c.JSON(http.StatusOK, reviews)
+	var reviews []map[string]interface{}
+	for rows.Next() {
+		var riderName, driverReview string
+		var driverRating int
+		var createdAt time.Time
+		rows.Scan(&driverRating, &driverReview, &createdAt, &riderName)
+		reviews = append(reviews, map[string]interface{}{
+			"driver_rating": driverRating,
+			"driver_review": driverReview,
+			"created_at":    createdAt,
+			"rider_name":    riderName,
+		})
+	}
+	if reviews == nil {
+		reviews = []map[string]interface{}{}
+	}
+	c.JSON(http.StatusOK, reviews)
 }
 
 // GET /gogoo/drivers/:id/bookings  (admin — fetch any driver's ride history by driver UUID)
 func ListDriverBookingsByID(c *gin.Context) {
-    driverID     := c.Param("id")
-    statusFilter := c.Query("status")
-    ctx  := context.Background()
-    pool := db.GetDB().GetPool()
+	driverID := c.Param("id")
+	statusFilter := c.Query("status")
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
 
-    query := `
+	query := `
         SELECT b.id, b.status, b.pickup_address, b.drop_address,
                COALESCE(b.final_fare, b.estimated_fare, 0),
                COALESCE(b.distance_km, 0),
@@ -2332,109 +2350,109 @@ func ListDriverBookingsByID(c *gin.Context) {
         JOIN service_types st ON st.id  = b.service_type_id
         WHERE b.driver_id = $1`
 
-    args := []interface{}{driverID}
-    if statusFilter != "" {
-        query += " AND b.status = $2"
-        args = append(args, statusFilter)
-    }
-    query += " ORDER BY b.created_at DESC LIMIT 100"
+	args := []interface{}{driverID}
+	if statusFilter != "" {
+		query += " AND b.status = $2"
+		args = append(args, statusFilter)
+	}
+	query += " ORDER BY b.created_at DESC LIMIT 100"
 
-    rows, err := pool.Query(ctx, query, args...)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
-        return
-    }
-    defer rows.Close()
+	rows, err := pool.Query(ctx, query, args...)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	defer rows.Close()
 
-    var bookings []map[string]interface{}
-    for rows.Next() {
-        var id, status, pickup, drop, riderName, serviceName, cancelledBy, cancelReason string
-        var fare, distanceKm float64
-        var createdAt time.Time
-        rows.Scan(&id, &status, &pickup, &drop, &fare, &distanceKm, &createdAt, &riderName, &serviceName, &cancelledBy, &cancelReason)
-        bookings = append(bookings, map[string]interface{}{
-            "id":             id,
-            "status":         status,
-            "pickup_address": pickup,
-            "drop_address":   drop,
-            "fare":           fare,
-            "distance_km":    distanceKm,
-            "created_at":     createdAt,
-            "rider_name":     riderName,
-            "service_name":   serviceName,
-            "cancelled_by":   cancelledBy,
-            "cancel_reason":  cancelReason,
-        })
-    }
-    if bookings == nil {
-        bookings = []map[string]interface{}{}
-    }
-    c.JSON(http.StatusOK, bookings)
+	var bookings []map[string]interface{}
+	for rows.Next() {
+		var id, status, pickup, drop, riderName, serviceName, cancelledBy, cancelReason string
+		var fare, distanceKm float64
+		var createdAt time.Time
+		rows.Scan(&id, &status, &pickup, &drop, &fare, &distanceKm, &createdAt, &riderName, &serviceName, &cancelledBy, &cancelReason)
+		bookings = append(bookings, map[string]interface{}{
+			"id":             id,
+			"status":         status,
+			"pickup_address": pickup,
+			"drop_address":   drop,
+			"fare":           fare,
+			"distance_km":    distanceKm,
+			"created_at":     createdAt,
+			"rider_name":     riderName,
+			"service_name":   serviceName,
+			"cancelled_by":   cancelledBy,
+			"cancel_reason":  cancelReason,
+		})
+	}
+	if bookings == nil {
+		bookings = []map[string]interface{}{}
+	}
+	c.JSON(http.StatusOK, bookings)
 }
 
 // POST /gogoo/panel-login
 // Accepts panel-specific credentials or master admin fallback.
 func PanelLogin(c *gin.Context) {
-    ctx := context.Background()
-    pool := db.GetDB().GetPool()
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
 
-    var req struct {
-        Panel    string `json:"panel"`
-        Email    string `json:"email"`
-        Password string `json:"password"`
-    }
-    if err := c.ShouldBindJSON(&req); err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
-        return
-    }
+	var req struct {
+		Panel    string `json:"panel"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
 
-    cfg := c.MustGet("config").(*config.Config)
-    jwtSecret := cfg.JWTSecret
+	cfg := c.MustGet("config").(*config.Config)
+	jwtSecret := cfg.JWTSecret
 
-    // 1. Check panel_access table for this panel + email
-    var panelID, storedHash, role string
-    var isActive bool
-    err := pool.QueryRow(ctx, `
+	// 1. Check panel_access table for this panel + email
+	var panelID, storedHash, role string
+	var isActive bool
+	err := pool.QueryRow(ctx, `
         SELECT id, password_hash, role, is_active
         FROM panel_access
         WHERE email = $1 AND panel_name = $2
     `, req.Email, req.Panel).Scan(&panelID, &storedHash, &role, &isActive)
 
-    if err == nil && isActive {
-        if bcrypt.CompareHashAndPassword([]byte(storedHash), []byte(req.Password)) != nil {
-            c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
-            return
-        }
-        pool.Exec(ctx, `UPDATE panel_access SET last_login = NOW() WHERE id = $1`, panelID)
-        tokenStr := signPanelToken(panelID, req.Email, role, req.Panel, jwtSecret, panelID, true)
-        c.JSON(http.StatusOK, gin.H{"token": tokenStr, "role": role, "panel": req.Panel, "email": req.Email})
-        return
-    }
+	if err == nil && isActive {
+		if bcrypt.CompareHashAndPassword([]byte(storedHash), []byte(req.Password)) != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
+			return
+		}
+		pool.Exec(ctx, `UPDATE panel_access SET last_login = NOW() WHERE id = $1`, panelID)
+		tokenStr := signPanelToken(panelID, req.Email, role, req.Panel, jwtSecret, panelID, true)
+		c.JSON(http.StatusOK, gin.H{"token": tokenStr, "role": role, "panel": req.Panel, "email": req.Email})
+		return
+	}
 
-    // 2. Master admin fallback — only ADMIN_EMAIL can log into any panel.
-    // No baked-in default: if ADMIN_EMAIL is unset, the fallback is disabled.
-    adminEmail := os.Getenv("ADMIN_EMAIL")
-    if adminEmail == "" || req.Email != adminEmail {
-        c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
-        return
-    }
+	// 2. Master admin fallback — only ADMIN_EMAIL can log into any panel.
+	// No baked-in default: if ADMIN_EMAIL is unset, the fallback is disabled.
+	adminEmail := os.Getenv("ADMIN_EMAIL")
+	if adminEmail == "" || req.Email != adminEmail {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
+		return
+	}
 
-    var adminID uuid.UUID
-    var adminHash string
-    err = pool.QueryRow(ctx, `
+	var adminID uuid.UUID
+	var adminHash string
+	err = pool.QueryRow(ctx, `
         SELECT id, password_hash FROM users WHERE email = $1
     `, req.Email).Scan(&adminID, &adminHash)
-    if err != nil {
-        c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
-        return
-    }
-    if bcrypt.CompareHashAndPassword([]byte(adminHash), []byte(req.Password)) != nil {
-        c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
-        return
-    }
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
+		return
+	}
+	if bcrypt.CompareHashAndPassword([]byte(adminHash), []byte(req.Password)) != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
+		return
+	}
 
-    tokenStr := signPanelToken(adminID.String(), req.Email, "master_admin", req.Panel, jwtSecret, adminID.String(), true)
-    c.JSON(http.StatusOK, gin.H{"token": tokenStr, "role": "master_admin", "panel": req.Panel, "email": req.Email})
+	tokenStr := signPanelToken(adminID.String(), req.Email, "master_admin", req.Panel, jwtSecret, adminID.String(), true)
+	c.JSON(http.StatusOK, gin.H{"token": tokenStr, "role": "master_admin", "panel": req.Panel, "email": req.Email})
 }
 
 // signPanelToken signs a panel JWT. companyID/isOwner are meaningful only
@@ -2442,126 +2460,126 @@ func PanelLogin(c *gin.Context) {
 // companyID and isOwner=true, preserving today's behavior where user_id
 // alone identified both "who" and "which account" (see auth.Claims).
 func signPanelToken(userID, email, role, panel, secret, companyID string, isOwner bool) string {
-    token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-        "user_id":    userID,
-        "email":      email,
-        "role":       role,
-        "panel":      panel,
-        "company_id": companyID,
-        "is_owner":   isOwner,
-        "exp":        time.Now().Add(24 * time.Hour).Unix(),
-    })
-    tokenStr, _ := token.SignedString([]byte(secret))
-    return tokenStr
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"user_id":    userID,
+		"email":      email,
+		"role":       role,
+		"panel":      panel,
+		"company_id": companyID,
+		"is_owner":   isOwner,
+		"exp":        time.Now().Add(24 * time.Hour).Unix(),
+	})
+	tokenStr, _ := token.SignedString([]byte(secret))
+	return tokenStr
 }
 
 // GET /gogoo/admin/panel-access
 func GetPanelAccess(c *gin.Context) {
-    ctx := context.Background()
-    pool := db.GetDB().GetPool()
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
 
-    rows, err := pool.Query(ctx, `
+	rows, err := pool.Query(ctx, `
         SELECT id, panel_name, email, role, is_active, created_at, last_login
         FROM panel_access
         ORDER BY panel_name, email
     `)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch panel users"})
-        return
-    }
-    defer rows.Close()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch panel users"})
+		return
+	}
+	defer rows.Close()
 
-    type PanelUser struct {
-        ID        string     `json:"id"`
-        Panel     string     `json:"panel_name"`
-        Email     string     `json:"email"`
-        Role      string     `json:"role"`
-        IsActive  bool       `json:"is_active"`
-        CreatedAt time.Time  `json:"created_at"`
-        LastLogin *time.Time `json:"last_login"`
-    }
+	type PanelUser struct {
+		ID        string     `json:"id"`
+		Panel     string     `json:"panel_name"`
+		Email     string     `json:"email"`
+		Role      string     `json:"role"`
+		IsActive  bool       `json:"is_active"`
+		CreatedAt time.Time  `json:"created_at"`
+		LastLogin *time.Time `json:"last_login"`
+	}
 
-    var users []PanelUser
-    for rows.Next() {
-        var u PanelUser
-        rows.Scan(&u.ID, &u.Panel, &u.Email, &u.Role, &u.IsActive, &u.CreatedAt, &u.LastLogin)
-        users = append(users, u)
-    }
-    if users == nil {
-        users = []PanelUser{}
-    }
-    c.JSON(http.StatusOK, gin.H{"users": users})
+	var users []PanelUser
+	for rows.Next() {
+		var u PanelUser
+		rows.Scan(&u.ID, &u.Panel, &u.Email, &u.Role, &u.IsActive, &u.CreatedAt, &u.LastLogin)
+		users = append(users, u)
+	}
+	if users == nil {
+		users = []PanelUser{}
+	}
+	c.JSON(http.StatusOK, gin.H{"users": users})
 }
 
 // PATCH /gogoo/admin/panel-access/:id/password
 func UpdatePanelPassword(c *gin.Context) {
-    ctx := context.Background()
-    pool := db.GetDB().GetPool()
-    id := c.Param("id")
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+	id := c.Param("id")
 
-    var req struct {
-        Password string `json:"password"`
-    }
-    if err := c.ShouldBindJSON(&req); err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
-        return
-    }
-    if len(req.Password) < 8 {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "password must be at least 8 characters"})
-        return
-    }
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	if len(req.Password) < 8 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "password must be at least 8 characters"})
+		return
+	}
 
-    hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "hash failed"})
-        return
-    }
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "hash failed"})
+		return
+	}
 
-    _, err = pool.Exec(ctx, `UPDATE panel_access SET password_hash = $1 WHERE id = $2`, string(hash), id)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "update failed"})
-        return
-    }
-    c.JSON(http.StatusOK, gin.H{"message": "password updated"})
+	_, err = pool.Exec(ctx, `UPDATE panel_access SET password_hash = $1 WHERE id = $2`, string(hash), id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "update failed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "password updated"})
 }
 
 // ═══════════════════════════════════════════════════════════════════════
 // POST /gogoo/analytics/event — store a mobile analytics event
 // ═══════════════════════════════════════════════════════════════════════
 func RecordAnalyticsEvent(c *gin.Context) {
-    ctx  := context.Background()
-    pool := db.GetDB().GetPool()
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
 
-    var req struct {
-        EventName       string                 `json:"event_name"`
-        UserID          string                 `json:"user_id"`
-        UserType        string                 `json:"user_type"`
-        ScreenName      string                 `json:"screen_name"`
-        TimeSpentSecs   int                    `json:"time_spent_seconds"`
-        City            string                 `json:"city"`
-        Area            string                 `json:"area"`
-        DeviceModel     string                 `json:"device_model"`
-        OSVersion       string                 `json:"os_version"`
-        AppVersion      string                 `json:"app_version"`
-        NetworkType     string                 `json:"network_type"`
-        SessionID       string                 `json:"session_id"`
-        RetentionBucket string                 `json:"retention_bucket"`
-        Properties      map[string]interface{} `json:"properties"`
-    }
-    if err := c.ShouldBindJSON(&req); err != nil || req.EventName == "" {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "event_name required"})
-        return
-    }
+	var req struct {
+		EventName       string                 `json:"event_name"`
+		UserID          string                 `json:"user_id"`
+		UserType        string                 `json:"user_type"`
+		ScreenName      string                 `json:"screen_name"`
+		TimeSpentSecs   int                    `json:"time_spent_seconds"`
+		City            string                 `json:"city"`
+		Area            string                 `json:"area"`
+		DeviceModel     string                 `json:"device_model"`
+		OSVersion       string                 `json:"os_version"`
+		AppVersion      string                 `json:"app_version"`
+		NetworkType     string                 `json:"network_type"`
+		SessionID       string                 `json:"session_id"`
+		RetentionBucket string                 `json:"retention_bucket"`
+		Properties      map[string]interface{} `json:"properties"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.EventName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "event_name required"})
+		return
+	}
 
-    var tableExists bool
-    pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='analytics_events')`).Scan(&tableExists)
-    if !tableExists {
-        c.JSON(http.StatusOK, gin.H{"status": "table_not_ready"})
-        return
-    }
+	var tableExists bool
+	pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='analytics_events')`).Scan(&tableExists)
+	if !tableExists {
+		c.JSON(http.StatusOK, gin.H{"status": "table_not_ready"})
+		return
+	}
 
-    propsJSON, _ := json.Marshal(req.Properties)
-    pool.Exec(ctx, `
+	propsJSON, _ := json.Marshal(req.Properties)
+	pool.Exec(ctx, `
         INSERT INTO analytics_events
             (event_name, user_id, user_type,
              screen_name, time_spent_seconds,
@@ -2570,37 +2588,39 @@ func RecordAnalyticsEvent(c *gin.Context) {
              retention_bucket, properties, platform)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
     `,
-        req.EventName, req.UserID, req.UserType,
-        req.ScreenName, req.TimeSpentSecs,
-        req.City, req.Area, req.DeviceModel, req.OSVersion,
-        req.AppVersion, req.NetworkType, req.SessionID,
-        req.RetentionBucket, propsJSON, "mobile",
-    )
-    c.JSON(http.StatusOK, gin.H{"status": "recorded"})
+		req.EventName, req.UserID, req.UserType,
+		req.ScreenName, req.TimeSpentSecs,
+		req.City, req.Area, req.DeviceModel, req.OSVersion,
+		req.AppVersion, req.NetworkType, req.SessionID,
+		req.RetentionBucket, propsJSON, "mobile",
+	)
+	c.JSON(http.StatusOK, gin.H{"status": "recorded"})
 }
 
 // ─── helper: check analytics_events table ──────────────────────────────
-func analyticsTableExists(ctx context.Context, pool interface{ QueryRow(context.Context, string, ...interface{}) interface{ Scan(...interface{}) error } }) bool {
-    var exists bool
-    pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='analytics_events')`).Scan(&exists)
-    return exists
+func analyticsTableExists(ctx context.Context, pool interface {
+	QueryRow(context.Context, string, ...interface{}) interface{ Scan(...interface{}) error }
+}) bool {
+	var exists bool
+	pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='analytics_events')`).Scan(&exists)
+	return exists
 }
 
 // ═══════════════════════════════════════════════════════════════════════
 // GET /gogoo/analytics/screen-times
 // ═══════════════════════════════════════════════════════════════════════
 func GetScreenTimes(c *gin.Context) {
-    ctx  := context.Background()
-    pool := db.GetDB().GetPool()
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
 
-    var tableExists bool
-    pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='analytics_events')`).Scan(&tableExists)
-    if !tableExists {
-        c.JSON(http.StatusOK, []interface{}{})
-        return
-    }
+	var tableExists bool
+	pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='analytics_events')`).Scan(&tableExists)
+	if !tableExists {
+		c.JSON(http.StatusOK, []interface{}{})
+		return
+	}
 
-    rows, err := pool.Query(ctx, `
+	rows, err := pool.Query(ctx, `
         SELECT
             screen_name,
             ROUND(AVG(time_spent_seconds))::int         AS avg_time,
@@ -2614,49 +2634,49 @@ func GetScreenTimes(c *gin.Context) {
         ORDER BY views DESC
         LIMIT 20
     `)
-    if err != nil {
-        c.JSON(http.StatusOK, []interface{}{})
-        return
-    }
-    defer rows.Close()
+	if err != nil {
+		c.JSON(http.StatusOK, []interface{}{})
+		return
+	}
+	defer rows.Close()
 
-    var result []map[string]interface{}
-    for rows.Next() {
-        var screen string
-        var avgTime, views, bounces int
-        rows.Scan(&screen, &avgTime, &views, &bounces)
-        bounceRate := 0
-        if views > 0 {
-            bounceRate = bounces * 100 / views
-        }
-        result = append(result, map[string]interface{}{
-            "screen":      screen,
-            "avg_time":    avgTime,
-            "views":       views,
-            "bounce_rate": bounceRate,
-        })
-    }
-    if result == nil {
-        result = []map[string]interface{}{}
-    }
-    c.JSON(http.StatusOK, result)
+	var result []map[string]interface{}
+	for rows.Next() {
+		var screen string
+		var avgTime, views, bounces int
+		rows.Scan(&screen, &avgTime, &views, &bounces)
+		bounceRate := 0
+		if views > 0 {
+			bounceRate = bounces * 100 / views
+		}
+		result = append(result, map[string]interface{}{
+			"screen":      screen,
+			"avg_time":    avgTime,
+			"views":       views,
+			"bounce_rate": bounceRate,
+		})
+	}
+	if result == nil {
+		result = []map[string]interface{}{}
+	}
+	c.JSON(http.StatusOK, result)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
 // GET /gogoo/analytics/geo-distribution
 // ═══════════════════════════════════════════════════════════════════════
 func GetGeoDistribution(c *gin.Context) {
-    ctx  := context.Background()
-    pool := db.GetDB().GetPool()
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
 
-    var tableExists bool
-    pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='analytics_events')`).Scan(&tableExists)
-    if !tableExists {
-        c.JSON(http.StatusOK, []interface{}{})
-        return
-    }
+	var tableExists bool
+	pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='analytics_events')`).Scan(&tableExists)
+	if !tableExists {
+		c.JSON(http.StatusOK, []interface{}{})
+		return
+	}
 
-    rows, err := pool.Query(ctx, `
+	rows, err := pool.Query(ctx, `
         SELECT
             COALESCE(city,'Unknown')            AS city,
             COALESCE(area,'Unknown')            AS area,
@@ -2669,133 +2689,145 @@ func GetGeoDistribution(c *gin.Context) {
         ORDER BY users DESC
         LIMIT 25
     `)
-    if err != nil {
-        c.JSON(http.StatusOK, []interface{}{})
-        return
-    }
-    defer rows.Close()
+	if err != nil {
+		c.JSON(http.StatusOK, []interface{}{})
+		return
+	}
+	defer rows.Close()
 
-    var result []map[string]interface{}
-    for rows.Next() {
-        var city, area string
-        var users, bookings int
-        rows.Scan(&city, &area, &users, &bookings)
-        result = append(result, map[string]interface{}{
-            "city": city, "area": area, "users": users, "bookings": bookings,
-        })
-    }
-    if result == nil {
-        result = []map[string]interface{}{}
-    }
-    c.JSON(http.StatusOK, result)
+	var result []map[string]interface{}
+	for rows.Next() {
+		var city, area string
+		var users, bookings int
+		rows.Scan(&city, &area, &users, &bookings)
+		result = append(result, map[string]interface{}{
+			"city": city, "area": area, "users": users, "bookings": bookings,
+		})
+	}
+	if result == nil {
+		result = []map[string]interface{}{}
+	}
+	c.JSON(http.StatusOK, result)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
 // GET /gogoo/analytics/device-breakdown
 // ═══════════════════════════════════════════════════════════════════════
 func GetDeviceBreakdown(c *gin.Context) {
-    ctx  := context.Background()
-    pool := db.GetDB().GetPool()
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
 
-    var tableExists bool
-    pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='analytics_events')`).Scan(&tableExists)
-    if !tableExists {
-        c.JSON(http.StatusOK, gin.H{"os": []interface{}{}, "models": []interface{}{}, "versions": []interface{}{}})
-        return
-    }
+	var tableExists bool
+	pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='analytics_events')`).Scan(&tableExists)
+	if !tableExists {
+		c.JSON(http.StatusOK, gin.H{"os": []interface{}{}, "models": []interface{}{}, "versions": []interface{}{}})
+		return
+	}
 
-    osRows, _ := pool.Query(ctx, `
+	osRows, _ := pool.Query(ctx, `
         SELECT COALESCE(os_name,'unknown') AS os, COUNT(DISTINCT user_id) AS users
         FROM analytics_events
         WHERE event_name='device_info' AND created_at > NOW() - INTERVAL '30 days'
         GROUP BY os ORDER BY users DESC
     `)
-    var osList []map[string]interface{}
-    if osRows != nil {
-        for osRows.Next() {
-            var os string; var users int
-            osRows.Scan(&os, &users)
-            osList = append(osList, map[string]interface{}{"os": os, "users": users})
-        }
-        osRows.Close()
-    }
+	var osList []map[string]interface{}
+	if osRows != nil {
+		for osRows.Next() {
+			var os string
+			var users int
+			osRows.Scan(&os, &users)
+			osList = append(osList, map[string]interface{}{"os": os, "users": users})
+		}
+		osRows.Close()
+	}
 
-    verRows, _ := pool.Query(ctx, `
+	verRows, _ := pool.Query(ctx, `
         SELECT COALESCE(os_version,'unknown') AS version, COUNT(DISTINCT user_id) AS users
         FROM analytics_events
         WHERE event_name='device_info' AND created_at > NOW() - INTERVAL '30 days'
         GROUP BY version ORDER BY users DESC LIMIT 10
     `)
-    var verList []map[string]interface{}
-    if verRows != nil {
-        for verRows.Next() {
-            var ver string; var users int
-            verRows.Scan(&ver, &users)
-            verList = append(verList, map[string]interface{}{"version": ver, "users": users})
-        }
-        verRows.Close()
-    }
+	var verList []map[string]interface{}
+	if verRows != nil {
+		for verRows.Next() {
+			var ver string
+			var users int
+			verRows.Scan(&ver, &users)
+			verList = append(verList, map[string]interface{}{"version": ver, "users": users})
+		}
+		verRows.Close()
+	}
 
-    modelRows, _ := pool.Query(ctx, `
+	modelRows, _ := pool.Query(ctx, `
         SELECT COALESCE(device_model,'unknown') AS model, COUNT(DISTINCT user_id) AS users
         FROM analytics_events
         WHERE event_name='device_info' AND created_at > NOW() - INTERVAL '30 days'
         GROUP BY model ORDER BY users DESC LIMIT 10
     `)
-    var modelList []map[string]interface{}
-    if modelRows != nil {
-        for modelRows.Next() {
-            var model string; var users int
-            modelRows.Scan(&model, &users)
-            modelList = append(modelList, map[string]interface{}{"model": model, "users": users})
-        }
-        modelRows.Close()
-    }
+	var modelList []map[string]interface{}
+	if modelRows != nil {
+		for modelRows.Next() {
+			var model string
+			var users int
+			modelRows.Scan(&model, &users)
+			modelList = append(modelList, map[string]interface{}{"model": model, "users": users})
+		}
+		modelRows.Close()
+	}
 
-    netRows, _ := pool.Query(ctx, `
+	netRows, _ := pool.Query(ctx, `
         SELECT COALESCE(network_type,'unknown') AS network, COUNT(DISTINCT user_id) AS users
         FROM analytics_events
         WHERE event_name='device_info' AND created_at > NOW() - INTERVAL '30 days'
         GROUP BY network ORDER BY users DESC
     `)
-    var netList []map[string]interface{}
-    if netRows != nil {
-        for netRows.Next() {
-            var net string; var users int
-            netRows.Scan(&net, &users)
-            netList = append(netList, map[string]interface{}{"network": net, "users": users})
-        }
-        netRows.Close()
-    }
+	var netList []map[string]interface{}
+	if netRows != nil {
+		for netRows.Next() {
+			var net string
+			var users int
+			netRows.Scan(&net, &users)
+			netList = append(netList, map[string]interface{}{"network": net, "users": users})
+		}
+		netRows.Close()
+	}
 
-    if osList    == nil { osList    = []map[string]interface{}{} }
-    if verList   == nil { verList   = []map[string]interface{}{} }
-    if modelList == nil { modelList = []map[string]interface{}{} }
-    if netList   == nil { netList   = []map[string]interface{}{} }
+	if osList == nil {
+		osList = []map[string]interface{}{}
+	}
+	if verList == nil {
+		verList = []map[string]interface{}{}
+	}
+	if modelList == nil {
+		modelList = []map[string]interface{}{}
+	}
+	if netList == nil {
+		netList = []map[string]interface{}{}
+	}
 
-    c.JSON(http.StatusOK, gin.H{
-        "os": osList, "versions": verList, "models": modelList, "networks": netList,
-    })
+	c.JSON(http.StatusOK, gin.H{
+		"os": osList, "versions": verList, "models": modelList, "networks": netList,
+	})
 }
 
 // ═══════════════════════════════════════════════════════════════════════
 // GET /gogoo/analytics/retention
 // ═══════════════════════════════════════════════════════════════════════
 func GetRetentionStats(c *gin.Context) {
-    ctx  := context.Background()
-    pool := db.GetDB().GetPool()
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
 
-    var tableExists bool
-    pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='analytics_events')`).Scan(&tableExists)
-    if !tableExists {
-        c.JSON(http.StatusOK, gin.H{"buckets": []interface{}{}, "new_users_today": 0})
-        return
-    }
+	var tableExists bool
+	pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='analytics_events')`).Scan(&tableExists)
+	if !tableExists {
+		c.JSON(http.StatusOK, gin.H{"buckets": []interface{}{}, "new_users_today": 0})
+		return
+	}
 
-    var newToday int
-    pool.QueryRow(ctx, `SELECT COUNT(*) FROM analytics_events WHERE event_name='new_user' AND DATE(created_at)=CURRENT_DATE`).Scan(&newToday)
+	var newToday int
+	pool.QueryRow(ctx, `SELECT COUNT(*) FROM analytics_events WHERE event_name='new_user' AND DATE(created_at)=CURRENT_DATE`).Scan(&newToday)
 
-    rows, err := pool.Query(ctx, `
+	rows, err := pool.Query(ctx, `
         SELECT
             COALESCE(retention_bucket,'unknown') AS bucket,
             COUNT(DISTINCT user_id) AS users
@@ -2805,44 +2837,47 @@ func GetRetentionStats(c *gin.Context) {
         GROUP BY bucket
         ORDER BY users DESC
     `)
-    var buckets []map[string]interface{}
-    if err == nil && rows != nil {
-        for rows.Next() {
-            var bucket string; var users int
-            rows.Scan(&bucket, &users)
-            buckets = append(buckets, map[string]interface{}{"bucket": bucket, "users": users})
-        }
-        rows.Close()
-    }
-    if buckets == nil { buckets = []map[string]interface{}{} }
+	var buckets []map[string]interface{}
+	if err == nil && rows != nil {
+		for rows.Next() {
+			var bucket string
+			var users int
+			rows.Scan(&bucket, &users)
+			buckets = append(buckets, map[string]interface{}{"bucket": bucket, "users": users})
+		}
+		rows.Close()
+	}
+	if buckets == nil {
+		buckets = []map[string]interface{}{}
+	}
 
-    c.JSON(http.StatusOK, gin.H{"buckets": buckets, "new_users_today": newToday})
+	c.JSON(http.StatusOK, gin.H{"buckets": buckets, "new_users_today": newToday})
 }
 
 // ═══════════════════════════════════════════════════════════════════════
 // GET /gogoo/analytics/sessions
 // ═══════════════════════════════════════════════════════════════════════
 func GetSessionStats(c *gin.Context) {
-    ctx  := context.Background()
-    pool := db.GetDB().GetPool()
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
 
-    var tableExists bool
-    pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='analytics_events')`).Scan(&tableExists)
-    if !tableExists {
-        c.JSON(http.StatusOK, gin.H{"sessions_today": 0, "avg_duration_secs": 0, "avg_screens": 0})
-        return
-    }
+	var tableExists bool
+	pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='analytics_events')`).Scan(&tableExists)
+	if !tableExists {
+		c.JSON(http.StatusOK, gin.H{"sessions_today": 0, "avg_duration_secs": 0, "avg_screens": 0})
+		return
+	}
 
-    var sessionsToday, avgDuration, avgScreens int
-    pool.QueryRow(ctx, `SELECT COUNT(*) FROM analytics_events WHERE event_name='session_start' AND DATE(created_at)=CURRENT_DATE`).Scan(&sessionsToday)
-    pool.QueryRow(ctx, `
+	var sessionsToday, avgDuration, avgScreens int
+	pool.QueryRow(ctx, `SELECT COUNT(*) FROM analytics_events WHERE event_name='session_start' AND DATE(created_at)=CURRENT_DATE`).Scan(&sessionsToday)
+	pool.QueryRow(ctx, `
         SELECT COALESCE(ROUND(AVG((properties->>'duration_seconds')::numeric)),0)
         FROM analytics_events
         WHERE event_name='session_end'
             AND created_at > NOW() - INTERVAL '7 days'
             AND properties->>'duration_seconds' IS NOT NULL
     `).Scan(&avgDuration)
-    pool.QueryRow(ctx, `
+	pool.QueryRow(ctx, `
         SELECT COALESCE(ROUND(AVG((properties->>'screens_visited')::numeric)),0)
         FROM analytics_events
         WHERE event_name='session_end'
@@ -2850,11 +2885,11 @@ func GetSessionStats(c *gin.Context) {
             AND properties->>'screens_visited' IS NOT NULL
     `).Scan(&avgScreens)
 
-    c.JSON(http.StatusOK, gin.H{
-        "sessions_today":    sessionsToday,
-        "avg_duration_secs": avgDuration,
-        "avg_screens":       avgScreens,
-    })
+	c.JSON(http.StatusOK, gin.H{
+		"sessions_today":    sessionsToday,
+		"avg_duration_secs": avgDuration,
+		"avg_screens":       avgScreens,
+	})
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -2862,17 +2897,17 @@ func GetSessionStats(c *gin.Context) {
 // Returns a 24h × 7d grid of event counts (hour 0-23, day 0-6 Sun=0)
 // ═══════════════════════════════════════════════════════════════════════
 func GetUsageHeatmap(c *gin.Context) {
-    ctx  := context.Background()
-    pool := db.GetDB().GetPool()
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
 
-    var tableExists bool
-    pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='analytics_events')`).Scan(&tableExists)
-    if !tableExists {
-        c.JSON(http.StatusOK, []interface{}{})
-        return
-    }
+	var tableExists bool
+	pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='analytics_events')`).Scan(&tableExists)
+	if !tableExists {
+		c.JSON(http.StatusOK, []interface{}{})
+		return
+	}
 
-    rows, err := pool.Query(ctx, `
+	rows, err := pool.Query(ctx, `
         SELECT
             EXTRACT(HOUR FROM created_at)::int        AS hour,
             EXTRACT(DOW  FROM created_at)::int        AS day,
@@ -2882,22 +2917,22 @@ func GetUsageHeatmap(c *gin.Context) {
         GROUP BY hour, day
         ORDER BY day, hour
     `)
-    if err != nil {
-        c.JSON(http.StatusOK, []interface{}{})
-        return
-    }
-    defer rows.Close()
+	if err != nil {
+		c.JSON(http.StatusOK, []interface{}{})
+		return
+	}
+	defer rows.Close()
 
-    var result []map[string]interface{}
-    for rows.Next() {
-        var hour, day, events int
-        rows.Scan(&hour, &day, &events)
-        result = append(result, map[string]interface{}{"hour": hour, "day": day, "events": events})
-    }
-    if result == nil {
-        result = []map[string]interface{}{}
-    }
-    c.JSON(http.StatusOK, result)
+	var result []map[string]interface{}
+	for rows.Next() {
+		var hour, day, events int
+		rows.Scan(&hour, &day, &events)
+		result = append(result, map[string]interface{}{"hour": hour, "day": day, "events": events})
+	}
+	if result == nil {
+		result = []map[string]interface{}{}
+	}
+	c.JSON(http.StatusOK, result)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -2905,31 +2940,31 @@ func GetUsageHeatmap(c *gin.Context) {
 // Counts each funnel step event for the last 30 days
 // ═══════════════════════════════════════════════════════════════════════
 func GetFunnelData(c *gin.Context) {
-    ctx  := context.Background()
-    pool := db.GetDB().GetPool()
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
 
-    var tableExists bool
-    pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='analytics_events')`).Scan(&tableExists)
-    if !tableExists {
-        c.JSON(http.StatusOK, gin.H{})
-        return
-    }
+	var tableExists bool
+	pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name='analytics_events')`).Scan(&tableExists)
+	if !tableExists {
+		c.JSON(http.StatusOK, gin.H{})
+		return
+	}
 
-    steps := []string{
-        "app_opened", "home_viewed", "service_selected",
-        "location_set", "vehicle_selected", "review_viewed",
-        "booking_confirmed", "tracking_viewed", "ride_completed",
-    }
-    result := map[string]int{}
-    for _, step := range steps {
-        var count int
-        pool.QueryRow(ctx, `
+	steps := []string{
+		"app_opened", "home_viewed", "service_selected",
+		"location_set", "vehicle_selected", "review_viewed",
+		"booking_confirmed", "tracking_viewed", "ride_completed",
+	}
+	result := map[string]int{}
+	for _, step := range steps {
+		var count int
+		pool.QueryRow(ctx, `
             SELECT COUNT(*) FROM analytics_events
             WHERE event_name='funnel_step'
               AND properties->>'step_name' = $1
               AND created_at > NOW() - INTERVAL '30 days'
         `, step).Scan(&count)
-        result[step] = count
-    }
-    c.JSON(http.StatusOK, result)
+		result[step] = count
+	}
+	c.JSON(http.StatusOK, result)
 }
