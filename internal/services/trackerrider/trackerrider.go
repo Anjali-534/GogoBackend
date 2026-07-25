@@ -5,10 +5,12 @@ package trackerrider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/deploykit/backend/internal/db"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // EnsureTrackerCompanyRiderProfile returns the rider id backing companyID's
@@ -110,4 +112,27 @@ func GetTrackerCompanyRiderID(ctx context.Context, companyID string) (string, er
 		return "", nil
 	}
 	return *riderID, nil
+}
+
+// CompanyIDForRiderID is the reverse lookup of EnsureTrackerCompanyRiderProfile
+// — given a bookings.rider_id, reports whether it belongs to a tracker
+// company's synthetic rider and, if so, which company. Used wherever a
+// booking needs to be charged to the company's own wallet (migration 053)
+// rather than treated as a regular rider booking: ok is false for every
+// ordinary rider's booking, which is the common case this gets called
+// against, so callers should treat that as "not a tracker company booking"
+// rather than an error.
+func CompanyIDForRiderID(ctx context.Context, riderID string) (companyID string, ok bool, err error) {
+	pool := db.GetDB().GetPool()
+
+	err = pool.QueryRow(ctx,
+		`SELECT id FROM tracker_companies WHERE synthetic_rider_id = $1`, riderID,
+	).Scan(&companyID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("trackerrider: lookup company for rider %s: %w", riderID, err)
+	}
+	return companyID, true, nil
 }

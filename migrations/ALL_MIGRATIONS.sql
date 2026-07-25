@@ -1450,3 +1450,19 @@ CREATE TABLE IF NOT EXISTS tracker_wallet_charge_attempts (
 
 CREATE INDEX IF NOT EXISTS idx_tracker_wallet_charge_attempts_company_id
     ON tracker_wallet_charge_attempts(company_id);
+
+-- ===== 053_tracker_company_wallet_rides.sql =====
+
+ALTER TABLE bookings
+    DROP CONSTRAINT IF EXISTS bookings_payment_method_check;
+
+ALTER TABLE bookings
+    ADD CONSTRAINT bookings_payment_method_check
+    CHECK (payment_method IN ('cash', 'wallet', 'company_wallet'));
+
+ALTER TABLE tracker_wallet_ledger
+    DROP CONSTRAINT IF EXISTS tracker_wallet_ledger_type_check;
+
+ALTER TABLE tracker_wallet_ledger
+    ADD CONSTRAINT tracker_wallet_ledger_type_check
+    CHECK (type IN ('topup', 'subscription_charge', 'adjustment', 'ride_payment'));

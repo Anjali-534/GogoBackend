@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Same rzp instance as the rider wallet (wallet.go) — nil-when-unconfigured,
@@ -206,4 +207,38 @@ func GetTrackerWalletLedger(c *gin.Context) {
 		"payments_available":  rzp != nil,
 		"ledger":              out,
 	})
+}
+
+// debitCompanyWalletForRide atomically checks-and-debits a tracker
+// company's wallet for a completed Book-a-Ride booking's fare — mirrors
+// debitWalletForRide (wallet.go) against tracker_companies/
+// tracker_wallet_ledger instead of riders/wallet_ledger. Returns false
+// (no-op, nothing written) on insufficient balance so the caller can fall
+// back to cash, same as the rider path; this never partially debits.
+func debitCompanyWalletForRide(ctx context.Context, pool *pgxpool.Pool, companyID string, fare float64) bool {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return false
+	}
+	defer tx.Rollback(ctx)
+
+	var balance float64
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(wallet_balance,0) FROM tracker_companies WHERE id=$1 FOR UPDATE`, companyID).Scan(&balance); err != nil {
+		return false
+	}
+	if balance < fare {
+		return false
+	}
+	newBalance := balance - fare
+
+	if _, err := tx.Exec(ctx, `
+        INSERT INTO tracker_wallet_ledger (id, company_id, type, amount, balance_after, status)
+        VALUES ($1, $2, 'ride_payment', $3, $4, 'completed')
+    `, uuid.New(), companyID, -fare, newBalance); err != nil {
+		return false
+	}
+	if _, err := tx.Exec(ctx, `UPDATE tracker_companies SET wallet_balance=$1 WHERE id=$2`, newBalance, companyID); err != nil {
+		return false
+	}
+	return tx.Commit(ctx) == nil
 }

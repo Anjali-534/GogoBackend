@@ -16,6 +16,7 @@ import (
 	"github.com/deploykit/backend/internal/config"
 	"github.com/deploykit/backend/internal/dateutil"
 	"github.com/deploykit/backend/internal/db"
+	"github.com/deploykit/backend/internal/services/trackerrider"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
@@ -476,6 +477,12 @@ func createBookingCore(c *gin.Context, ctx context.Context, pool *pgxpool.Pool, 
 	paymentMethod := "cash"
 	if req.PaymentMethod == "wallet" {
 		paymentMethod = "wallet"
+	} else if req.PaymentMethod == "company_wallet" {
+		// Only ever valid for a tracker company's own synthetic rider — a
+		// regular rider's riderID simply won't match, silently staying cash.
+		if _, ok, err := trackerrider.CompanyIDForRiderID(ctx, riderID); err == nil && ok {
+			paymentMethod = "company_wallet"
+		}
 	}
 	// Ambulance never shows a payment-method toggle — asking someone to pick
 	// cash vs. wallet in an emergency flow is exactly the friction that
@@ -1396,6 +1403,13 @@ func UpdateBookingStatus(c *gin.Context) {
 		walletFallbackToCash := false
 		if bookingPaymentMethod == "wallet" && finalFare > 0 {
 			if !debitWalletForRide(ctx, pool, completedRiderID, bookingID, finalFare) {
+				walletFallbackToCash = true
+				bookingPaymentMethod = "cash"
+				pool.Exec(ctx, `UPDATE bookings SET payment_method='cash' WHERE id=$1`, bookingID)
+			}
+		} else if bookingPaymentMethod == "company_wallet" && finalFare > 0 {
+			companyID, ok, err := trackerrider.CompanyIDForRiderID(ctx, completedRiderID)
+			if err != nil || !ok || !debitCompanyWalletForRide(ctx, pool, companyID, finalFare) {
 				walletFallbackToCash = true
 				bookingPaymentMethod = "cash"
 				pool.Exec(ctx, `UPDATE bookings SET payment_method='cash' WHERE id=$1`, bookingID)
