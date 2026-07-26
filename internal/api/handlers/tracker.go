@@ -75,17 +75,19 @@ var validOrderPriorities = map[string]bool{
 	"same_day": true,
 }
 
-// validDriverEventKinds are the driver-reported quick-status taps from the
-// drive page — notes at the order's CURRENT status, never a status
-// transition. Must match the CHECK constraint added in migration 028.
-// 'delivery_claimed' is the special one: paired with an uploaded signature
-// (see UploadTrackerDriverSignature), it's what prompts the company to run
-// the actual 'delivered' transition via the normal status-update endpoint.
+// validDriverEventKinds are the event kinds this endpoint still accepts.
+// Must be a subset of the CHECK constraint added in migration 028 — the
+// constraint stays permissive for historical rows (on_break/about_to_reach/
+// unloading were manually-tapped quick-status buttons, now removed from the
+// drive page), but this handler no longer writes those three going forward.
+// 'reached' is now driver-triggered automatically via GPS proximity rather
+// than a manual tap (see the drive page's haversine check), but the event
+// kind itself is unchanged. 'delivery_claimed' is the special one: paired
+// with an uploaded signature (see UploadTrackerDriverSignature), it's what
+// prompts the company to run the actual 'delivered' transition via the
+// normal status-update endpoint.
 var validDriverEventKinds = map[string]bool{
-	"on_break":         true,
-	"about_to_reach":   true,
 	"reached":          true,
-	"unloading":        true,
 	"delivery_claimed": true,
 }
 
