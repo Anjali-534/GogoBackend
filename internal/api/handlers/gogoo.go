@@ -182,7 +182,7 @@ func nullIfEmpty(s string) interface{} {
 func ListServiceTypes(c *gin.Context) {
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
-	rows, err := pool.Query(ctx, `SELECT id,name,slug,vehicle_type,COALESCE(category,''),COALESCE(scope,''),base_fare,per_km_rate,per_min_rate,surge_multiplier,capacity FROM service_types WHERE is_active=true ORDER BY base_fare ASC`)
+	rows, err := pool.Query(ctx, `SELECT id,name,slug,vehicle_type,COALESCE(category,''),COALESCE(scope,''),base_fare,per_km_rate,per_min_rate,surge_multiplier,capacity,length_m,width_m,height_m,weight_capacity_kg,fuel_types FROM service_types WHERE is_active=true ORDER BY base_fare ASC`)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
@@ -193,8 +193,15 @@ func ListServiceTypes(c *gin.Context) {
 		var id, name, slug, vehicleType, category, scope string
 		var baseFare, perKm, perMin, surge float64
 		var capacity int
-		rows.Scan(&id, &name, &slug, &vehicleType, &category, &scope, &baseFare, &perKm, &perMin, &surge, &capacity)
-		services = append(services, map[string]interface{}{"id": id, "name": name, "slug": slug, "vehicle_type": vehicleType, "category": category, "scope": scope, "base_fare": baseFare, "per_km_rate": perKm, "surge_multiplier": surge, "capacity": capacity})
+		var lengthM, widthM, heightM, weightCapacityKg *float64
+		var fuelTypes []string
+		rows.Scan(&id, &name, &slug, &vehicleType, &category, &scope, &baseFare, &perKm, &perMin, &surge, &capacity, &lengthM, &widthM, &heightM, &weightCapacityKg, &fuelTypes)
+		services = append(services, map[string]interface{}{
+			"id": id, "name": name, "slug": slug, "vehicle_type": vehicleType, "category": category, "scope": scope,
+			"base_fare": baseFare, "per_km_rate": perKm, "surge_multiplier": surge, "capacity": capacity,
+			"length_m": lengthM, "width_m": widthM, "height_m": heightM, "weight_capacity_kg": weightCapacityKg,
+			"fuel_types": fuelTypes,
+		})
 	}
 	c.JSON(http.StatusOK, services)
 }
