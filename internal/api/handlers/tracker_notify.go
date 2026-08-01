@@ -65,7 +65,7 @@ func NotifyTrackerOrderStakeholders(c *gin.Context) {
 		       o.dispatch_from, o.dispatch_to,
 		       COALESCE(o.transporter_name,''), o.transporter_email,
 		       COALESCE(o.driver_name,''), COALESCE(o.driver_phone,''),
-		       o.vehicle_number, o.status, o.public_tracking_token,
+		       o.vehicle_number, COALESCE(o.eway_bill_file_url,''), o.status, o.public_tracking_token,
 		       o.consignee_name, o.consignee_email, o.material, o.quantity,
 		       o.dispatch_datetime, o.documents_enclosed, o.received_confirmation_token,
 		       o.booked_for_state, o.consignee_state, o.order_type,
@@ -78,7 +78,7 @@ func NotifyTrackerOrderStakeholders(c *gin.Context) {
 		&o.DispatchFrom, &o.DispatchTo,
 		&o.TransporterName, &o.TransporterEmail,
 		&o.DriverName, &o.DriverPhone,
-		&o.VehicleNumber, &o.Status, &o.PublicTrackingToken,
+		&o.VehicleNumber, &o.EwayBillFileURL, &o.Status, &o.PublicTrackingToken,
 		&o.ConsigneeName, &o.ConsigneeEmail, &o.Material, &o.Quantity,
 		&o.DispatchDatetime, &o.DocumentsEnclosed, &o.ReceivedConfirmationToken,
 		&o.BookedForState, &o.ConsigneeState, &o.OrderType,
@@ -88,6 +88,20 @@ func NotifyTrackerOrderStakeholders(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
 		return
 	}
+
+	docs, err := fetchTrackerOrderDocuments(ctx, pool, orderID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error: " + err.Error()})
+		return
+	}
+	var attachables []trackerEmailAttachable
+	if o.EwayBillFileURL != "" {
+		attachables = append(attachables, trackerEmailAttachable{Label: "E-Way Bill", FileURL: o.EwayBillFileURL})
+	}
+	for _, d := range docs {
+		attachables = append(attachables, trackerEmailAttachable{Label: trackerDocDisplayLabel(d), FileURL: d.FileURL})
+	}
+	attachments, skippedDocs := buildTrackerEmailAttachments(attachables)
 
 	cfg := c.MustGet("config").(*config.Config)
 	trackingLink := strings.TrimRight(cfg.TrackerPanelURL, "/") + "/track/" + o.PublicTrackingToken
@@ -124,8 +138,8 @@ func NotifyTrackerOrderStakeholders(c *gin.Context) {
 	// send path for inbound orders, buildDispatchEmailBody takes a shared
 	// flag and omits just the one line.
 	omitTrackingLink := o.OrderType == "inbound"
-	bodyWithReceipt := buildDispatchEmailBody(o, trackingLink, receiptLink, omitTrackingLink)
-	bodyWithoutReceipt := buildDispatchEmailBody(o, trackingLink, "", omitTrackingLink)
+	bodyWithReceipt := buildDispatchEmailBody(o, trackingLink, receiptLink, omitTrackingLink, skippedDocs)
+	bodyWithoutReceipt := buildDispatchEmailBody(o, trackingLink, "", omitTrackingLink, skippedDocs)
 	htmlWithReceipt := buildDispatchEmailBodyHTML(cfg, o, companyName, companyLogoURL, trackingLink, receiptLink, omitTrackingLink)
 	htmlWithoutReceipt := buildDispatchEmailBodyHTML(cfg, o, companyName, companyLogoURL, trackingLink, "", omitTrackingLink)
 
@@ -178,12 +192,13 @@ func NotifyTrackerOrderStakeholders(c *gin.Context) {
 		}
 
 		if err := mail.Send(cfg, mail.Message{
-			To:       email,
-			Subject:  subject,
-			Body:     body,
-			HTMLBody: htmlBody,
-			FromName: fromName,
-			ReplyTo:  replyTo,
+			To:          email,
+			Subject:     subject,
+			Body:        body,
+			HTMLBody:    htmlBody,
+			Attachments: attachments,
+			FromName:    fromName,
+			ReplyTo:     replyTo,
 		}); err != nil {
 			results = append(results, notifyResult{Recipient: r, Email: email, Status: "failed", Reason: err.Error()})
 			continue
@@ -275,8 +290,12 @@ func dispatchEmailRows(o TrackerOrder) [][2]string {
 // entirely (transporter emails never get it). omitTrackingLink drops the
 // "Track this shipment live" line — set for inbound orders, where
 // BookedFor* is the Supplier rather than a party tracking an outbound
-// delivery (see NotifyTrackerOrderStakeholders).
-func buildDispatchEmailBody(o TrackerOrder, trackingLink, receiptLink string, omitTrackingLink bool) string {
+// delivery (see NotifyTrackerOrderStakeholders). skippedDocs lists the
+// labels of any documents that didn't make it into the actual email
+// attachments (fetch failure or over the size budget — see
+// buildTrackerEmailAttachments), so the "Copy Enclosed" claim doesn't go
+// silently unfulfilled.
+func buildDispatchEmailBody(o TrackerOrder, trackingLink, receiptLink string, omitTrackingLink bool, skippedDocs []string) string {
 	rows := dispatchEmailRows(o)
 
 	var b strings.Builder
@@ -293,6 +312,16 @@ func buildDispatchEmailBody(o TrackerOrder, trackingLink, receiptLink string, om
 	}
 	if receiptLink != "" {
 		b.WriteString(fmt.Sprintf("Once your goods arrive, confirm receipt here: %s\n\n", receiptLink))
+	}
+	if len(skippedDocs) > 0 {
+		pronoun := "them"
+		if len(skippedDocs) == 1 {
+			pronoun = "it"
+		}
+		b.WriteString(fmt.Sprintf(
+			"Note: %s exceeded email size limits and could not be attached. You can view and download %s from the order's tracking page.\n\n",
+			strings.Join(skippedDocs, ", "), pronoun,
+		))
 	}
 	b.WriteString("This is an automated dispatch notification sent via Bogie Tracker.\n")
 
