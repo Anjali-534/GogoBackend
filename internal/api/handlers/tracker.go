@@ -860,6 +860,10 @@ type TrackerLiveMapOrder struct {
 	LastLocationAt       *time.Time `json:"last_location_at"`
 	RouteDistanceKm      *float64   `json:"route_distance_km"`
 	RouteDurationMins    *int       `json:"route_duration_mins"`
+	// Same value on every row — the caller's own company logo (this endpoint
+	// is company-scoped), repeated per-order so the response shape stays a
+	// plain array and existing frontend parsing doesn't need to change.
+	CompanyLogoURL *string `json:"company_logo_url"`
 }
 
 // GET /gogoo/tracker/live-map — company-scoped, returns one entry per
@@ -872,6 +876,9 @@ func ListTrackerCompanyLiveMap(c *gin.Context) {
 
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
+
+	var companyLogoURL *string
+	_ = pool.QueryRow(ctx, `SELECT logo_url FROM tracker_companies WHERE id = $1`, companyID).Scan(&companyLogoURL)
 
 	rows, err := pool.Query(ctx, `
 		SELECT id, COALESCE(driver_name,''), vehicle_number, booked_for_company_name,
@@ -898,6 +905,7 @@ func ListTrackerCompanyLiveMap(c *gin.Context) {
 		); err != nil {
 			continue
 		}
+		o.CompanyLogoURL = companyLogoURL
 		orders = append(orders, o)
 	}
 	c.JSON(http.StatusOK, orders)
@@ -1358,6 +1366,13 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 	}
 	o.DriverID = driverID
 
+	// Separate lightweight lookup rather than joining tracker_companies into
+	// the big query above — this endpoint is always the caller's own company
+	// (scoped by company_id in the WHERE clause), so it's one extra
+	// single-row read, not per-order data.
+	var companyLogoURL *string
+	_ = pool.QueryRow(ctx, `SELECT logo_url FROM tracker_companies WHERE id = $1`, companyID).Scan(&companyLogoURL)
+
 	cc, bcc, err := fetchTrackerOrderCCEmails(ctx, pool, orderID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error: " + err.Error()})
@@ -1415,7 +1430,7 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"order": o, "events": events, "location_pings": pings})
+	c.JSON(http.StatusOK, gin.H{"order": o, "events": events, "location_pings": pings, "company_logo_url": companyLogoURL})
 }
 
 // PATCH /gogoo/tracker/orders/:id/details — edits the dispatch-sheet fields
@@ -2219,6 +2234,7 @@ func GetPublicTrackerOrder(c *gin.Context) {
 	var signatureURL *string
 	var receivedConfirmedAt *time.Time
 	var companyName string
+	var companyLogoURL *string
 	err := pool.QueryRow(ctx, `
 		SELECT o.id, o.status, o.dispatch_from, o.dispatch_to, o.vehicle_number,
 		       o.transporter_name, o.transporter_phone, o.driver_name, o.driver_phone,
@@ -2226,7 +2242,7 @@ func GetPublicTrackerOrder(c *gin.Context) {
 		       o.last_lat, o.last_lng, o.last_location_at,
 		       o.dispatch_from_lat, o.dispatch_from_lng, o.dispatch_to_lat, o.dispatch_to_lng,
 		       o.route_polyline, o.route_distance_km, o.route_duration_mins,
-		       o.signature_url, o.received_confirmed_at, c.company_name
+		       o.signature_url, o.received_confirmed_at, c.company_name, c.logo_url
 		FROM tracker_orders o
 		JOIN tracker_companies c ON c.id = o.company_id
 		WHERE o.public_tracking_token = $1
@@ -2236,7 +2252,7 @@ func GetPublicTrackerOrder(c *gin.Context) {
 		&lastLat, &lastLng, &lastLocationAt,
 		&dispatchFromLat, &dispatchFromLng, &dispatchToLat, &dispatchToLng,
 		&routePolyline, &routeDistanceKm, &routeDurationMins,
-		&signatureURL, &receivedConfirmedAt, &companyName)
+		&signatureURL, &receivedConfirmedAt, &companyName, &companyLogoURL)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "tracking link not found"})
 		return
@@ -2326,6 +2342,7 @@ func GetPublicTrackerOrder(c *gin.Context) {
 		"status":                status,
 		"documents":             documents,
 		"company_name":          companyName,
+		"company_logo_url":      companyLogoURL,
 		"dispatch_from":         dispatchFrom,
 		"dispatch_to":           dispatchTo,
 		"vehicle_number":        vehicleNumber,
