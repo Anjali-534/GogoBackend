@@ -193,7 +193,7 @@ func TrackerCompanySignup(c *gin.Context) {
 	}
 
 	cfg := c.MustGet("config").(*config.Config)
-	sendTrackerSignupEmail(cfg, req.CompanyName, req.ContactEmail)
+	sendTrackerSignupEmail(cfg, id.String(), req.CompanyName, req.ContactEmail)
 
 	c.JSON(http.StatusCreated, gin.H{
 		"id":      id,
@@ -297,7 +297,7 @@ func ResendTrackerCompanyOTP(c *gin.Context) {
 	}
 
 	cfg := c.MustGet("config").(*config.Config)
-	sendTrackerOTPEmail(cfg, companyName, req.Email, code)
+	sendTrackerOTPEmail(cfg, id, companyName, req.Email, code)
 
 	c.JSON(http.StatusOK, gin.H{"message": "verification code resent"})
 }

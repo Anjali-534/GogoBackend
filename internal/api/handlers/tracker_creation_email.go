@@ -55,12 +55,13 @@ func SendTrackerOrderCreationEmail(c *gin.Context) {
 
 	var o TrackerOrder
 	var companyName string
+	var companyLogoURL *string
 	err := pool.QueryRow(ctx, `
 		SELECT o.id, o.dispatch_from, o.dispatch_to,
 		       o.material, o.priority, o.internal_reference,
 		       o.contact_person_name, o.contact_person_phone, o.contact_person_email, o.contact_person_designation,
 		       o.booked_for_email, o.public_tracking_token,
-		       c.company_name
+		       c.company_name, c.logo_url
 		FROM tracker_orders o
 		JOIN tracker_companies c ON c.id = o.company_id
 		WHERE o.id = $1 AND o.company_id = $2
@@ -69,7 +70,7 @@ func SendTrackerOrderCreationEmail(c *gin.Context) {
 		&o.Material, &o.Priority, &o.InternalReference,
 		&o.ContactPersonName, &o.ContactPersonPhone, &o.ContactPersonEmail, &o.ContactPersonDesignation,
 		&o.BookedForEmail, &o.PublicTrackingToken,
-		&companyName,
+		&companyName, &companyLogoURL,
 	)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
@@ -89,7 +90,7 @@ func SendTrackerOrderCreationEmail(c *gin.Context) {
 	}
 
 	cfg := c.MustGet("config").(*config.Config)
-	sendTrackerOrderCreationEmail(cfg, o, companyName, ccEmails, bccEmails, docs)
+	sendTrackerOrderCreationEmail(cfg, o, companyName, companyLogoURL, ccEmails, bccEmails, docs)
 
 	c.JSON(http.StatusOK, gin.H{"message": "creation email queued"})
 }
@@ -98,7 +99,7 @@ func SendTrackerOrderCreationEmail(c *gin.Context) {
 // tracker_mail.go's lifecycle emails — creating a shipment (or this
 // follow-up call) must never fail, or surface an error to the company,
 // just because Resend hiccuped or a Cloudinary fetch timed out.
-func sendTrackerOrderCreationEmail(cfg *config.Config, o TrackerOrder, companyName string, ccEmails, bccEmails []string, docs []TrackerOrderDocument) {
+func sendTrackerOrderCreationEmail(cfg *config.Config, o TrackerOrder, companyName string, companyLogoURL *string, ccEmails, bccEmails []string, docs []TrackerOrderDocument) {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -134,15 +135,17 @@ func sendTrackerOrderCreationEmail(cfg *config.Config, o TrackerOrder, companyNa
 			subjectRef = *o.InternalReference
 		}
 		subject := fmt.Sprintf("Shipment Details — %s from %s", subjectRef, companyName)
+		plainBody := buildTrackerCreationEmailBody(o, companyName, trackingLink, skipped)
 
 		if err := mail.Send(cfg, mail.Message{
 			To:          strings.Join(toList, ","),
 			CC:          strings.Join(ccEmails, ","),
 			BCC:         strings.Join(bccEmails, ","),
 			Subject:     subject,
-			Body:        buildTrackerCreationEmailBody(o, companyName, trackingLink, skipped),
+			Body:        plainBody,
+			HTMLBody:    trackerEmailFromPlainText(cfg, companyName, companyLogoURL, plainBody),
 			Attachments: attachments,
-			FromName:    "Bogie Tracker - " + companyName,
+			FromName:    trackerEmailFromName(companyName),
 		}); err != nil {
 			log.Printf("tracker creation email: send failed for order=%s: %v", o.ID, err)
 		}

@@ -59,6 +59,7 @@ func maybeSendTrackerOrderStatusEmail(cfg *config.Config, companyID, orderID, st
 
 	var o TrackerOrder
 	var companyName string
+	var companyLogoURL *string
 	err := pool.QueryRow(ctx, `
 		SELECT o.id, o.dispatch_from, o.dispatch_to, o.vehicle_number,
 		       COALESCE(o.driver_name,''), COALESCE(o.driver_phone,''),
@@ -66,7 +67,7 @@ func maybeSendTrackerOrderStatusEmail(cfg *config.Config, companyID, orderID, st
 		       o.contact_person_name, o.contact_person_email,
 		       o.booked_for_email, o.public_tracking_token,
 		       o.received_confirmation_token, o.signature_url,
-		       c.company_name
+		       c.company_name, c.logo_url
 		FROM tracker_orders o
 		JOIN tracker_companies c ON c.id = o.company_id
 		WHERE o.id = $1 AND o.company_id = $2
@@ -77,7 +78,7 @@ func maybeSendTrackerOrderStatusEmail(cfg *config.Config, companyID, orderID, st
 		&o.ContactPersonName, &o.ContactPersonEmail,
 		&o.BookedForEmail, &o.PublicTrackingToken,
 		&o.ReceivedConfirmationToken, &o.SignatureURL,
-		&companyName,
+		&companyName, &companyLogoURL,
 	)
 	if err != nil {
 		log.Printf("tracker status email: failed to load order=%s status=%s: %v", orderID, status, err)
@@ -90,10 +91,10 @@ func maybeSendTrackerOrderStatusEmail(cfg *config.Config, companyID, orderID, st
 		return
 	}
 
-	sendTrackerOrderStatusEmail(cfg, o, companyName, status, emailCopy, ccEmails, bccEmails)
+	sendTrackerOrderStatusEmail(cfg, o, companyName, companyLogoURL, status, emailCopy, ccEmails, bccEmails)
 }
 
-func sendTrackerOrderStatusEmail(cfg *config.Config, o TrackerOrder, companyName, status string, emailCopy trackerStatusEmailCopyEntry, ccEmails, bccEmails []string) {
+func sendTrackerOrderStatusEmail(cfg *config.Config, o TrackerOrder, companyName string, companyLogoURL *string, status string, emailCopy trackerStatusEmailCopyEntry, ccEmails, bccEmails []string) {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -135,15 +136,17 @@ func sendTrackerOrderStatusEmail(cfg *config.Config, o TrackerOrder, companyName
 			subjectRef = *o.InternalReference
 		}
 		subject := fmt.Sprintf("%s — %s from %s", emailCopy.Headline, subjectRef, companyName)
+		plainBody := buildTrackerStatusEmailBody(cfg, o, status, emailCopy, trackingLink)
 
 		if err := mail.Send(cfg, mail.Message{
 			To:          strings.Join(toList, ","),
 			CC:          strings.Join(ccEmails, ","),
 			BCC:         strings.Join(bccEmails, ","),
 			Subject:     subject,
-			Body:        buildTrackerStatusEmailBody(cfg, o, status, emailCopy, trackingLink),
+			Body:        plainBody,
+			HTMLBody:    trackerEmailFromPlainText(cfg, companyName, companyLogoURL, plainBody),
 			Attachments: attachments,
-			FromName:    "Bogie Tracker - " + companyName,
+			FromName:    trackerEmailFromName(companyName),
 			ReplyTo:     trackerNoReplyAddress,
 		}); err != nil {
 			log.Printf("tracker status email: send failed for order=%s status=%s: %v", o.ID, status, err)

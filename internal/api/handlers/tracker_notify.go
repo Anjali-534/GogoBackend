@@ -59,6 +59,7 @@ func NotifyTrackerOrderStakeholders(c *gin.Context) {
 	var o TrackerOrder
 	var companyName, contactEmail string
 	var notificationEmail *string
+	var companyLogoURL *string
 	err := pool.QueryRow(ctx, `
 		SELECT o.booked_for_company_name, o.booked_for_phone, o.booked_for_email,
 		       o.dispatch_from, o.dispatch_to,
@@ -68,7 +69,7 @@ func NotifyTrackerOrderStakeholders(c *gin.Context) {
 		       o.consignee_name, o.consignee_email, o.material, o.quantity,
 		       o.dispatch_datetime, o.documents_enclosed, o.received_confirmation_token,
 		       o.booked_for_state, o.consignee_state, o.order_type,
-		       c.company_name, c.contact_email, c.notification_email
+		       c.company_name, c.contact_email, c.notification_email, c.logo_url
 		FROM tracker_orders o
 		JOIN tracker_companies c ON c.id = o.company_id
 		WHERE o.id = $1 AND o.company_id = $2
@@ -81,7 +82,7 @@ func NotifyTrackerOrderStakeholders(c *gin.Context) {
 		&o.ConsigneeName, &o.ConsigneeEmail, &o.Material, &o.Quantity,
 		&o.DispatchDatetime, &o.DocumentsEnclosed, &o.ReceivedConfirmationToken,
 		&o.BookedForState, &o.ConsigneeState, &o.OrderType,
-		&companyName, &contactEmail, &notificationEmail,
+		&companyName, &contactEmail, &notificationEmail, &companyLogoURL,
 	)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
@@ -125,6 +126,8 @@ func NotifyTrackerOrderStakeholders(c *gin.Context) {
 	omitTrackingLink := o.OrderType == "inbound"
 	bodyWithReceipt := buildDispatchEmailBody(o, trackingLink, receiptLink, omitTrackingLink)
 	bodyWithoutReceipt := buildDispatchEmailBody(o, trackingLink, "", omitTrackingLink)
+	htmlWithReceipt := buildDispatchEmailBodyHTML(cfg, o, companyName, companyLogoURL, trackingLink, receiptLink, omitTrackingLink)
+	htmlWithoutReceipt := buildDispatchEmailBodyHTML(cfg, o, companyName, companyLogoURL, trackingLink, "", omitTrackingLink)
 
 	// Reply-To is the company's own address — never the client's domain,
 	// which would fail SPF/DKIM if we tried to send "from" it.
@@ -132,7 +135,7 @@ func NotifyTrackerOrderStakeholders(c *gin.Context) {
 	if notificationEmail != nil && *notificationEmail != "" {
 		replyTo = *notificationEmail
 	}
-	fromName := "Bogie Tracker - " + companyName
+	fromName := trackerEmailFromName(companyName)
 
 	var results []notifyResult
 	var sentTo []string
@@ -146,14 +149,14 @@ func NotifyTrackerOrderStakeholders(c *gin.Context) {
 		}
 
 		var name, email string
-		body := bodyWithoutReceipt
+		body, htmlBody := bodyWithoutReceipt, htmlWithoutReceipt
 		switch r {
 		case "booked_for":
 			name = o.BookedForCompanyName
 			if o.BookedForEmail != nil {
 				email = *o.BookedForEmail
 			}
-			body = bodyWithReceipt
+			body, htmlBody = bodyWithReceipt, htmlWithReceipt
 		case "consignee":
 			if o.ConsigneeName != nil {
 				name = *o.ConsigneeName
@@ -161,7 +164,7 @@ func NotifyTrackerOrderStakeholders(c *gin.Context) {
 			if o.ConsigneeEmail != nil {
 				email = *o.ConsigneeEmail
 			}
-			body = bodyWithReceipt
+			body, htmlBody = bodyWithReceipt, htmlWithReceipt
 		case "transporter":
 			name = o.TransporterName
 			if o.TransporterEmail != nil {
@@ -178,6 +181,7 @@ func NotifyTrackerOrderStakeholders(c *gin.Context) {
 			To:       email,
 			Subject:  subject,
 			Body:     body,
+			HTMLBody: htmlBody,
 			FromName: fromName,
 			ReplyTo:  replyTo,
 		}); err != nil {
@@ -203,15 +207,10 @@ func NotifyTrackerOrderStakeholders(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"results": results})
 }
 
-// buildDispatchEmailBody mirrors the traditional paper dispatch sheet — a
-// SR NO / HEADS / DESCRIPTION table — as plain text, matching the rest of
-// the mail package (Resend's Text field, no HTML templating). receiptLink
-// is only passed for the consignee/booked_for recipients — empty omits the
-// "confirm receipt" line entirely (transporter emails never get it).
-// omitTrackingLink drops the "Track this shipment live" line — set for
-// inbound orders, where BookedFor* is the Supplier rather than a party
-// tracking an outbound delivery (see NotifyTrackerOrderStakeholders).
-func buildDispatchEmailBody(o TrackerOrder, trackingLink, receiptLink string, omitTrackingLink bool) string {
+// dispatchEmailRows builds the shared [label, value] field list used by both
+// the plain-text and HTML dispatch-details bodies — single source of truth
+// so the two never drift out of sync with each other.
+func dispatchEmailRows(o TrackerOrder) [][2]string {
 	bookedForState := "—"
 	if o.BookedForState != nil && *o.BookedForState != "" {
 		bookedForState = *o.BookedForState
@@ -252,7 +251,7 @@ func buildDispatchEmailBody(o TrackerOrder, trackingLink, receiptLink string, om
 		docs = *o.DocumentsEnclosed
 	}
 
-	rows := [][2]string{
+	return [][2]string{
 		{"Party Name", o.BookedForCompanyName},
 		{"Party State", bookedForState},
 		{"Consignee", consignee},
@@ -266,6 +265,19 @@ func buildDispatchEmailBody(o TrackerOrder, trackingLink, receiptLink string, om
 		{"Date & Time", dateTime},
 		{"Copy Enclosed", docs},
 	}
+}
+
+// buildDispatchEmailBody mirrors the traditional paper dispatch sheet — a
+// SR NO / HEADS / DESCRIPTION table — as plain text. Sent as the Text
+// fallback alongside buildDispatchEmailBodyHTML's rendered version (see
+// NotifyTrackerOrderStakeholders). receiptLink is only passed for the
+// consignee/booked_for recipients — empty omits the "confirm receipt" line
+// entirely (transporter emails never get it). omitTrackingLink drops the
+// "Track this shipment live" line — set for inbound orders, where
+// BookedFor* is the Supplier rather than a party tracking an outbound
+// delivery (see NotifyTrackerOrderStakeholders).
+func buildDispatchEmailBody(o TrackerOrder, trackingLink, receiptLink string, omitTrackingLink bool) string {
+	rows := dispatchEmailRows(o)
 
 	var b strings.Builder
 	b.WriteString("DISPATCH DETAILS\n")
@@ -285,4 +297,37 @@ func buildDispatchEmailBody(o TrackerOrder, trackingLink, receiptLink string, om
 	b.WriteString("This is an automated dispatch notification sent via Bogie Tracker.\n")
 
 	return b.String()
+}
+
+// buildDispatchEmailBodyHTML is the rendered-HTML counterpart of
+// buildDispatchEmailBody — same fields (via the shared dispatchEmailRows),
+// same per-recipient trackingLink/receiptLink/omitTrackingLink rules, but as
+// a real bordered table with styled tracking/receipt buttons, wrapped in the
+// shared card+footer chrome (company's own branding + "Powered by Bogie
+// Tracker").
+func buildDispatchEmailBodyHTML(
+	cfg *config.Config, o TrackerOrder, companyName string, companyLogoURL *string,
+	trackingLink, receiptLink string, omitTrackingLink bool,
+) string {
+	rows := dispatchEmailRows(o)
+
+	var b strings.Builder
+	b.WriteString(`<p style="font-size:14px;color:#111827;margin:0 0 4px;">Dear Sir,</p>`)
+	b.WriteString(`<p style="font-size:14px;color:` + trackerEmailTextGray + `;margin:0 0 4px;">Please find the dispatch details for your shipment below.</p>`)
+	b.WriteString(trackerEmailDetailsTableHTML(rows))
+
+	if !omitTrackingLink || receiptLink != "" {
+		b.WriteString(`<div style="margin:4px 0 8px;">`)
+		if !omitTrackingLink {
+			b.WriteString(trackerEmailButtonHTML(trackingLink, "Track Shipment Live"))
+		}
+		if receiptLink != "" {
+			b.WriteString(trackerEmailButtonHTML(receiptLink, "Confirm Receipt"))
+		}
+		b.WriteString(`</div>`)
+	}
+
+	b.WriteString(`<p style="font-size:12px;color:` + trackerEmailMutedGray + `;margin-top:18px;">This is an automated dispatch notification sent via Bogie Tracker.</p>`)
+
+	return trackerEmailWrapHTML(cfg, companyName, companyLogoURL, b.String())
 }

@@ -393,9 +393,9 @@ func setTrackerCompanyStatus(c *gin.Context, status string, stampApproval bool) 
 	cfg := c.MustGet("config").(*config.Config)
 	switch status {
 	case "active":
-		sendTrackerApprovedEmail(cfg, companyName, contactEmail)
+		sendTrackerApprovedEmail(cfg, id, companyName, contactEmail)
 	case "rejected":
-		sendTrackerRejectedEmail(cfg, companyName, contactEmail)
+		sendTrackerRejectedEmail(cfg, id, companyName, contactEmail)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Company " + status})

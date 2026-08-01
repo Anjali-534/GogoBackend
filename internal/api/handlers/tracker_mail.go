@@ -9,14 +9,16 @@ package handlers
 // suspend for internal reasons.
 
 import (
+	"context"
 	"fmt"
 	"log"
 
 	"github.com/deploykit/backend/internal/config"
+	"github.com/deploykit/backend/internal/db"
 	"github.com/deploykit/backend/internal/mail"
 )
 
-func sendTrackerSignupEmail(cfg *config.Config, companyName, toEmail string) {
+func sendTrackerSignupEmail(cfg *config.Config, companyID, companyName, toEmail string) {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -36,18 +38,25 @@ func sendTrackerSignupEmail(cfg *config.Config, companyName, toEmail string) {
 				"Warm regards,\nTeam Bogie\nbogie.in",
 			companyName,
 		)
+		// Brand new signup — the company row was just created, so its own
+		// logo is always nil at this point (uploaded later from Settings).
+		// Still looked up via the same shared helper for consistency; the
+		// footer just falls back to text-only company name.
+		logoURL := fetchTrackerCompanyLogoURL(context.Background(), db.GetDB().GetPool(), companyID)
 
 		if err := mail.Send(cfg, mail.Message{
-			To:      toEmail,
-			Subject: "Your Bogie Tracker account is under verification",
-			Body:    body,
+			To:       toEmail,
+			Subject:  "Your Bogie Tracker account is under verification",
+			Body:     body,
+			HTMLBody: trackerEmailFromPlainText(cfg, companyName, logoURL, body),
+			FromName: trackerEmailFromName(companyName),
 		}); err != nil {
 			log.Printf("tracker signup email: send failed for %s: %v", toEmail, err)
 		}
 	}()
 }
 
-func sendTrackerOTPEmail(cfg *config.Config, companyName, toEmail, code string) {
+func sendTrackerOTPEmail(cfg *config.Config, companyID, companyName, toEmail, code string) {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -66,18 +75,21 @@ func sendTrackerOTPEmail(cfg *config.Config, companyName, toEmail, code string) 
 				"Warm regards,\nTeam Bogie\nbogie.in",
 			companyName, code,
 		)
+		logoURL := fetchTrackerCompanyLogoURL(context.Background(), db.GetDB().GetPool(), companyID)
 
 		if err := mail.Send(cfg, mail.Message{
-			To:      toEmail,
-			Subject: "Your Bogie Tracker verification code",
-			Body:    body,
+			To:       toEmail,
+			Subject:  "Your Bogie Tracker verification code",
+			Body:     body,
+			HTMLBody: trackerEmailFromPlainText(cfg, companyName, logoURL, body),
+			FromName: trackerEmailFromName(companyName),
 		}); err != nil {
 			log.Printf("tracker OTP email: send failed for %s: %v", toEmail, err)
 		}
 	}()
 }
 
-func sendTrackerApprovedEmail(cfg *config.Config, companyName, toEmail string) {
+func sendTrackerApprovedEmail(cfg *config.Config, companyID, companyName, toEmail string) {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -101,11 +113,14 @@ func sendTrackerApprovedEmail(cfg *config.Config, companyName, toEmail string) {
 				"Welcome aboard!\nTeam Bogie\nbogie.in",
 			companyName, cfg.TrackerPanelURL,
 		)
+		logoURL := fetchTrackerCompanyLogoURL(context.Background(), db.GetDB().GetPool(), companyID)
 
 		if err := mail.Send(cfg, mail.Message{
-			To:      toEmail,
-			Subject: "Your Bogie Tracker account is verified — you're ready to go!",
-			Body:    body,
+			To:       toEmail,
+			Subject:  "Your Bogie Tracker account is verified — you're ready to go!",
+			Body:     body,
+			HTMLBody: trackerEmailFromPlainText(cfg, companyName, logoURL, body),
+			FromName: trackerEmailFromName(companyName),
 		}); err != nil {
 			log.Printf("tracker approved email: send failed for %s: %v", toEmail, err)
 		}
@@ -117,7 +132,7 @@ func sendTrackerApprovedEmail(cfg *config.Config, companyName, toEmail string) {
 // system-generated password it needs to log in (see MarkTrackerPlanOrderPaid
 // — payment is now the activation trigger, replacing the manual
 // sendTrackerApprovedEmail on this path).
-func sendTrackerLicenseEmail(cfg *config.Config, companyName, toEmail, licenseKey, loginEmail, newPassword string) {
+func sendTrackerLicenseEmail(cfg *config.Config, companyID, companyName, toEmail, licenseKey, loginEmail, newPassword string) {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -146,18 +161,21 @@ func sendTrackerLicenseEmail(cfg *config.Config, companyName, toEmail, licenseKe
 				"Welcome aboard!\nTeam Bogie\nbogie.in",
 			companyName, licenseKey, loginEmail, newPassword, cfg.TrackerPanelURL,
 		)
+		logoURL := fetchTrackerCompanyLogoURL(context.Background(), db.GetDB().GetPool(), companyID)
 
 		if err := mail.Send(cfg, mail.Message{
-			To:      toEmail,
-			Subject: "Your Bogie Tracker account is active — login details inside",
-			Body:    body,
+			To:       toEmail,
+			Subject:  "Your Bogie Tracker account is active — login details inside",
+			Body:     body,
+			HTMLBody: trackerEmailFromPlainText(cfg, companyName, logoURL, body),
+			FromName: trackerEmailFromName(companyName),
 		}); err != nil {
 			log.Printf("tracker license email: send failed for %s: %v", toEmail, err)
 		}
 	}()
 }
 
-func sendTrackerRejectedEmail(cfg *config.Config, companyName, toEmail string) {
+func sendTrackerRejectedEmail(cfg *config.Config, companyID, companyName, toEmail string) {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -176,11 +194,14 @@ func sendTrackerRejectedEmail(cfg *config.Config, companyName, toEmail string) {
 				"Warm regards,\nTeam Bogie\nbogie.in",
 			companyName,
 		)
+		logoURL := fetchTrackerCompanyLogoURL(context.Background(), db.GetDB().GetPool(), companyID)
 
 		if err := mail.Send(cfg, mail.Message{
-			To:      toEmail,
-			Subject: "Update on your Bogie Tracker registration",
-			Body:    body,
+			To:       toEmail,
+			Subject:  "Update on your Bogie Tracker registration",
+			Body:     body,
+			HTMLBody: trackerEmailFromPlainText(cfg, companyName, logoURL, body),
+			FromName: trackerEmailFromName(companyName),
 		}); err != nil {
 			log.Printf("tracker rejected email: send failed for %s: %v", toEmail, err)
 		}

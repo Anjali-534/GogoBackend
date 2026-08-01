@@ -28,11 +28,15 @@ type Attachment struct {
 	Data        []byte
 }
 
-// Message is a plain-text transactional email, optionally with attachments.
+// Message is a transactional email, optionally with attachments. Body is
+// always sent as the plain-text fallback; set HTMLBody too to also send a
+// rendered HTML version — most clients prefer html when both are present,
+// but Text still matters for clients/previews that strip HTML.
 type Message struct {
 	To          string
 	Subject     string
 	Body        string
+	HTMLBody    string
 	Attachments []Attachment
 
 	// CC and BCC are comma-joined address lists, same convention as To —
@@ -72,6 +76,7 @@ type resendPayload struct {
 	Bcc         []string           `json:"bcc,omitempty"`
 	Subject     string             `json:"subject"`
 	Text        string             `json:"text"`
+	Html        string             `json:"html,omitempty"`
 	ReplyTo     string             `json:"reply_to,omitempty"`
 	Attachments []resendAttachment `json:"attachments,omitempty"`
 }
@@ -105,6 +110,7 @@ func Send(cfg *config.Config, msg Message) error {
 		From:    from,
 		Subject: msg.Subject,
 		Text:    msg.Body,
+		Html:    msg.HTMLBody,
 		ReplyTo: msg.ReplyTo,
 	}
 	if msg.To != "" {

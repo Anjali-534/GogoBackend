@@ -232,7 +232,7 @@ func MarkTrackerPlanOrderPaid(c *gin.Context) {
 		`, o.CompanyID).Scan(&companyName, &contactEmail); err != nil {
 			log.Printf("MarkTrackerPlanOrderPaid: company lookup for license email failed for order=%s: %v", o.ID, err)
 		} else {
-			sendTrackerLicenseEmail(cfg, companyName, contactEmail, licenseKey, contactEmail, newPassword)
+			sendTrackerLicenseEmail(cfg, o.CompanyID, companyName, contactEmail, licenseKey, contactEmail, newPassword)
 		}
 	}
 
@@ -313,10 +313,10 @@ func sendTrackerPlanInvoiceEmail(c *gin.Context, o *TrackerPlanOrder, invoiceNum
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 	var companyName, contactEmail string
-	var notificationEmail *string
+	var notificationEmail, companyLogoURL *string
 	if err := pool.QueryRow(ctx, `
-		SELECT company_name, contact_email, notification_email FROM tracker_companies WHERE id = $1
-	`, o.CompanyID).Scan(&companyName, &contactEmail, &notificationEmail); err != nil {
+		SELECT company_name, contact_email, notification_email, logo_url FROM tracker_companies WHERE id = $1
+	`, o.CompanyID).Scan(&companyName, &contactEmail, &notificationEmail, &companyLogoURL); err != nil {
 		log.Printf("sendTrackerPlanInvoiceEmail: company lookup failed for order=%s: %v", o.ID, err)
 		return "failed"
 	}
@@ -336,9 +336,11 @@ func sendTrackerPlanInvoiceEmail(c *gin.Context, o *TrackerPlanOrder, invoiceNum
 	)
 
 	if err := mail.Send(cfg, mail.Message{
-		To:      to,
-		Subject: fmt.Sprintf("Your Bogie Tracker invoice %s", invoiceNumber),
-		Body:    body,
+		To:       to,
+		Subject:  fmt.Sprintf("Your Bogie Tracker invoice %s", invoiceNumber),
+		Body:     body,
+		HTMLBody: trackerEmailFromPlainText(cfg, companyName, companyLogoURL, body),
+		FromName: trackerEmailFromName(companyName),
 		Attachments: []mail.Attachment{{
 			Filename:    invoiceNumber + ".pdf",
 			ContentType: "application/pdf",
