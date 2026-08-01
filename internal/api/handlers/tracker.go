@@ -1765,7 +1765,8 @@ func UploadTrackerOrderEwayBill(c *gin.Context) {
 
 	var fileURL string
 	if os.Getenv("CLOUDINARY_CLOUD_NAME") != "" {
-		secureURL, err := uploadToCloudinary(ctx, file, header.Filename, "eway_bill", orderID)
+		// resource_type=raw — see uploadToCloudinaryRaw.
+		secureURL, err := uploadToCloudinaryRaw(ctx, file, header.Filename, "eway_bill", orderID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "cloud storage error: " + err.Error()})
 			return
@@ -1835,7 +1836,12 @@ func uploadTrackerOrderFile(ctx context.Context, c *gin.Context, companyID, orde
 
 	if os.Getenv("CLOUDINARY_CLOUD_NAME") != "" {
 		publicID := fmt.Sprintf("gogoo/tracker_orders/%s/%s_%s", orderID, docType, uuid.New().String()[:8])
-		secureURL, err := uploadToCloudinaryWithPublicID(ctx, file, header.Filename, publicID)
+		// resource_type=raw, not "auto" — these are fetched back server-side
+		// for email attachments (buildTrackerEmailAttachments) and "auto"
+		// resolves PDFs to Cloudinary's image delivery, which 401s unless the
+		// account's PDF/ZIP delivery restriction is disabled. See
+		// uploadToCloudinaryWithResourceType.
+		secureURL, err := uploadToCloudinaryWithResourceType(ctx, file, header.Filename, publicID, "raw")
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "cloud storage error: " + err.Error()})
 			return "", false

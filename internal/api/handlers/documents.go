@@ -116,12 +116,30 @@ func getVehicleCategory(vehicleType string) string {
 	return "two_wheeler"
 }
 
-// uploadToCloudinary uploads a file to Cloudinary using only stdlib HTTP.
-// Returns the permanent secure_url. Requires CLOUDINARY_CLOUD_NAME,
+// uploadToCloudinary uploads a file to Cloudinary using only stdlib HTTP,
+// under Cloudinary's "auto" resource type (images render/transform
+// normally; this is wrong for PDFs — see uploadToCloudinaryRaw). Returns
+// the permanent secure_url. Requires CLOUDINARY_CLOUD_NAME,
 // CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET environment variables.
 func uploadToCloudinary(ctx context.Context, reader io.Reader, origName, docType, driverID string) (string, error) {
 	publicID := fmt.Sprintf("gogoo/drivers/%s/%s_%s", driverID, docType, uuid.New().String()[:8])
 	return uploadToCloudinaryWithPublicID(ctx, reader, origName, publicID)
+}
+
+// uploadToCloudinaryRaw is uploadToCloudinary under resource_type=raw
+// instead of "auto" — the correct Cloudinary usage for non-image documents
+// (PDFs in particular). "auto" resolves PDFs to resource_type=image, which
+// is subject to Cloudinary's PDF/ZIP delivery restriction (default-on,
+// account-level security setting) and returns 401 on fetch unless that
+// restriction is disabled; raw delivery isn't subject to it. Used for
+// tracker order documents/e-way bills specifically, since those are the
+// files fetched server-side for email attachments (see
+// buildTrackerEmailAttachments) — driver documents, signatures, and logos
+// stay on "auto" since they're always images displayed via <img>, not
+// PDFs.
+func uploadToCloudinaryRaw(ctx context.Context, reader io.Reader, origName, docType, orderID string) (string, error) {
+	publicID := fmt.Sprintf("gogoo/tracker-documents/%s/%s_%s", orderID, docType, uuid.New().String()[:8])
+	return uploadToCloudinaryWithResourceType(ctx, reader, origName, publicID, "raw")
 }
 
 // uploadToCloudinaryWithPublicID is the shared upload core behind
@@ -129,6 +147,13 @@ func uploadToCloudinary(ctx context.Context, reader io.Reader, origName, docType
 // the drivers/<id>/<docType>_<uuid> shape (e.g. company logos) can supply
 // their own folder path instead of being forced into "gogoo/drivers/...".
 func uploadToCloudinaryWithPublicID(ctx context.Context, reader io.Reader, origName, publicID string) (string, error) {
+	return uploadToCloudinaryWithResourceType(ctx, reader, origName, publicID, "auto")
+}
+
+// uploadToCloudinaryWithResourceType is the shared upload core — resourceType
+// is Cloudinary's upload-endpoint segment ("auto" or "raw"; see
+// uploadToCloudinaryRaw for why raw exists).
+func uploadToCloudinaryWithResourceType(ctx context.Context, reader io.Reader, origName, publicID, resourceType string) (string, error) {
 	cloudName := os.Getenv("CLOUDINARY_CLOUD_NAME")
 	apiKey := os.Getenv("CLOUDINARY_API_KEY")
 	apiSecret := os.Getenv("CLOUDINARY_API_SECRET")
@@ -156,7 +181,7 @@ func uploadToCloudinaryWithPublicID(ctx context.Context, reader io.Reader, origN
 	}
 	mw.Close()
 
-	uploadURL := fmt.Sprintf("https://api.cloudinary.com/v1_1/%s/auto/upload", cloudName)
+	uploadURL := fmt.Sprintf("https://api.cloudinary.com/v1_1/%s/%s/upload", cloudName, resourceType)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadURL, &body)
 	if err != nil {
 		return "", err
