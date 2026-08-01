@@ -45,17 +45,16 @@ var terminalOrderStatuses = map[string]bool{
 }
 
 // validOrderStatuses is what the company can set manually via
-// UpdateTrackerCompanyOrderStatus. 'delivered' is deliberately absent —
-// it's system-only now, set exclusively by tryAutoCompleteDelivery once
-// both the driver's claim and the consignee's receipt response exist. It
-// remains a valid tracker_orders.status value (see terminalOrderStatuses
-// and the DB CHECK constraint) — just not one the company can reach here.
+// UpdateTrackerCompanyOrderStatus. 'delivered' can be set directly by the
+// company, same as every other status — it's also reachable via
+// tryAutoCompleteDelivery when the consignee confirms receipt first.
 var validOrderStatuses = map[string]bool{
 	"created":    true,
 	"loading":    true,
 	"loaded":     true,
 	"dispatched": true,
 	"in_transit": true,
+	"delivered":  true,
 	"cancelled":  true,
 }
 
@@ -2501,36 +2500,34 @@ func PostTrackerDriverLocation(c *gin.Context) {
 }
 
 // tryAutoCompleteDelivery transitions an order to 'delivered' the instant
-// both completion signals exist: the driver has claimed delivery (a
-// 'delivery_claimed' event plus an uploaded signature) and the consignee
-// has responded on the receipt page (received_confirmed_at set — for
-// either the good- or bad-condition button; condition never gates this).
-// Called after either signal lands — from the driver event/signature
-// handlers and from ConfirmTrackerReceipt — so whichever call observes
-// both signals already satisfied performs the transition. The
-// `status NOT IN (...)` guard in the UPDATE, plus checking RowsAffected,
-// makes this safe if both sides land the same instant: only one caller's
-// update actually matches a row, the other is a silent no-op. reportedBy
-// attributes the resulting event to whichever side's action completed it.
+// the consignee responds on the receipt page (received_confirmed_at set —
+// for either the good- or bad-condition button; condition never gates
+// this) and the order isn't already terminal. The driver's claim/signature
+// is purely informational now (still logged as an event and shown in the
+// timeline/Proof of Delivery card) — it is NOT a precondition here anymore;
+// the company can also set 'delivered' directly and independently via
+// UpdateTrackerCompanyOrderStatus. Called from ConfirmTrackerReceipt,
+// MarkTrackerOrderReceivedByStaff, and the driver event/signature handlers
+// so any of them observing the consignee signal already satisfied performs
+// the transition. The `status NOT IN (...)` guard in the UPDATE, plus
+// checking RowsAffected, makes this safe under concurrent callers: only
+// one caller's update actually matches a row, the rest are silent no-ops.
+// reportedBy attributes the resulting event to whichever side's action
+// completed it.
 func tryAutoCompleteDelivery(ctx context.Context, cfg *config.Config, orderID, reportedBy string) {
 	pool := db.GetDB().GetPool()
 
 	var companyID, status string
-	var hasSignature, consigneeResponded, driverClaimed bool
+	var consigneeResponded bool
 	err := pool.QueryRow(ctx, `
-		SELECT o.company_id, o.status, o.signature_url IS NOT NULL,
-		       o.received_confirmed_at IS NOT NULL,
-		       EXISTS (
-		         SELECT 1 FROM tracker_order_events e
-		         WHERE e.order_id = o.id AND e.reported_by = 'driver' AND e.event_kind = 'delivery_claimed'
-		       )
+		SELECT o.company_id, o.status, o.received_confirmed_at IS NOT NULL
 		FROM tracker_orders o WHERE o.id = $1
-	`, orderID).Scan(&companyID, &status, &hasSignature, &consigneeResponded, &driverClaimed)
+	`, orderID).Scan(&companyID, &status, &consigneeResponded)
 	if err != nil {
 		log.Printf("tryAutoCompleteDelivery: failed to load order=%s: %v", orderID, err)
 		return
 	}
-	if terminalOrderStatuses[status] || !driverClaimed || !hasSignature || !consigneeResponded {
+	if terminalOrderStatuses[status] || !consigneeResponded {
 		return
 	}
 
@@ -2556,7 +2553,7 @@ func tryAutoCompleteDelivery(ctx context.Context, cfg *config.Config, orderID, r
 	_, err = tx.Exec(ctx, `
 		INSERT INTO tracker_order_events (id, order_id, status, note, reported_by)
 		VALUES ($1,$2,'delivered',$3,$4)
-	`, uuid.New(), orderID, "Delivery auto-completed — driver and consignee signals both received", reportedBy)
+	`, uuid.New(), orderID, "Delivery auto-completed — consignee confirmed receipt", reportedBy)
 	if err != nil {
 		log.Printf("tryAutoCompleteDelivery: failed to log event for order=%s: %v", orderID, err)
 		return
@@ -2574,13 +2571,13 @@ func tryAutoCompleteDelivery(ctx context.Context, cfg *config.Config, orderID, r
 // token-gated. Records a driver-reported quick-status tap (On Break / About
 // to Reach / Reached / Unloading / Delivered) as an event at the order's
 // CURRENT status — this is never a status transition by itself.
-// 'delivery_claimed' is the special kind for the Delivered tap: paired with
-// the signature upload below, it's one of the two signals
-// tryAutoCompleteDelivery watches for — the order auto-transitions to
-// 'delivered' once both it and the consignee's receipt response exist. The
-// company has no manual say over this transition; this handler still only
-// ever writes to tracker_order_events itself, then delegates the status
-// decision to tryAutoCompleteDelivery.
+// 'delivery_claimed' is the special kind for the Delivered tap: it's purely
+// informational now (logged as an event, shown in the timeline/Proof of
+// Delivery card) — it is no longer load-bearing for any status transition.
+// tryAutoCompleteDelivery is still called here as a safety net for the
+// rare race where the consignee's receipt response lands first and this
+// event arrives after; the company can also set 'delivered' directly at
+// any time via UpdateTrackerCompanyOrderStatus.
 func PostTrackerDriverEvent(c *gin.Context) {
 	driverToken := c.Param("driver_token")
 	var req struct {

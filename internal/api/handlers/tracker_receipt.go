@@ -89,13 +89,17 @@ func GetTrackerReceiptOrder(c *gin.Context) {
 // button; condition (good/bad) is a separate flag that never blocks the
 // status transition itself — see tryAutoCompleteDelivery.
 //
-// Gated on the driver having claimed delivery (a 'delivery_claimed' event
-// plus an uploaded signature), NOT on status already being 'delivered' —
-// under the auto-completion model the consignee's response is one of the
-// two signals that PRODUCES the 'delivered' status, so it can legitimately
-// arrive first. A second call after confirmation just returns the
-// already-confirmed state rather than erroring — the consignee may tap the
-// button twice, or reload the confirmed page and tap it again.
+// Not gated on driver state at all anymore — the consignee can confirm
+// receipt regardless of whether the driver has claimed delivery or where
+// they actually are; that claim is purely informational now. Also not
+// gated on status already being 'delivered' (whether set by the company
+// directly or by a prior auto-completion) — the consignee's own
+// confirmation is independent condition-feedback, not a status trigger, so
+// a fresh confirmation should still be recorded. The only gates are: order
+// not cancelled, and not already confirmed by this consignee link before
+// (idempotent — a second call after confirmation just returns the
+// already-confirmed state rather than erroring, since the consignee may
+// tap the button twice or reload the confirmed page and tap it again).
 func ConfirmTrackerReceipt(c *gin.Context) {
 	token := c.Param("token")
 	var req struct {
@@ -120,15 +124,10 @@ func ConfirmTrackerReceipt(c *gin.Context) {
 
 	var orderID, status string
 	var receivedConfirmedAt *time.Time
-	var driverClaimed bool
 	err := pool.QueryRow(ctx, `
-		SELECT o.id, o.status, o.received_confirmed_at,
-		       EXISTS (
-		         SELECT 1 FROM tracker_order_events e
-		         WHERE e.order_id = o.id AND e.reported_by = 'driver' AND e.event_kind = 'delivery_claimed'
-		       ) AND o.signature_url IS NOT NULL
+		SELECT o.id, o.status, o.received_confirmed_at
 		FROM tracker_orders o WHERE o.received_confirmation_token = $1
-	`, token).Scan(&orderID, &status, &receivedConfirmedAt, &driverClaimed)
+	`, token).Scan(&orderID, &status, &receivedConfirmedAt)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "receipt link not found"})
 		return
@@ -141,10 +140,6 @@ func ConfirmTrackerReceipt(c *gin.Context) {
 
 	if status == "cancelled" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "order was cancelled and is no longer tracked"})
-		return
-	}
-	if !driverClaimed {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "driver has not claimed delivery yet"})
 		return
 	}
 
@@ -209,11 +204,10 @@ func ConfirmTrackerReceipt(c *gin.Context) {
 // POST /gogoo/tracker/orders/:id/mark-received — company-scoped staff-side
 // "goods received" confirmation, for when the consignee/supplier never uses
 // (or can't use) the public receipt link and the company wants to close out
-// the order itself. Gated identically to ConfirmTrackerReceipt — the driver
-// must have already claimed delivery (a 'delivery_claimed' event plus an
-// uploaded signature) — so staff can't front-run that signal. Idempotent,
-// same as ConfirmTrackerReceipt: a repeat call just returns the existing
-// confirmed timestamp.
+// the order itself. Not gated on driver state, same as ConfirmTrackerReceipt
+// — staff can mark received regardless of where the driver actually is or
+// whether they've claimed delivery. Idempotent, same as ConfirmTrackerReceipt:
+// a repeat call just returns the existing confirmed timestamp.
 //
 // Body: {"condition": "good"|"bad", "reason": "..."} — optional, mirrors
 // ConfirmTrackerReceipt's shape so the panel can reuse the same good/bad
@@ -251,15 +245,10 @@ func MarkTrackerOrderReceivedByStaff(c *gin.Context) {
 
 	var status string
 	var receivedConfirmedAt *time.Time
-	var driverClaimed bool
 	err := pool.QueryRow(ctx, `
-		SELECT o.status, o.received_confirmed_at,
-		       EXISTS (
-		         SELECT 1 FROM tracker_order_events e
-		         WHERE e.order_id = o.id AND e.reported_by = 'driver' AND e.event_kind = 'delivery_claimed'
-		       ) AND o.signature_url IS NOT NULL
+		SELECT o.status, o.received_confirmed_at
 		FROM tracker_orders o WHERE o.id = $1 AND o.company_id = $2
-	`, orderID, companyID).Scan(&status, &receivedConfirmedAt, &driverClaimed)
+	`, orderID, companyID).Scan(&status, &receivedConfirmedAt)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
 		return
@@ -272,10 +261,6 @@ func MarkTrackerOrderReceivedByStaff(c *gin.Context) {
 
 	if status == "cancelled" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "order was cancelled and is no longer tracked"})
-		return
-	}
-	if !driverClaimed {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "driver has not claimed delivery yet"})
 		return
 	}
 
