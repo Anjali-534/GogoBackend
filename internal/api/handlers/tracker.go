@@ -1448,6 +1448,12 @@ func UpdateTrackerCompanyOrderDetails(c *gin.Context) {
 		DispatchTo           string `json:"dispatch_to" binding:"required"`
 		TransporterName      string `json:"transporter_name"`
 		TransporterPhone     string `json:"transporter_phone"`
+		// DriverName/DriverPhone are the snapshot text fields set at order
+		// creation (see driverName/driverPhone in CreateTrackerCompanyOrder) —
+		// distinct from DriverID reassignment, which stays create-time-only
+		// per this handler's route-caching note above.
+		DriverName           string `json:"driver_name"`
+		DriverPhone          string `json:"driver_phone"`
 		VehicleNumber        string `json:"vehicle_number" binding:"required"`
 		EwayBillNumber       string `json:"eway_bill_number"`
 
@@ -1523,8 +1529,9 @@ func UpdateTrackerCompanyOrderDetails(c *gin.Context) {
 			contact_person_email=$25, contact_person_designation=$26,
 			priority=$27, expected_delivery_date=$28, declared_value=$29,
 			special_handling=$30, internal_reference=$31,
+			driver_name=$32, driver_phone=$33,
 			updated_at=NOW()
-		WHERE id=$32 AND company_id=$33
+		WHERE id=$34 AND company_id=$35
 	`, req.BookedForCompanyName, req.BookedForPhone,
 		req.DispatchFrom, req.DispatchTo,
 		nullIfEmpty(req.TransporterName), nullIfEmpty(req.TransporterPhone),
@@ -1539,6 +1546,7 @@ func UpdateTrackerCompanyOrderDetails(c *gin.Context) {
 		nullIfEmpty(req.ContactPersonEmail), nullIfEmpty(req.ContactPersonDesignation),
 		priority, req.ExpectedDeliveryDate, req.DeclaredValue,
 		req.SpecialHandling, nullIfEmpty(req.InternalReference),
+		nullIfEmpty(req.DriverName), nullIfEmpty(req.DriverPhone),
 		orderID, companyID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "update failed: " + err.Error()})
