@@ -180,6 +180,19 @@ func buildTrackerEmailAttachments(files []trackerEmailAttachable) ([]mail.Attach
 			skipped = append(skipped, f.Label)
 			continue
 		}
+		// A non-200 (auth-gated storage, expired URL, permission change,
+		// anything) must never fall through to the read below — Cloudinary in
+		// particular returns 401 with an empty body for access-restricted
+		// files, which would otherwise read as a "valid" 0-byte attachment
+		// instead of being skipped. Read-and-discard the error body so the
+		// connection can be reused, then skip.
+		if resp.StatusCode != http.StatusOK {
+			io.Copy(io.Discard, io.LimitReader(resp.Body, maxFileSize))
+			resp.Body.Close()
+			log.Printf("tracker email attachment: non-200 fetching %s (%s): %d", f.Label, f.FileURL, resp.StatusCode)
+			skipped = append(skipped, f.Label)
+			continue
+		}
 		// LimitReader+1 guards against a mis-sized/backfilled row (upload-
 		// time validation already caps new uploads at maxFileSize) without
 		// ever buffering more than one byte past the cap.
