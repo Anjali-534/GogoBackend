@@ -58,6 +58,19 @@ var validOrderStatuses = map[string]bool{
 	"cancelled":  true,
 }
 
+// postDispatchOrderStatuses are the statuses at which an order must have a
+// driver_tracking_token — used by ensureDriverTrackingToken. Neither status
+// transition is required to pass through 'dispatched' on the way here (a
+// company can jump straight from 'created' to 'in_transit', and
+// tryAutoCompleteDelivery can jump straight to 'delivered' off a consignee
+// confirmation), so token generation is keyed off landing in one of these
+// statuses at all, not off any specific transition.
+var postDispatchOrderStatuses = map[string]bool{
+	"dispatched": true,
+	"in_transit": true,
+	"delivered":  true,
+}
+
 // validOrderTypes matches the CHECK constraint added in migration 050.
 // Empty request input defaults to "outbound" (the original/only order
 // shape) rather than being rejected — see CreateTrackerCompanyOrder.
@@ -757,6 +770,25 @@ func generateTrackingToken() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+// ensureDriverTrackingToken generates a driver_tracking_token when an order
+// is landing in a post-dispatch status (see postDispatchOrderStatuses) and
+// doesn't already have one. Called from both UpdateTrackerCompanyOrderStatus
+// (manual company status changes) and tryAutoCompleteDelivery (auto-complete
+// off a consignee confirmation) — either path can land an order in
+// 'in_transit'/'delivered' without ever passing through 'dispatched', and
+// both need the same not-already-set + right-status check so neither can
+// leave an order token-less. Returns "" (no error) when no token needs
+// generating — caller treats that as "nothing to add to the UPDATE".
+func ensureDriverTrackingToken(existingToken *string, newStatus string) (string, error) {
+	if existingToken != nil && *existingToken != "" {
+		return "", nil
+	}
+	if !postDispatchOrderStatuses[newStatus] {
+		return "", nil
+	}
+	return generateTrackingToken()
 }
 
 // fetchLocationPings returns an order's route trail, oldest first, for
@@ -1624,17 +1656,14 @@ func UpdateTrackerCompanyOrderStatus(c *gin.Context) {
 		return
 	}
 
-	// The driver's share-link token is generated the first time an order
-	// moves to 'dispatched' — that's the point the driver actually needs a
-	// link to send from. Never regenerated on later transitions.
-	newDriverToken := ""
-	if req.Status == "dispatched" && driverTrackingToken == nil {
-		token, err := generateTrackingToken()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate driver tracking token"})
-			return
-		}
-		newDriverToken = token
+	// The driver's share-link token is generated the moment an order lands
+	// in a post-dispatch status, whichever transition got it there (see
+	// ensureDriverTrackingToken) — not just the 'dispatched' transition
+	// specifically. Never regenerated once set.
+	newDriverToken, err := ensureDriverTrackingToken(driverTrackingToken, req.Status)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate driver tracking token"})
+		return
 	}
 
 	tx, err := pool.Begin(ctx)
@@ -2532,16 +2561,26 @@ func tryAutoCompleteDelivery(ctx context.Context, cfg *config.Config, orderID, r
 	pool := db.GetDB().GetPool()
 
 	var companyID, status string
+	var driverTrackingToken *string
 	var consigneeResponded bool
 	err := pool.QueryRow(ctx, `
-		SELECT o.company_id, o.status, o.received_confirmed_at IS NOT NULL
+		SELECT o.company_id, o.status, o.driver_tracking_token, o.received_confirmed_at IS NOT NULL
 		FROM tracker_orders o WHERE o.id = $1
-	`, orderID).Scan(&companyID, &status, &consigneeResponded)
+	`, orderID).Scan(&companyID, &status, &driverTrackingToken, &consigneeResponded)
 	if err != nil {
 		log.Printf("tryAutoCompleteDelivery: failed to load order=%s: %v", orderID, err)
 		return
 	}
 	if terminalOrderStatuses[status] || !consigneeResponded {
+		return
+	}
+
+	// This transition can land an order in 'delivered' straight from
+	// created/loading/loaded, skipping 'dispatched' entirely — same
+	// gap UpdateTrackerCompanyOrderStatus has, closed the same way.
+	newDriverToken, err := ensureDriverTrackingToken(driverTrackingToken, "delivered")
+	if err != nil {
+		log.Printf("tryAutoCompleteDelivery: failed to generate driver tracking token for order=%s: %v", orderID, err)
 		return
 	}
 
@@ -2552,10 +2591,18 @@ func tryAutoCompleteDelivery(ctx context.Context, cfg *config.Config, orderID, r
 	}
 	defer tx.Rollback(ctx)
 
-	tag, err := tx.Exec(ctx, `
-		UPDATE tracker_orders SET status='delivered', updated_at=NOW()
-		WHERE id=$1 AND status NOT IN ('delivered','cancelled')
-	`, orderID)
+	var tag interface{ RowsAffected() int64 }
+	if newDriverToken != "" {
+		tag, err = tx.Exec(ctx, `
+			UPDATE tracker_orders SET status='delivered', driver_tracking_token=$2, updated_at=NOW()
+			WHERE id=$1 AND status NOT IN ('delivered','cancelled')
+		`, orderID, newDriverToken)
+	} else {
+		tag, err = tx.Exec(ctx, `
+			UPDATE tracker_orders SET status='delivered', updated_at=NOW()
+			WHERE id=$1 AND status NOT IN ('delivered','cancelled')
+		`, orderID)
+	}
 	if err != nil {
 		log.Printf("tryAutoCompleteDelivery: update failed for order=%s: %v", orderID, err)
 		return
