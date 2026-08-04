@@ -1502,6 +1502,37 @@ UPDATE service_types SET length_m = 4.3, weight_capacity_kg = 3500, fuel_types =
 UPDATE service_types SET length_m = 6.0, weight_capacity_kg = 7000, fuel_types = ARRAY['diesel']
   WHERE slug = 'truck_os_20ft';
 
+-- ===== 055_tracker_trips.sql =====
+
+CREATE TABLE IF NOT EXISTS tracker_trips (
+  id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id             UUID NOT NULL REFERENCES tracker_companies(id),
+  dispatch_from          TEXT NOT NULL,
+  vehicle_number         TEXT NOT NULL,
+  driver_id              UUID REFERENCES tracker_drivers(id) ON DELETE SET NULL,
+  driver_name            TEXT,
+  driver_phone           TEXT,
+  overall_status         TEXT NOT NULL DEFAULT 'created'
+                           CHECK (overall_status IN ('created','in_transit','completed','cancelled')),
+  driver_tracking_token  TEXT UNIQUE,
+  last_lat               DOUBLE PRECISION,
+  last_lng               DOUBLE PRECISION,
+  last_location_at       TIMESTAMPTZ,
+  public_tracking_token  TEXT NOT NULL UNIQUE,
+  created_at             TIMESTAMPTZ DEFAULT NOW(),
+  completed_at           TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_tracker_trips_company_id ON tracker_trips(company_id);
+CREATE INDEX IF NOT EXISTS idx_tracker_trips_public_tracking_token ON tracker_trips(public_tracking_token);
+CREATE INDEX IF NOT EXISTS idx_tracker_trips_driver_tracking_token ON tracker_trips(driver_tracking_token);
+
+ALTER TABLE tracker_orders
+    ADD COLUMN IF NOT EXISTS trip_id UUID REFERENCES tracker_trips(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS stop_sequence INTEGER NOT NULL DEFAULT 1;
+
+CREATE INDEX IF NOT EXISTS idx_tracker_orders_trip_id ON tracker_orders(trip_id);
+
 UPDATE service_types SET length_m = 7.3, weight_capacity_kg = 10000, fuel_types = ARRAY['diesel']
   WHERE slug = 'truck_os_container';
 

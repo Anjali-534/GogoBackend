@@ -127,6 +127,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogooPublic.POST("/tracker/resend-otp", handlers.ResendTrackerCompanyOTP)
 		gogooPublic.POST("/tracker/login", handlers.TrackerCompanyLogin)
 		gogooPublic.GET("/public/tracker/orders/:token", handlers.GetPublicTrackerOrder)
+		gogooPublic.GET("/public/tracker/trips/:token", handlers.GetPublicTrackerTrip)
 
 		// Bogie Tracker — driver share-link (live location), protected only
 		// by the unguessable driver_tracking_token, same model as above.
@@ -333,6 +334,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.GET("/tracker/orders", middleware.RequireTrackerCompany(), handlers.ListTrackerCompanyOwnOrders)
 		gogoo.GET("/tracker/live-map", middleware.RequireTrackerCompany(), handlers.ListTrackerCompanyLiveMap)
 		gogoo.POST("/tracker/orders", middleware.RequireTrackerCompany(), handlers.CreateTrackerCompanyOrder)
+		gogoo.GET("/tracker/trips/:id", middleware.RequireTrackerCompany(), handlers.GetTrackerCompanyTrip)
 		gogoo.GET("/tracker/orders/:id", middleware.RequireTrackerCompany(), handlers.GetTrackerCompanyOwnOrder)
 		gogoo.PATCH("/tracker/orders/:id", middleware.RequireTrackerCompany(), handlers.UpdateTrackerCompanyOrderStatus)
 		gogoo.PATCH("/tracker/orders/:id/details", middleware.RequireTrackerCompany(), handlers.UpdateTrackerCompanyOrderDetails)

@@ -825,22 +825,25 @@ func ListTrackerCompanyOwnOrders(c *gin.Context) {
 	pool := db.GetDB().GetPool()
 
 	query := `
-		SELECT id, company_id, booked_for_company_name, booked_for_phone,
-		       dispatch_from, dispatch_to,
-		       COALESCE(transporter_name,''), COALESCE(transporter_phone,''),
-		       driver_id::text, COALESCE(driver_name,''), COALESCE(driver_phone,''),
-		       vehicle_number, COALESCE(eway_bill_number,''), COALESCE(eway_bill_file_url,''),
-		       status, public_tracking_token, created_at,
-		       consignee_name, material, quantity, dispatch_datetime, documents_enclosed,
-		       order_type
-		FROM tracker_orders
-		WHERE company_id = $1`
+		SELECT o.id, o.company_id, o.booked_for_company_name, o.booked_for_phone,
+		       o.dispatch_from, o.dispatch_to,
+		       COALESCE(o.transporter_name,''), COALESCE(o.transporter_phone,''),
+		       o.driver_id::text, COALESCE(o.driver_name,''), COALESCE(o.driver_phone,''),
+		       o.vehicle_number, COALESCE(o.eway_bill_number,''), COALESCE(o.eway_bill_file_url,''),
+		       o.status, o.public_tracking_token, o.created_at,
+		       o.consignee_name, o.material, o.quantity, o.dispatch_datetime, o.documents_enclosed,
+		       o.order_type, o.trip_id, o.stop_sequence,
+		       (SELECT COUNT(*) FROM tracker_orders o2 WHERE o2.trip_id = o.trip_id),
+		       t.public_tracking_token
+		FROM tracker_orders o
+		LEFT JOIN tracker_trips t ON t.id = o.trip_id
+		WHERE o.company_id = $1`
 	args := []interface{}{companyID}
 	if status != "" {
-		query += " AND status = $2"
+		query += " AND o.status = $2"
 		args = append(args, status)
 	}
-	query += " ORDER BY created_at DESC"
+	query += " ORDER BY o.created_at DESC"
 
 	rows, err := pool.Query(ctx, query, args...)
 	if err != nil {
@@ -861,7 +864,7 @@ func ListTrackerCompanyOwnOrders(c *gin.Context) {
 			&o.VehicleNumber, &o.EwayBillNumber, &o.EwayBillFileURL,
 			&o.Status, &o.PublicTrackingToken, &o.CreatedAt,
 			&o.ConsigneeName, &o.Material, &o.Quantity, &o.DispatchDatetime, &o.DocumentsEnclosed,
-			&o.OrderType,
+			&o.OrderType, &o.TripID, &o.StopSequence, &o.TripStopCount, &o.TripPublicTrackingToken,
 		); err != nil {
 			continue
 		}
@@ -895,6 +898,17 @@ type TrackerLiveMapOrder struct {
 	// is company-scoped), repeated per-order so the response shape stays a
 	// plain array and existing frontend parsing doesn't need to change.
 	CompanyLogoURL *string `json:"company_logo_url"`
+
+	// IsTrip/TripID (migration 055) — false/omitted for a legacy single-stop
+	// order (unchanged from before trips existed). When true, ID is the
+	// trip's own id (not any order's), DriverName/VehicleNumber come from
+	// the trip, and BookedForCompanyName/DispatchTo are reused to surface
+	// the trip's CURRENT active stop's consignee/destination — same "reuse
+	// an existing field for a related-but-different concept" pattern this
+	// struct already isn't shy about (see inbound orders reusing
+	// booked_for_* for the supplier, tracker.go's CreateTrackerCompanyOrder).
+	IsTrip bool    `json:"is_trip,omitempty"`
+	TripID *string `json:"trip_id,omitempty"`
 }
 
 // GET /gogoo/tracker/live-map — company-scoped, returns one entry per
@@ -911,12 +925,17 @@ func ListTrackerCompanyLiveMap(c *gin.Context) {
 	var companyLogoURL *string
 	_ = pool.QueryRow(ctx, `SELECT logo_url FROM tracker_companies WHERE id = $1`, companyID).Scan(&companyLogoURL)
 
+	// Legacy/single-stop path — trip_id IS NULL excludes anything that's now
+	// part of a trip (migration 055), which the second query below covers
+	// instead. Otherwise byte-for-byte the same query this endpoint has
+	// always run.
 	rows, err := pool.Query(ctx, `
 		SELECT id, COALESCE(driver_name,''), vehicle_number, booked_for_company_name,
 		       dispatch_from, dispatch_to, status, last_lat, last_lng, last_location_at,
 		       route_distance_km, route_duration_mins
 		FROM tracker_orders
 		WHERE company_id = $1
+		  AND trip_id IS NULL
 		  AND status IN ('dispatched', 'in_transit')
 		  AND last_lat IS NOT NULL AND last_lng IS NOT NULL
 		ORDER BY last_location_at DESC NULLS LAST`, companyID)
@@ -939,6 +958,51 @@ func ListTrackerCompanyLiveMap(c *gin.Context) {
 		o.CompanyLogoURL = companyLogoURL
 		orders = append(orders, o)
 	}
+
+	// Trip path — one row per trackable multi-stop trip, joined to its
+	// current active stop (lowest stop_sequence not yet delivered/cancelled)
+	// purely for display context (which consignee/destination is next).
+	// route_distance_km/route_duration_mins have no trip-level equivalent
+	// (route caching is per-stop) so they stay nil on these rows — the
+	// frontend already treats them as optional on every other row.
+	tripRows, err := pool.Query(ctx, `
+		SELECT t.id, COALESCE(t.driver_name,''), t.vehicle_number,
+		       COALESCE(active.consignee_name,''), t.dispatch_from,
+		       COALESCE(active.dispatch_to,''), t.overall_status,
+		       t.last_lat, t.last_lng, t.last_location_at
+		FROM tracker_trips t
+		LEFT JOIN LATERAL (
+			SELECT consignee_name, dispatch_to
+			FROM tracker_orders
+			WHERE trip_id = t.id AND status NOT IN ('delivered','cancelled')
+			ORDER BY stop_sequence ASC
+			LIMIT 1
+		) active ON true
+		WHERE t.company_id = $1
+		  AND t.overall_status IN ('created', 'in_transit')
+		  AND t.last_lat IS NOT NULL AND t.last_lng IS NOT NULL
+		ORDER BY t.last_location_at DESC NULLS LAST`, companyID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error: " + err.Error()})
+		return
+	}
+	defer tripRows.Close()
+
+	for tripRows.Next() {
+		var o TrackerLiveMapOrder
+		if err := tripRows.Scan(
+			&o.ID, &o.DriverName, &o.VehicleNumber, &o.BookedForCompanyName,
+			&o.DispatchFrom, &o.DispatchTo, &o.Status, &o.LastLat, &o.LastLng, &o.LastLocationAt,
+		); err != nil {
+			continue
+		}
+		o.CompanyLogoURL = companyLogoURL
+		o.IsTrip = true
+		tripID := o.ID
+		o.TripID = &tripID
+		orders = append(orders, o)
+	}
+
 	c.JSON(http.StatusOK, orders)
 }
 
@@ -1018,6 +1082,15 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 		DriverID         *string  `json:"driver_id"`
 		VehicleNumber    string   `json:"vehicle_number" binding:"required"`
 		EwayBillNumber   string   `json:"eway_bill_number"`
+
+		// TripID (migration 055) — nil for today's normal single-shipment
+		// calls, zero behavior change. When set, this order becomes another
+		// stop on an existing multi-drop trip: vehicle_number/driver_id/
+		// driver_name/driver_phone are NOT taken from this request in that
+		// case (see below) — they're copied server-side from the trip, so a
+		// stale or tampered client can't attach a mismatched vehicle to
+		// someone else's truck run.
+		TripID *string `json:"trip_id"`
 
 		// Dispatch details — from the real dispatch sheet, all optional.
 		ConsigneeName     string     `json:"consignee_name"`
@@ -1116,20 +1189,80 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 
-	// If a driver is attached, it must belong to this company and snapshot
-	// its name/phone onto the order at creation time.
-	var driverName, driverPhone *string
-	if req.DriverID != nil && *req.DriverID != "" {
-		var name, phone string
-		err := pool.QueryRow(ctx, `
-			SELECT driver_name, phone FROM tracker_drivers WHERE id=$1 AND company_id=$2
-		`, *req.DriverID, companyID).Scan(&name, &phone)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "driver not found"})
+	// Trip resolution (migration 055). Two paths:
+	//   - req.TripID set: this is another stop on an existing trip. Vehicle/
+	//     driver fields are copied from the trip row itself, ignoring
+	//     whatever the client sent for them (see TripID's doc comment
+	//     above) — dispatch_from stays per-request since each stop's actual
+	//     starting point can differ from the previous stop's dispatch_to.
+	//   - req.TripID nil: same driver-lookup this endpoint has always done,
+	//     plus a brand new trip gets created below so this order (even a
+	//     genuinely standalone one) always belongs to some trip — a trip
+	//     with exactly one stop is indistinguishable from today's single-
+	//     shipment flow everywhere else in the product.
+	var finalDriverID, finalDriverName, finalDriverPhone *string
+	finalVehicleNumber := req.VehicleNumber
+	var tripID uuid.UUID
+	var stopSequence int
+	needNewTrip := false
+	var newTripPublicToken, newTripDriverToken, tripPublicToken string
+
+	if req.TripID != nil && *req.TripID != "" {
+		parsedTripID, parseErr := uuid.Parse(*req.TripID)
+		if parseErr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid trip_id"})
 			return
 		}
-		driverName = &name
-		driverPhone = &phone
+		err := pool.QueryRow(ctx, `
+			SELECT vehicle_number, driver_id::text, driver_name, driver_phone, public_tracking_token
+			FROM tracker_trips WHERE id=$1 AND company_id=$2
+		`, parsedTripID, companyID).Scan(
+			&finalVehicleNumber, &finalDriverID, &finalDriverName, &finalDriverPhone, &tripPublicToken,
+		)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "trip not found"})
+			return
+		}
+		tripID = parsedTripID
+		if err := pool.QueryRow(ctx, `
+			SELECT COALESCE(MAX(stop_sequence),0)+1 FROM tracker_orders WHERE trip_id=$1
+		`, tripID).Scan(&stopSequence); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to compute stop sequence"})
+			return
+		}
+	} else {
+		// If a driver is attached, it must belong to this company and
+		// snapshot its name/phone onto the order (and the new trip) at
+		// creation time — unchanged from before trips existed.
+		if req.DriverID != nil && *req.DriverID != "" {
+			var name, phone string
+			err := pool.QueryRow(ctx, `
+				SELECT driver_name, phone FROM tracker_drivers WHERE id=$1 AND company_id=$2
+			`, *req.DriverID, companyID).Scan(&name, &phone)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "driver not found"})
+				return
+			}
+			finalDriverName = &name
+			finalDriverPhone = &phone
+		}
+		finalDriverID = req.DriverID
+		stopSequence = 1
+		tripID = uuid.New()
+		needNewTrip = true
+
+		var tokenErr error
+		newTripPublicToken, tokenErr = generateTrackingToken()
+		if tokenErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate trip tracking token"})
+			return
+		}
+		newTripDriverToken, tokenErr = generateTrackingToken()
+		if tokenErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate trip driver token"})
+			return
+		}
+		tripPublicToken = newTripPublicToken
 	}
 
 	token, err := generateTrackingToken()
@@ -1156,6 +1289,24 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 	}
 	defer tx.Rollback(ctx)
 
+	// The trip row must exist before the order references it via trip_id's
+	// FK — Postgres checks foreign keys per-statement, not deferred, so this
+	// has to run before the order INSERT below when a new trip is needed.
+	if needNewTrip {
+		_, err = tx.Exec(ctx, `
+			INSERT INTO tracker_trips
+				(id, company_id, dispatch_from, vehicle_number, driver_id, driver_name, driver_phone,
+				 driver_tracking_token, public_tracking_token)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+		`, tripID, companyID, req.DispatchFrom, finalVehicleNumber,
+			finalDriverID, finalDriverName, finalDriverPhone,
+			newTripDriverToken, newTripPublicToken)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create trip: " + err.Error()})
+			return
+		}
+	}
+
 	_, err = tx.Exec(ctx, `
 		INSERT INTO tracker_orders
 			(id, company_id, booked_for_company_name, booked_for_phone,
@@ -1170,12 +1321,12 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 			 registered_address, factory_address,
 			 contact_person_name, contact_person_phone, contact_person_email, contact_person_designation,
 			 priority, expected_delivery_date, declared_value, special_handling, internal_reference,
-			 order_type)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'created',$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43)
+			 order_type, trip_id, stop_sequence)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'created',$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45)
 	`, id, companyID, req.BookedForCompanyName, req.BookedForPhone,
 		req.DispatchFrom, dispatchTo, req.DispatchFromLat, req.DispatchFromLng,
 		dispatchToLat, dispatchToLng, nullIfEmpty(req.TransporterName), nullIfEmpty(req.TransporterPhone),
-		req.DriverID, driverName, driverPhone, req.VehicleNumber,
+		finalDriverID, finalDriverName, finalDriverPhone, finalVehicleNumber,
 		nullIfEmpty(req.EwayBillNumber), token,
 		nullIfEmpty(req.ConsigneeName), nullIfEmpty(req.Material), nullIfEmpty(req.Quantity),
 		req.DispatchDatetime, nullIfEmpty(req.DocumentsEnclosed),
@@ -1186,7 +1337,7 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 		nullIfEmpty(req.ContactPersonName), nullIfEmpty(req.ContactPersonPhone),
 		nullIfEmpty(req.ContactPersonEmail), nullIfEmpty(req.ContactPersonDesignation),
 		priority, req.ExpectedDeliveryDate, req.DeclaredValue, req.SpecialHandling, nullIfEmpty(req.InternalReference),
-		orderType)
+		orderType, tripID, stopSequence)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create order: " + err.Error()})
 		return
@@ -1258,7 +1409,11 @@ func CreateTrackerCompanyOrder(c *gin.Context) {
 			dispatchTo, dispatchToLat, dispatchToLng)
 	}
 
-	c.JSON(http.StatusCreated, gin.H{"id": id, "public_tracking_token": token, "message": "order created"})
+	c.JSON(http.StatusCreated, gin.H{
+		"id": id, "public_tracking_token": token,
+		"trip_id": tripID, "trip_public_tracking_token": tripPublicToken,
+		"message": "order created",
+	})
 }
 
 // routeFetchInFlight dedupes concurrent cacheTrackerOrderRoute calls per
@@ -1346,26 +1501,29 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 	var o TrackerOrder
 	var driverID *string
 	err := pool.QueryRow(ctx, `
-		SELECT id, company_id, booked_for_company_name, booked_for_phone,
-		       dispatch_from, dispatch_to,
-		       COALESCE(transporter_name,''), COALESCE(transporter_phone,''),
-		       driver_id::text, COALESCE(driver_name,''), COALESCE(driver_phone,''),
-		       vehicle_number, COALESCE(eway_bill_number,''), COALESCE(eway_bill_file_url,''),
-		       status, public_tracking_token, created_at,
-		       consignee_name, material, quantity, dispatch_datetime, documents_enclosed,
-		       driver_tracking_token, last_lat, last_lng, last_location_at,
-		       dispatch_from_lat, dispatch_from_lng, dispatch_to_lat, dispatch_to_lng,
-		       route_polyline, route_distance_km, route_duration_mins,
-		       signature_url, booked_for_email, consignee_email, transporter_email,
-		       received_confirmation_token, received_confirmed_at,
-		       delivery_condition, delivery_condition_reason, needs_staff_attention,
-		       consignee_gstin, booked_for_gstin, consignee_state, booked_for_state,
-		       registered_address, factory_address,
-		       contact_person_name, contact_person_phone, contact_person_email, contact_person_designation,
-		       priority, expected_delivery_date, declared_value, special_handling, internal_reference,
-		       order_type
-		FROM tracker_orders
-		WHERE id = $1 AND company_id = $2
+		SELECT o.id, o.company_id, o.booked_for_company_name, o.booked_for_phone,
+		       o.dispatch_from, o.dispatch_to,
+		       COALESCE(o.transporter_name,''), COALESCE(o.transporter_phone,''),
+		       o.driver_id::text, COALESCE(o.driver_name,''), COALESCE(o.driver_phone,''),
+		       o.vehicle_number, COALESCE(o.eway_bill_number,''), COALESCE(o.eway_bill_file_url,''),
+		       o.status, o.public_tracking_token, o.created_at,
+		       o.consignee_name, o.material, o.quantity, o.dispatch_datetime, o.documents_enclosed,
+		       o.driver_tracking_token, o.last_lat, o.last_lng, o.last_location_at,
+		       o.dispatch_from_lat, o.dispatch_from_lng, o.dispatch_to_lat, o.dispatch_to_lng,
+		       o.route_polyline, o.route_distance_km, o.route_duration_mins,
+		       o.signature_url, o.booked_for_email, o.consignee_email, o.transporter_email,
+		       o.received_confirmation_token, o.received_confirmed_at,
+		       o.delivery_condition, o.delivery_condition_reason, o.needs_staff_attention,
+		       o.consignee_gstin, o.booked_for_gstin, o.consignee_state, o.booked_for_state,
+		       o.registered_address, o.factory_address,
+		       o.contact_person_name, o.contact_person_phone, o.contact_person_email, o.contact_person_designation,
+		       o.priority, o.expected_delivery_date, o.declared_value, o.special_handling, o.internal_reference,
+		       o.order_type, o.trip_id, o.stop_sequence,
+		       (SELECT COUNT(*) FROM tracker_orders o2 WHERE o2.trip_id = o.trip_id),
+		       t.public_tracking_token, t.driver_tracking_token
+		FROM tracker_orders o
+		LEFT JOIN tracker_trips t ON t.id = o.trip_id
+		WHERE o.id = $1 AND o.company_id = $2
 	`, orderID, companyID).Scan(
 		&o.ID, &o.CompanyID, &o.BookedForCompanyName, &o.BookedForPhone,
 		&o.DispatchFrom, &o.DispatchTo,
@@ -1384,7 +1542,8 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 		&o.RegisteredAddress, &o.FactoryAddress,
 		&o.ContactPersonName, &o.ContactPersonPhone, &o.ContactPersonEmail, &o.ContactPersonDesignation,
 		&o.Priority, &o.ExpectedDeliveryDate, &o.DeclaredValue, &o.SpecialHandling, &o.InternalReference,
-		&o.OrderType,
+		&o.OrderType, &o.TripID, &o.StopSequence, &o.TripStopCount,
+		&o.TripPublicTrackingToken, &o.TripDriverTrackingToken,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -1484,10 +1643,10 @@ func UpdateTrackerCompanyOrderDetails(c *gin.Context) {
 		// creation (see driverName/driverPhone in CreateTrackerCompanyOrder) —
 		// distinct from DriverID reassignment, which stays create-time-only
 		// per this handler's route-caching note above.
-		DriverName           string `json:"driver_name"`
-		DriverPhone          string `json:"driver_phone"`
-		VehicleNumber        string `json:"vehicle_number" binding:"required"`
-		EwayBillNumber       string `json:"eway_bill_number"`
+		DriverName     string `json:"driver_name"`
+		DriverPhone    string `json:"driver_phone"`
+		VehicleNumber  string `json:"vehicle_number" binding:"required"`
+		EwayBillNumber string `json:"eway_bill_number"`
 
 		ConsigneeName     string     `json:"consignee_name"`
 		Material          string     `json:"material"`
@@ -1537,6 +1696,35 @@ func UpdateTrackerCompanyOrderDetails(c *gin.Context) {
 
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
+
+	// Trip stop-edit guard (migration 055). Deliberately keyed off "this
+	// trip actually has more than one stop", not just "trip_id IS NOT
+	// NULL" — every order gets an (often single-stop) trip now (see
+	// CreateTrackerCompanyOrder), and gating edits on trip_id alone would
+	// silently lock down editing for effectively every order in the
+	// product the moment it leaves 'created'/'loading', not just genuine
+	// multi-drop runs. A single-stop trip behaves exactly like today.
+	var currentStatus string
+	var tripID *string
+	if err := pool.QueryRow(ctx, `
+		SELECT status, trip_id FROM tracker_orders WHERE id=$1 AND company_id=$2
+	`, orderID, companyID).Scan(&currentStatus, &tripID); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
+		return
+	}
+	if tripID != nil {
+		var stopCount int
+		if err := pool.QueryRow(ctx, `
+			SELECT COUNT(*) FROM tracker_orders WHERE trip_id=$1
+		`, *tripID).Scan(&stopCount); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check trip"})
+			return
+		}
+		if stopCount > 1 && currentStatus != "created" && currentStatus != "loading" {
+			c.JSON(http.StatusConflict, gin.H{"error": "this stop has already been dispatched and can no longer be edited"})
+			return
+		}
+	}
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -2277,6 +2465,8 @@ func GetPublicTrackerOrder(c *gin.Context) {
 	var receivedConfirmedAt *time.Time
 	var companyName string
 	var companyLogoURL *string
+	var tripLastLat, tripLastLng *float64
+	var tripLastLocationAt *time.Time
 	err := pool.QueryRow(ctx, `
 		SELECT o.id, o.status, o.dispatch_from, o.dispatch_to, o.vehicle_number,
 		       o.transporter_name, o.transporter_phone, o.driver_name, o.driver_phone,
@@ -2284,9 +2474,11 @@ func GetPublicTrackerOrder(c *gin.Context) {
 		       o.last_lat, o.last_lng, o.last_location_at,
 		       o.dispatch_from_lat, o.dispatch_from_lng, o.dispatch_to_lat, o.dispatch_to_lng,
 		       o.route_polyline, o.route_distance_km, o.route_duration_mins,
-		       o.signature_url, o.received_confirmed_at, c.company_name, c.logo_url
+		       o.signature_url, o.received_confirmed_at, c.company_name, c.logo_url,
+		       t.last_lat, t.last_lng, t.last_location_at
 		FROM tracker_orders o
 		JOIN tracker_companies c ON c.id = o.company_id
+		LEFT JOIN tracker_trips t ON t.id = o.trip_id
 		WHERE o.public_tracking_token = $1
 	`, token).Scan(&orderID, &status, &dispatchFrom, &dispatchTo, &vehicleNumber,
 		&transporterName, &transporterPhone, &driverName, &driverPhone,
@@ -2294,10 +2486,22 @@ func GetPublicTrackerOrder(c *gin.Context) {
 		&lastLat, &lastLng, &lastLocationAt,
 		&dispatchFromLat, &dispatchFromLng, &dispatchToLat, &dispatchToLng,
 		&routePolyline, &routeDistanceKm, &routeDurationMins,
-		&signatureURL, &receivedConfirmedAt, &companyName, &companyLogoURL)
+		&signatureURL, &receivedConfirmedAt, &companyName, &companyLogoURL,
+		&tripLastLat, &tripLastLng, &tripLastLocationAt)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "tracking link not found"})
 		return
+	}
+
+	// Trip fallback (migration 055) — a multi-stop trip's live location lives
+	// on tracker_trips, not this order, so an order with no location fix of
+	// its own but a linked trip that does have one shows the truck's real
+	// position instead of nothing. Only used when the order's own last_lat
+	// is null — an order that has its own fix (e.g. a legacy/single-stop
+	// order, or any order from before this fallback existed) keeps using it
+	// unchanged.
+	if lastLat == nil && tripLastLat != nil {
+		lastLat, lastLng, lastLocationAt = tripLastLat, tripLastLng, tripLastLocationAt
 	}
 
 	// Same self-heal as GetTrackerCompanyOwnOrder: retry a failed create-time
@@ -2427,6 +2631,73 @@ func GetTrackerDriverOrder(c *gin.Context) {
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 
+	// Trip tokens take priority (migration 055) — same trip-first-then-
+	// order-fallback lookup as PostTrackerDriverLocation. dispatch_to /
+	// booked_for_company_name reflect the CURRENT active stop (lowest
+	// stop_sequence not yet delivered/cancelled) — that's what the driver
+	// is actually driving toward right now. route_polyline/distance/
+	// duration have no trip-level equivalent (route caching is per-stop,
+	// same reason the trip's live-map/public-page rows never have one
+	// either) and stay null on a trip response.
+	var tripID string
+	tripErr := pool.QueryRow(ctx, `SELECT id::text FROM tracker_trips WHERE driver_tracking_token = $1`, driverToken).Scan(&tripID)
+	if tripErr == nil {
+		var tripStatus, tripDispatchFrom, tripVehicleNumber, companyName string
+		var companyLogoURL *string
+		var activeDispatchTo, activeBookedFor *string
+		var currentStopSequence, totalStops int
+		err := pool.QueryRow(ctx, `
+			SELECT t.overall_status, t.dispatch_from, t.vehicle_number, c.company_name, c.logo_url,
+			       active.dispatch_to, active.booked_for_company_name, COALESCE(active.stop_sequence, 0),
+			       (SELECT COUNT(*) FROM tracker_orders WHERE trip_id = t.id)
+			FROM tracker_trips t
+			JOIN tracker_companies c ON c.id = t.company_id
+			LEFT JOIN LATERAL (
+				SELECT dispatch_to, booked_for_company_name, stop_sequence
+				FROM tracker_orders
+				WHERE trip_id = t.id AND status NOT IN ('delivered','cancelled')
+				ORDER BY stop_sequence ASC
+				LIMIT 1
+			) active ON true
+			WHERE t.id = $1
+		`, tripID).Scan(
+			&tripStatus, &tripDispatchFrom, &tripVehicleNumber, &companyName, &companyLogoURL,
+			&activeDispatchTo, &activeBookedFor, &currentStopSequence, &totalStops,
+		)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "tracking link not found"})
+			return
+		}
+		dispatchTo, bookedFor := "", ""
+		if activeDispatchTo != nil {
+			dispatchTo = *activeDispatchTo
+		}
+		if activeBookedFor != nil {
+			bookedFor = *activeBookedFor
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"status":                  tripStatus,
+			"dispatch_from":           tripDispatchFrom,
+			"dispatch_to":             dispatchTo,
+			"vehicle_number":          tripVehicleNumber,
+			"company_name":            companyName,
+			"company_logo_url":        companyLogoURL,
+			"booked_for_company_name": bookedFor,
+			"is_terminal":             tripStatus == "completed" || tripStatus == "cancelled",
+			"dispatch_from_lat":       nil,
+			"dispatch_from_lng":       nil,
+			"dispatch_to_lat":         nil,
+			"dispatch_to_lng":         nil,
+			"route_polyline":          nil,
+			"route_distance_km":       nil,
+			"route_duration_mins":     nil,
+			"is_trip":                 true,
+			"current_stop_sequence":   currentStopSequence,
+			"total_stops":             totalStops,
+		})
+		return
+	}
+
 	var orderID, status, dispatchFrom, dispatchTo, vehicleNumber, companyName, bookedForCompanyName string
 	var fromLat, fromLng, toLat, toLng *float64
 	var routePolyline *string
@@ -2498,6 +2769,30 @@ func PostTrackerDriverLocation(c *gin.Context) {
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 
+	// Trip tokens take priority (migration 055) — a multi-stop trip's one
+	// shared driver link writes to the trip row, not any individual stop's
+	// order. Legacy/single-stop orders (never linked to a trip token) fall
+	// through to the exact lookup this endpoint has always done.
+	var tripID, tripStatus string
+	tripErr := pool.QueryRow(ctx, `
+		SELECT id, overall_status FROM tracker_trips WHERE driver_tracking_token = $1
+	`, driverToken).Scan(&tripID, &tripStatus)
+	if tripErr == nil {
+		if tripStatus == "completed" || tripStatus == "cancelled" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "trip is in a terminal state (" + tripStatus + ") and is no longer tracked"})
+			return
+		}
+		_, err := pool.Exec(ctx, `
+			UPDATE tracker_trips SET last_lat=$1, last_lng=$2, last_location_at=NOW() WHERE id=$3
+		`, *req.Lat, *req.Lng, tripID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "update failed"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "location updated"})
+		return
+	}
+
 	var orderID, status string
 	if err := pool.QueryRow(ctx, `
 		SELECT id, status FROM tracker_orders WHERE driver_tracking_token = $1
@@ -2562,11 +2857,12 @@ func tryAutoCompleteDelivery(ctx context.Context, cfg *config.Config, orderID, r
 
 	var companyID, status string
 	var driverTrackingToken *string
+	var tripID *string
 	var consigneeResponded bool
 	err := pool.QueryRow(ctx, `
-		SELECT o.company_id, o.status, o.driver_tracking_token, o.received_confirmed_at IS NOT NULL
+		SELECT o.company_id, o.status, o.driver_tracking_token, o.trip_id, o.received_confirmed_at IS NOT NULL
 		FROM tracker_orders o WHERE o.id = $1
-	`, orderID).Scan(&companyID, &status, &driverTrackingToken, &consigneeResponded)
+	`, orderID).Scan(&companyID, &status, &driverTrackingToken, &tripID, &consigneeResponded)
 	if err != nil {
 		log.Printf("tryAutoCompleteDelivery: failed to load order=%s: %v", orderID, err)
 		return
@@ -2626,6 +2922,47 @@ func tryAutoCompleteDelivery(ctx context.Context, cfg *config.Config, orderID, r
 	}
 
 	maybeSendTrackerOrderStatusEmail(cfg, companyID, orderID, "delivered")
+
+	if tripID != nil {
+		advanceTrackerTripAfterDelivery(ctx, *tripID)
+	}
+}
+
+// advanceTrackerTripAfterDelivery runs after an order belonging to a trip
+// (migration 055) has just been marked 'delivered' — no GPS/geofence logic,
+// purely a consequence of the same consignee-confirmation signal
+// tryAutoCompleteDelivery already acts on. If no other stop in the trip is
+// still non-terminal, this was the last one: mark the trip 'completed'.
+// Otherwise, this is just the first stop leaving 'created' (any trip's very
+// first delivery): bump the trip out of 'created' into 'in_transit' so the
+// live-map query (which only surfaces 'created'/'in_transit' trips) and any
+// future trip-status UI reflect that the run is actually underway.
+func advanceTrackerTripAfterDelivery(ctx context.Context, tripID string) {
+	pool := db.GetDB().GetPool()
+
+	var remaining int
+	if err := pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM tracker_orders WHERE trip_id = $1 AND status NOT IN ('delivered','cancelled')
+	`, tripID).Scan(&remaining); err != nil {
+		log.Printf("advanceTrackerTripAfterDelivery: failed to count remaining stops for trip=%s: %v", tripID, err)
+		return
+	}
+
+	if remaining == 0 {
+		if _, err := pool.Exec(ctx, `
+			UPDATE tracker_trips SET overall_status='completed', completed_at=NOW()
+			WHERE id=$1 AND overall_status NOT IN ('completed','cancelled')
+		`, tripID); err != nil {
+			log.Printf("advanceTrackerTripAfterDelivery: failed to complete trip=%s: %v", tripID, err)
+		}
+		return
+	}
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE tracker_trips SET overall_status='in_transit' WHERE id=$1 AND overall_status='created'
+	`, tripID); err != nil {
+		log.Printf("advanceTrackerTripAfterDelivery: failed to advance trip=%s to in_transit: %v", tripID, err)
+	}
 }
 
 // POST /gogoo/public/tracker/driver/:driver_token/event — unauthenticated,

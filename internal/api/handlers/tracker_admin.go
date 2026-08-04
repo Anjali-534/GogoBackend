@@ -106,6 +106,23 @@ type TrackerOrder struct {
 	// see CreateTrackerCompanyOrder).
 	OrderType string `json:"order_type"`
 
+	// Trip linkage (migration 055) — TripID is null for a legacy/standalone
+	// order, always set otherwise (see CreateTrackerCompanyOrder, which
+	// auto-creates a trip for every order now). TripStopCount is 1 for a
+	// trip nobody's added a second stop to; the panel only surfaces
+	// trip UI (see orders list/detail pages) once it's greater than 1 —
+	// see UpdateTrackerCompanyOrderDetails' matching "more than one stop"
+	// rule for why trip_id alone isn't a meaningful signal on its own.
+	TripID                  *string `json:"trip_id"`
+	StopSequence            int     `json:"stop_sequence"`
+	TripStopCount           int     `json:"trip_stop_count"`
+	TripPublicTrackingToken *string `json:"trip_public_tracking_token"`
+	// TripDriverTrackingToken is only populated by GetTrackerCompanyOwnOrder
+	// (the order list has no driver-link buttons to need it for) — same
+	// company-authenticated exposure as the order's own DriverTrackingToken
+	// above, just trip-scoped.
+	TripDriverTrackingToken *string `json:"trip_driver_tracking_token"`
+
 	// Dispatch details — from the real dispatch sheet, all optional. Existing
 	// orders predate these columns, so they come back null; render "—" on
 	// the frontend rather than coalescing to empty string here.
