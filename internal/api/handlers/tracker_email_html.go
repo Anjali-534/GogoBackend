@@ -48,6 +48,13 @@ func trackerEmailFromName(companyName string) string {
 	return companyName + " via Bogie Tracker"
 }
 
+// TrackerEmailFromName is the exported form of trackerEmailFromName, for
+// trackerdelivery (a separate package) to reuse the exact same "<Company>
+// via Bogie Tracker" sender-name format as every other tracker email.
+func TrackerEmailFromName(companyName string) string {
+	return trackerEmailFromName(companyName)
+}
+
 // TrackerEmailWrapHTML wraps bodyHTML in the shared card chrome + footer.
 // bodyHTML is caller-built and trusted to already be safe/escaped — every
 // helper in this file that interpolates dynamic values (company name, order

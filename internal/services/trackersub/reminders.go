@@ -251,6 +251,7 @@ func sendTrackerRenewalReminderEmail(cfg *config.Config, companyName, toEmail st
 			To:      toEmail,
 			Subject: fmt.Sprintf("Your Bogie Tracker subscription expires %s", when),
 			Body:    body,
+			FromName: "Bogie",
 		}); err != nil {
 			log.Printf("tracker renewal reminder email: send failed for %s: %v", toEmail, err)
 		}
@@ -290,6 +291,7 @@ func sendTrackerSubscriptionExpiredEmail(cfg *config.Config, companyName, toEmai
 			To:      toEmail,
 			Subject: "Your Bogie Tracker subscription has expired — account suspended",
 			Body:    body,
+			FromName: "Bogie",
 		}); err != nil {
 			log.Printf("tracker subscription expired email: send failed for %s: %v", toEmail, err)
 		}

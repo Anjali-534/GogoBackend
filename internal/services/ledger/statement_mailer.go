@@ -166,6 +166,7 @@ func sendOneStatement(ctx context.Context, cfg *config.Config, driverID string, 
 		To:      stmt.DriverEmail,
 		Subject: fmt.Sprintf("Your Bogie earnings statement — %s", monthKey),
 		Body:    body,
+		FromName: "Bogie",
 		Attachments: []mail.Attachment{{
 			Filename:    fmt.Sprintf("bogie-ledger-%s-%s.pdf", driverID, monthKey),
 			ContentType: "application/pdf",

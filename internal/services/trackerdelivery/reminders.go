@@ -260,6 +260,7 @@ func sendTrackerDeliveryReminderEmail(cfg *config.Config, c candidate, reminderN
 			Subject:  "Please confirm receipt of your delivery",
 			Body:     body,
 			HTMLBody: htmlBody,
+			FromName: handlers.TrackerEmailFromName(c.companyName),
 		}); err != nil {
 			log.Printf("tracker delivery reminder email: send failed for order=%s: %v", c.order.ID, err)
 		}
