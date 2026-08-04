@@ -222,10 +222,12 @@ func NotifyTrackerOrderStakeholders(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"results": results})
 }
 
-// dispatchEmailRows builds the shared [label, value] field list used by both
-// the plain-text and HTML dispatch-details bodies — single source of truth
-// so the two never drift out of sync with each other.
-func dispatchEmailRows(o TrackerOrder) [][2]string {
+// DispatchEmailRows builds the shared [label, value] field list used by
+// every dispatch-shaped tracker email (dispatch details, delivery
+// reminder) — single source of truth so they never drift out of sync with
+// each other. Exported so trackerdelivery (a separate package) can reuse it
+// for the delivery-reminder email instead of duplicating the field list.
+func DispatchEmailRows(o TrackerOrder) [][2]string {
 	bookedForState := "—"
 	if o.BookedForState != nil && *o.BookedForState != "" {
 		bookedForState = *o.BookedForState
@@ -296,16 +298,12 @@ func dispatchEmailRows(o TrackerOrder) [][2]string {
 // buildTrackerEmailAttachments), so the "Copy Enclosed" claim doesn't go
 // silently unfulfilled.
 func buildDispatchEmailBody(o TrackerOrder, trackingLink, receiptLink string, omitTrackingLink bool, skippedDocs []string) string {
-	rows := dispatchEmailRows(o)
+	rows := DispatchEmailRows(o)
 
 	var b strings.Builder
 	b.WriteString("DISPATCH DETAILS\n")
 	b.WriteString("=================\n\n")
-	b.WriteString(fmt.Sprintf("%-4s %-16s %s\n", "SR", "HEADS", "DESCRIPTION"))
-	b.WriteString(strings.Repeat("-", 60) + "\n")
-	for i, row := range rows {
-		b.WriteString(fmt.Sprintf("%-4d %-16s %s\n", i+1, row[0], row[1]))
-	}
+	b.WriteString(TrackerEmailDetailsTableText(rows))
 	b.WriteString("\n")
 	if !omitTrackingLink {
 		b.WriteString(fmt.Sprintf("Track this shipment live: %s\n\n", trackingLink))
@@ -338,25 +336,25 @@ func buildDispatchEmailBodyHTML(
 	cfg *config.Config, o TrackerOrder, companyName string, companyLogoURL *string,
 	trackingLink, receiptLink string, omitTrackingLink bool,
 ) string {
-	rows := dispatchEmailRows(o)
+	rows := DispatchEmailRows(o)
 
 	var b strings.Builder
 	b.WriteString(`<p style="font-size:14px;color:#111827;margin:0 0 4px;">Dear Sir,</p>`)
-	b.WriteString(`<p style="font-size:14px;color:` + trackerEmailTextGray + `;margin:0 0 4px;">Please find the dispatch details for your shipment below.</p>`)
-	b.WriteString(trackerEmailDetailsTableHTML(rows))
+	b.WriteString(`<p style="font-size:14px;color:` + TrackerEmailTextGray + `;margin:0 0 4px;">Please find the dispatch details for your shipment below.</p>`)
+	b.WriteString(TrackerEmailDetailsTableHTML(rows))
 
 	if !omitTrackingLink || receiptLink != "" {
 		b.WriteString(`<div style="margin:4px 0 8px;">`)
 		if !omitTrackingLink {
-			b.WriteString(trackerEmailButtonHTML(trackingLink, "Track Shipment Live"))
+			b.WriteString(TrackerEmailButtonHTML(trackingLink, "Track Shipment Live"))
 		}
 		if receiptLink != "" {
-			b.WriteString(trackerEmailButtonHTML(receiptLink, "Confirm Receipt"))
+			b.WriteString(TrackerEmailButtonHTML(receiptLink, "Confirm Receipt"))
 		}
 		b.WriteString(`</div>`)
 	}
 
-	b.WriteString(`<p style="font-size:12px;color:` + trackerEmailMutedGray + `;margin-top:18px;">This is an automated dispatch notification sent via Bogie Tracker.</p>`)
+	b.WriteString(`<p style="font-size:12px;color:` + TrackerEmailMutedGray + `;margin-top:18px;">This is an automated dispatch notification sent via Bogie Tracker.</p>`)
 
-	return trackerEmailWrapHTML(cfg, companyName, companyLogoURL, b.String())
+	return TrackerEmailWrapHTML(cfg, companyName, companyLogoURL, b.String())
 }

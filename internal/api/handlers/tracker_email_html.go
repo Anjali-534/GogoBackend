@@ -23,8 +23,12 @@ import (
 const (
 	trackerEmailBrandOrange = "#FF6B2B"
 	trackerEmailBorderGray  = "#E5E7EB"
-	trackerEmailTextGray    = "#374151"
-	trackerEmailMutedGray   = "#9CA3AF"
+	// TrackerEmailTextGray and TrackerEmailMutedGray are exported (unlike the
+	// two constants above) because the delivery-reminder mailer
+	// (internal/services/trackerdelivery, a separate package) needs them to
+	// build a body that visually matches the dispatch-details email.
+	TrackerEmailTextGray  = "#374151"
+	TrackerEmailMutedGray = "#9CA3AF"
 )
 
 // fetchTrackerCompanyLogoURL is a single cheap lookup shared by every email
@@ -44,11 +48,12 @@ func trackerEmailFromName(companyName string) string {
 	return companyName + " via Bogie Tracker"
 }
 
-// trackerEmailWrapHTML wraps bodyHTML in the shared card chrome + footer.
+// TrackerEmailWrapHTML wraps bodyHTML in the shared card chrome + footer.
 // bodyHTML is caller-built and trusted to already be safe/escaped — every
 // helper in this file that interpolates dynamic values (company name, order
-// fields, etc.) escapes them individually before they reach here.
-func trackerEmailWrapHTML(cfg *config.Config, companyName string, companyLogoURL *string, bodyHTML string) string {
+// fields, etc.) escapes them individually before they reach here. Exported
+// for the same cross-package reason as TrackerEmailTextGray above.
+func TrackerEmailWrapHTML(cfg *config.Config, companyName string, companyLogoURL *string, bodyHTML string) string {
 	panelURL := strings.TrimRight(cfg.TrackerPanelURL, "/")
 	var b strings.Builder
 	b.WriteString(`<div style="background-color:#F3F4F6;padding:24px 12px;font-family:Arial,Helvetica,sans-serif;">`)
@@ -89,25 +94,27 @@ func trackerEmailFooterHTML(panelURL, companyName string, companyLogoURL *string
 			`Powered by Bogie Tracker`+
 			`</a>`+
 			`</div>`,
-		companyBlock, panelURL, trackerEmailMutedGray, panelURL,
+		companyBlock, panelURL, TrackerEmailMutedGray, panelURL,
 	)
 }
 
-// trackerEmailButtonHTML renders a bulletproof-style HTML button (inline
+// TrackerEmailButtonHTML renders a bulletproof-style HTML button (inline
 // styles, no background-image/CSS trickery that Outlook's Word rendering
-// engine would drop) for the tracking/receipt links.
-func trackerEmailButtonHTML(href, label string) string {
+// engine would drop) for the tracking/receipt/confirm links. Exported for
+// the same cross-package reason as TrackerEmailTextGray above.
+func TrackerEmailButtonHTML(href, label string) string {
 	return fmt.Sprintf(
 		`<a href="%s" style="display:inline-block;background-color:%s;color:#ffffff;text-decoration:none;font-weight:700;font-size:13px;padding:11px 20px;border-radius:8px;margin:4px 10px 4px 0;">%s</a>`,
 		html.EscapeString(href), trackerEmailBrandOrange, html.EscapeString(label),
 	)
 }
 
-// trackerEmailDetailsTableHTML renders a [label, value] slice as a real
+// TrackerEmailDetailsTableHTML renders a [label, value] slice as a real
 // bordered HTML table with a brand-orange header row, matching the classic
-// paper dispatch sheet's SR/HEADS/DESCRIPTION layout that buildDispatchEmailBody
-// (the plain-text fallback) mirrors.
-func trackerEmailDetailsTableHTML(rows [][2]string) string {
+// paper dispatch sheet's SR/HEADS/DESCRIPTION layout that
+// TrackerEmailDetailsTableText (the plain-text equivalent) mirrors. Exported
+// for the same cross-package reason as TrackerEmailTextGray above.
+func TrackerEmailDetailsTableHTML(rows [][2]string) string {
 	var b strings.Builder
 	b.WriteString(`<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:14px 0 18px;">`)
 	b.WriteString(`<tr>`)
@@ -131,6 +138,21 @@ func trackerEmailDetailsTableHTML(rows [][2]string) string {
 	return b.String()
 }
 
+// TrackerEmailDetailsTableText is the plain-text counterpart of
+// TrackerEmailDetailsTableHTML — same SR/HEADS/DESCRIPTION layout as the
+// classic paper dispatch sheet. Shared by every plain-text tracker email
+// that needs the table (dispatch details, delivery reminder) so they can
+// never drift out of sync with each other.
+func TrackerEmailDetailsTableText(rows [][2]string) string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("%-4s %-16s %s\n", "SR", "HEADS", "DESCRIPTION"))
+	b.WriteString(strings.Repeat("-", 60) + "\n")
+	for i, row := range rows {
+		b.WriteString(fmt.Sprintf("%-4d %-16s %s\n", i+1, row[0], row[1]))
+	}
+	return b.String()
+}
+
 // trackerEmailFromPlainText is the low-effort-but-consistent HTML treatment
 // for every tracker email that doesn't get a full custom layout (signup,
 // OTP, approved, license, rejected, status-change, plan invoice, and the
@@ -141,6 +163,6 @@ func trackerEmailDetailsTableHTML(rows [][2]string) string {
 // branding even without a bespoke redesign.
 func trackerEmailFromPlainText(cfg *config.Config, companyName string, companyLogoURL *string, plainBody string) string {
 	escaped := html.EscapeString(plainBody)
-	bodyHTML := `<div style="font-size:14px;color:` + trackerEmailTextGray + `;white-space:pre-wrap;line-height:1.6;">` + escaped + `</div>`
-	return trackerEmailWrapHTML(cfg, companyName, companyLogoURL, bodyHTML)
+	bodyHTML := `<div style="font-size:14px;color:` + TrackerEmailTextGray + `;white-space:pre-wrap;line-height:1.6;">` + escaped + `</div>`
+	return TrackerEmailWrapHTML(cfg, companyName, companyLogoURL, bodyHTML)
 }
