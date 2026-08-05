@@ -138,8 +138,8 @@ func NotifyTrackerOrderStakeholders(c *gin.Context) {
 	// send path for inbound orders, buildDispatchEmailBody takes a shared
 	// flag and omits just the one line.
 	omitTrackingLink := o.OrderType == "inbound"
-	bodyWithReceipt := buildDispatchEmailBody(o, trackingLink, receiptLink, omitTrackingLink, skippedDocs)
-	bodyWithoutReceipt := buildDispatchEmailBody(o, trackingLink, "", omitTrackingLink, skippedDocs)
+	bodyWithReceipt := buildDispatchEmailBody(o, companyName, trackingLink, receiptLink, omitTrackingLink, skippedDocs)
+	bodyWithoutReceipt := buildDispatchEmailBody(o, companyName, trackingLink, "", omitTrackingLink, skippedDocs)
 	htmlWithReceipt := buildDispatchEmailBodyHTML(cfg, o, companyName, companyLogoURL, trackingLink, receiptLink, omitTrackingLink)
 	htmlWithoutReceipt := buildDispatchEmailBodyHTML(cfg, o, companyName, companyLogoURL, trackingLink, "", omitTrackingLink)
 
@@ -227,7 +227,10 @@ func NotifyTrackerOrderStakeholders(c *gin.Context) {
 // reminder) — single source of truth so they never drift out of sync with
 // each other. Exported so trackerdelivery (a separate package) can reuse it
 // for the delivery-reminder email instead of duplicating the field list.
-func DispatchEmailRows(o TrackerOrder) [][2]string {
+// companyName is the sending tracker company (as opposed to o.BookedForCompanyName,
+// the receiving party) — it already appeared in the footer/signature block
+// via TrackerEmailWrapHTML, but not as a row in this table itself.
+func DispatchEmailRows(o TrackerOrder, companyName string) [][2]string {
 	bookedForState := "—"
 	if o.BookedForState != nil && *o.BookedForState != "" {
 		bookedForState = *o.BookedForState
@@ -269,6 +272,7 @@ func DispatchEmailRows(o TrackerOrder) [][2]string {
 	}
 
 	return [][2]string{
+		{"Company", companyName},
 		{"Party Name", o.BookedForCompanyName},
 		{"Party State", bookedForState},
 		{"Consignee", consignee},
@@ -297,8 +301,8 @@ func DispatchEmailRows(o TrackerOrder) [][2]string {
 // attachments (fetch failure or over the size budget — see
 // buildTrackerEmailAttachments), so the "Copy Enclosed" claim doesn't go
 // silently unfulfilled.
-func buildDispatchEmailBody(o TrackerOrder, trackingLink, receiptLink string, omitTrackingLink bool, skippedDocs []string) string {
-	rows := DispatchEmailRows(o)
+func buildDispatchEmailBody(o TrackerOrder, companyName, trackingLink, receiptLink string, omitTrackingLink bool, skippedDocs []string) string {
+	rows := DispatchEmailRows(o, companyName)
 
 	var b strings.Builder
 	b.WriteString("DISPATCH DETAILS\n")
@@ -336,7 +340,7 @@ func buildDispatchEmailBodyHTML(
 	cfg *config.Config, o TrackerOrder, companyName string, companyLogoURL *string,
 	trackingLink, receiptLink string, omitTrackingLink bool,
 ) string {
-	rows := DispatchEmailRows(o)
+	rows := DispatchEmailRows(o, companyName)
 
 	var b strings.Builder
 	b.WriteString(`<p style="font-size:14px;color:#111827;margin:0 0 4px;">Dear Sir,</p>`)

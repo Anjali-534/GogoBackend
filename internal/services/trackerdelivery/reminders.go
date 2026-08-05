@@ -250,7 +250,7 @@ func sendTrackerDeliveryReminderEmail(cfg *config.Config, c candidate, reminderN
 			receiptLink = strings.TrimRight(cfg.TrackerPanelURL, "/") + "/receipt/" + c.receiptToken
 		}
 
-		rows := handlers.DispatchEmailRows(c.order)
+		rows := handlers.DispatchEmailRows(c.order, c.companyName)
 
 		body := buildDeliveryReminderEmailBody(rows, receiptLink, reminderNumber)
 		htmlBody := buildDeliveryReminderEmailBodyHTML(cfg, rows, c.companyName, c.companyLogoURL, receiptLink, reminderNumber)

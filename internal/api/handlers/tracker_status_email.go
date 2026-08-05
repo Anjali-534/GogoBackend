@@ -136,7 +136,7 @@ func sendTrackerOrderStatusEmail(cfg *config.Config, o TrackerOrder, companyName
 			subjectRef = *o.InternalReference
 		}
 		subject := fmt.Sprintf("%s — %s from %s", emailCopy.Headline, subjectRef, companyName)
-		plainBody := buildTrackerStatusEmailBody(cfg, o, status, emailCopy, trackingLink)
+		plainBody := buildTrackerStatusEmailBody(cfg, o, companyName, status, emailCopy, trackingLink)
 
 		if err := mail.Send(cfg, mail.Message{
 			To:          strings.Join(toList, ","),
@@ -154,9 +154,10 @@ func sendTrackerOrderStatusEmail(cfg *config.Config, o TrackerOrder, companyName
 	}()
 }
 
-func buildTrackerStatusEmailBody(cfg *config.Config, o TrackerOrder, status string, emailCopy trackerStatusEmailCopyEntry, trackingLink string) string {
+func buildTrackerStatusEmailBody(cfg *config.Config, o TrackerOrder, companyName, status string, emailCopy trackerStatusEmailCopyEntry, trackingLink string) string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("%s.\n\n", emailCopy.Headline))
+	b.WriteString(fmt.Sprintf("Company: %s\n", companyName))
 	b.WriteString(fmt.Sprintf("Route: %s -> %s\n", o.DispatchFrom, o.DispatchTo))
 	b.WriteString(fmt.Sprintf("Vehicle Number: %s\n", o.VehicleNumber))
 	if o.DriverName != "" {

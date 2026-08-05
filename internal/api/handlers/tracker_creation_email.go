@@ -279,6 +279,7 @@ func buildTrackerCreationEmailBody(o TrackerOrder, companyName, trackingLink str
 	b.WriteString(fmt.Sprintf("A new shipment has been created by %s.\n\n", companyName))
 	b.WriteString("SHIPMENT SUMMARY\n")
 	b.WriteString("=================\n\n")
+	b.WriteString(fmt.Sprintf("Company: %s\n", companyName))
 	b.WriteString(fmt.Sprintf("Route: %s -> %s\n", o.DispatchFrom, o.DispatchTo))
 	b.WriteString(fmt.Sprintf("Material Description: %s\n", material))
 	b.WriteString(fmt.Sprintf("Priority: %s\n", priorityLabel))
@@ -304,11 +305,11 @@ func buildTrackerCreationEmailBody(o TrackerOrder, companyName, trackingLink str
 }
 
 // trackerCreationEmailRows builds the shared [label, value] field list for
-// the creation email's HTML table, mirroring the same Route/Material
+// the creation email's HTML table, mirroring the same Company/Route/Material
 // Description/Priority/Contact Person/Internal Reference fields
 // buildTrackerCreationEmailBody writes as plain text, so the two never drift
 // out of sync.
-func trackerCreationEmailRows(o TrackerOrder) [][2]string {
+func trackerCreationEmailRows(o TrackerOrder, companyName string) [][2]string {
 	material := "—"
 	if o.Material != nil && *o.Material != "" {
 		material = *o.Material
@@ -331,6 +332,7 @@ func trackerCreationEmailRows(o TrackerOrder) [][2]string {
 	}
 
 	rows := [][2]string{
+		{"Company", companyName},
 		{"Route", o.DispatchFrom + " -> " + o.DispatchTo},
 		{"Material Description", material},
 		{"Priority", priorityLabel},
@@ -352,7 +354,7 @@ func buildTrackerCreationEmailBodyHTML(cfg *config.Config, o TrackerOrder, compa
 	var b strings.Builder
 	b.WriteString(`<p style="font-size:14px;color:#111827;margin:0 0 4px;">Dear Sir,</p>`)
 	b.WriteString(`<p style="font-size:14px;color:` + TrackerEmailTextGray + `;margin:0 0 4px;">A new shipment has been created by ` + html.EscapeString(companyName) + `. Please find the shipment summary below.</p>`)
-	b.WriteString(TrackerEmailDetailsTableHTML(trackerCreationEmailRows(o)))
+	b.WriteString(TrackerEmailDetailsTableHTML(trackerCreationEmailRows(o, companyName)))
 
 	b.WriteString(`<div style="margin:4px 0 8px;">`)
 	b.WriteString(TrackerEmailButtonHTML(trackingLink, "Track Shipment Live"))
