@@ -912,10 +912,20 @@ type TrackerLiveMapOrder struct {
 }
 
 // GET /gogoo/tracker/live-map — company-scoped, returns one entry per
-// currently-trackable shipment (dispatched/in_transit with a location fix
-// already reported). Mirrors the same RequireTrackerCompany scoping as every
-// other /tracker/* endpoint; a company with zero qualifying orders gets an
-// empty array, never another company's data.
+// currently-trackable shipment (status = 'in_transit' with a location fix
+// already reported) — the exact same "in transit" definition the dashboard's
+// stat card uses (o.status === 'in_transit' on GET /tracker/orders), so the
+// two never disagree on what counts. Mirrors the same RequireTrackerCompany
+// scoping as every other /tracker/* endpoint; a company with zero qualifying
+// orders gets an empty array, never another company's data.
+//
+// Used to also include 'dispatched' orders and (for trips) any trip whose
+// coarse tracker_trips.overall_status wasn't 'completed'/'cancelled' yet —
+// overall_status only advances on a stop *delivery* event (see
+// advanceTrackerTripAfterDelivery), so a trip sits at 'created' for its
+// entire first leg regardless of the active stop's real status. That let the
+// live map show shipments the dashboard's stricter per-order-status count
+// didn't, which is why the two totals used to drift apart.
 func ListTrackerCompanyLiveMap(c *gin.Context) {
 	companyID := c.GetString("company_id")
 
@@ -927,8 +937,7 @@ func ListTrackerCompanyLiveMap(c *gin.Context) {
 
 	// Legacy/single-stop path — trip_id IS NULL excludes anything that's now
 	// part of a trip (migration 055), which the second query below covers
-	// instead. Otherwise byte-for-byte the same query this endpoint has
-	// always run.
+	// instead.
 	rows, err := pool.Query(ctx, `
 		SELECT id, COALESCE(driver_name,''), vehicle_number, booked_for_company_name,
 		       dispatch_from, dispatch_to, status, last_lat, last_lng, last_location_at,
@@ -936,7 +945,7 @@ func ListTrackerCompanyLiveMap(c *gin.Context) {
 		FROM tracker_orders
 		WHERE company_id = $1
 		  AND trip_id IS NULL
-		  AND status IN ('dispatched', 'in_transit')
+		  AND status = 'in_transit'
 		  AND last_lat IS NOT NULL AND last_lng IS NOT NULL
 		ORDER BY last_location_at DESC NULLS LAST`, companyID)
 	if err != nil {
@@ -961,25 +970,31 @@ func ListTrackerCompanyLiveMap(c *gin.Context) {
 
 	// Trip path — one row per trackable multi-stop trip, joined to its
 	// current active stop (lowest stop_sequence not yet delivered/cancelled)
-	// purely for display context (which consignee/destination is next).
-	// route_distance_km/route_duration_mins have no trip-level equivalent
-	// (route caching is per-stop) so they stay nil on these rows — the
-	// frontend already treats them as optional on every other row.
+	// for both display context (which consignee/destination is next) and,
+	// as of the dashboard-parity fix above, the actual "in transit" filter
+	// itself: active.status = 'in_transit' is the same per-order status the
+	// dashboard checks, not the trip's own coarser overall_status. INNER
+	// JOIN (not LEFT) is deliberate — a trip with no active.status='in_transit'
+	// stop has nothing "in transit" to show here regardless of what
+	// overall_status says. route_distance_km/route_duration_mins have no
+	// trip-level equivalent (route caching is per-stop) so they stay nil on
+	// these rows — the frontend already treats them as optional on every
+	// other row.
 	tripRows, err := pool.Query(ctx, `
 		SELECT t.id, COALESCE(t.driver_name,''), t.vehicle_number,
 		       COALESCE(active.consignee_name,''), t.dispatch_from,
-		       COALESCE(active.dispatch_to,''), t.overall_status,
+		       COALESCE(active.dispatch_to,''), active.status,
 		       t.last_lat, t.last_lng, t.last_location_at
 		FROM tracker_trips t
-		LEFT JOIN LATERAL (
-			SELECT consignee_name, dispatch_to
+		JOIN LATERAL (
+			SELECT consignee_name, dispatch_to, status
 			FROM tracker_orders
 			WHERE trip_id = t.id AND status NOT IN ('delivered','cancelled')
 			ORDER BY stop_sequence ASC
 			LIMIT 1
 		) active ON true
 		WHERE t.company_id = $1
-		  AND t.overall_status IN ('created', 'in_transit')
+		  AND active.status = 'in_transit'
 		  AND t.last_lat IS NOT NULL AND t.last_lng IS NOT NULL
 		ORDER BY t.last_location_at DESC NULLS LAST`, companyID)
 	if err != nil {
