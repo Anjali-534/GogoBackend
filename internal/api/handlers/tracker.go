@@ -912,12 +912,21 @@ type TrackerLiveMapOrder struct {
 }
 
 // GET /gogoo/tracker/live-map — company-scoped, returns one entry per
-// currently-trackable shipment (status = 'in_transit' with a location fix
-// already reported) — the exact same "in transit" definition the dashboard's
-// stat card uses (o.status === 'in_transit' on GET /tracker/orders), so the
-// two never disagree on what counts. Mirrors the same RequireTrackerCompany
-// scoping as every other /tracker/* endpoint; a company with zero qualifying
-// orders gets an empty array, never another company's data.
+// currently-trackable shipment (status = 'in_transit') — the exact same "in
+// transit" definition the dashboard's stat card uses (o.status ===
+// 'in_transit' on GET /tracker/orders), so len(response) always equals the
+// dashboard's count. Mirrors the same RequireTrackerCompany scoping as every
+// other /tracker/* endpoint; a company with zero qualifying orders gets an
+// empty array, never another company's data.
+//
+// Deliberately does NOT require last_lat/last_lng to be set: a shipment can
+// be 'in_transit' before its driver's phone has sent its first GPS ping, and
+// this same response array backs both the dashboard-matching count AND the
+// map pins on the frontend (LiveMapPanel.tsx), which filters it down to rows
+// with non-null coordinates before plotting. Requiring a location fix here
+// used to make the count dip below the dashboard's whenever a shipment
+// hadn't reported in yet — same array, two different jobs, so the filter
+// belongs in the frontend's pin-plotting step, not this query.
 //
 // Used to also include 'dispatched' orders and (for trips) any trip whose
 // coarse tracker_trips.overall_status wasn't 'completed'/'cancelled' yet —
@@ -937,7 +946,13 @@ func ListTrackerCompanyLiveMap(c *gin.Context) {
 
 	// Legacy/single-stop path — trip_id IS NULL excludes anything that's now
 	// part of a trip (migration 055), which the second query below covers
-	// instead.
+	// instead. No last_lat/last_lng requirement here on purpose: this result
+	// set backs both the "IN TRANSIT" count AND the map pins on the frontend
+	// (LiveMapPanel.tsx), and the count must match the dashboard's plain
+	// status='in_transit' count exactly (see doc comment above) even for
+	// orders that haven't reported a GPS fix yet. The frontend filters this
+	// same array down to rows with non-null coordinates before plotting pins,
+	// so a shipment with no fix yet is counted but simply has no pin.
 	rows, err := pool.Query(ctx, `
 		SELECT id, COALESCE(driver_name,''), vehicle_number, booked_for_company_name,
 		       dispatch_from, dispatch_to, status, last_lat, last_lng, last_location_at,
@@ -946,7 +961,6 @@ func ListTrackerCompanyLiveMap(c *gin.Context) {
 		WHERE company_id = $1
 		  AND trip_id IS NULL
 		  AND status = 'in_transit'
-		  AND last_lat IS NOT NULL AND last_lng IS NOT NULL
 		ORDER BY last_location_at DESC NULLS LAST`, companyID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error: " + err.Error()})
@@ -976,7 +990,10 @@ func ListTrackerCompanyLiveMap(c *gin.Context) {
 	// dashboard checks, not the trip's own coarser overall_status. INNER
 	// JOIN (not LEFT) is deliberate — a trip with no active.status='in_transit'
 	// stop has nothing "in transit" to show here regardless of what
-	// overall_status says. route_distance_km/route_duration_mins have no
+	// overall_status says. No last_lat/last_lng requirement, same reasoning
+	// as the legacy query above — count every in-transit trip regardless of
+	// whether it has a GPS fix yet, let the frontend skip the pin for rows
+	// with null coordinates. route_distance_km/route_duration_mins have no
 	// trip-level equivalent (route caching is per-stop) so they stay nil on
 	// these rows — the frontend already treats them as optional on every
 	// other row.
@@ -995,7 +1012,6 @@ func ListTrackerCompanyLiveMap(c *gin.Context) {
 		) active ON true
 		WHERE t.company_id = $1
 		  AND active.status = 'in_transit'
-		  AND t.last_lat IS NOT NULL AND t.last_lng IS NOT NULL
 		ORDER BY t.last_location_at DESC NULLS LAST`, companyID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error: " + err.Error()})
