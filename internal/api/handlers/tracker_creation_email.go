@@ -16,6 +16,7 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net/http"
@@ -136,6 +137,7 @@ func sendTrackerOrderCreationEmail(cfg *config.Config, o TrackerOrder, companyNa
 		}
 		subject := fmt.Sprintf("Shipment Details — %s from %s", subjectRef, companyName)
 		plainBody := buildTrackerCreationEmailBody(o, companyName, trackingLink, skipped)
+		htmlBody := buildTrackerCreationEmailBodyHTML(cfg, o, companyName, companyLogoURL, trackingLink, skipped)
 
 		if err := mail.Send(cfg, mail.Message{
 			To:          strings.Join(toList, ","),
@@ -143,7 +145,7 @@ func sendTrackerOrderCreationEmail(cfg *config.Config, o TrackerOrder, companyNa
 			BCC:         strings.Join(bccEmails, ","),
 			Subject:     subject,
 			Body:        plainBody,
-			HTMLBody:    trackerEmailFromPlainText(cfg, companyName, companyLogoURL, plainBody),
+			HTMLBody:    htmlBody,
 			Attachments: attachments,
 			FromName:    trackerEmailFromName(companyName),
 		}); err != nil {
@@ -299,4 +301,74 @@ func buildTrackerCreationEmailBody(o TrackerOrder, companyName, trackingLink str
 
 	b.WriteString("\nThis is an automated shipment notification sent via Bogie Tracker.\n")
 	return b.String()
+}
+
+// trackerCreationEmailRows builds the shared [label, value] field list for
+// the creation email's HTML table, mirroring the same Route/Material
+// Description/Priority/Contact Person/Internal Reference fields
+// buildTrackerCreationEmailBody writes as plain text, so the two never drift
+// out of sync.
+func trackerCreationEmailRows(o TrackerOrder) [][2]string {
+	material := "—"
+	if o.Material != nil && *o.Material != "" {
+		material = *o.Material
+	}
+
+	contact := "—"
+	if o.ContactPersonName != nil && *o.ContactPersonName != "" {
+		contact = *o.ContactPersonName
+		if o.ContactPersonDesignation != nil && *o.ContactPersonDesignation != "" {
+			contact += " (" + *o.ContactPersonDesignation + ")"
+		}
+		if o.ContactPersonPhone != nil && *o.ContactPersonPhone != "" {
+			contact += " · " + *o.ContactPersonPhone
+		}
+	}
+
+	priorityLabel, ok := map[string]string{"normal": "Normal", "urgent": "Urgent", "same_day": "Same-day"}[o.Priority]
+	if !ok {
+		priorityLabel = "Normal"
+	}
+
+	rows := [][2]string{
+		{"Route", o.DispatchFrom + " -> " + o.DispatchTo},
+		{"Material Description", material},
+		{"Priority", priorityLabel},
+		{"Contact Person", contact},
+	}
+	if o.InternalReference != nil && *o.InternalReference != "" {
+		rows = append(rows, [2]string{"Internal Reference", *o.InternalReference})
+	}
+	return rows
+}
+
+// buildTrackerCreationEmailBodyHTML is the rendered-HTML counterpart of
+// buildTrackerCreationEmailBody — same fields (via trackerCreationEmailRows),
+// same tracking link and skipped-docs note, but as the real bordered
+// FIELD/DETAILS table (TrackerEmailDetailsTableHTML) every other tracker
+// email already uses, instead of the generic plain-text-in-a-box treatment
+// trackerEmailFromPlainText gives everything else.
+func buildTrackerCreationEmailBodyHTML(cfg *config.Config, o TrackerOrder, companyName string, companyLogoURL *string, trackingLink string, skippedDocs []string) string {
+	var b strings.Builder
+	b.WriteString(`<p style="font-size:14px;color:#111827;margin:0 0 4px;">Dear Sir,</p>`)
+	b.WriteString(`<p style="font-size:14px;color:` + TrackerEmailTextGray + `;margin:0 0 4px;">A new shipment has been created by ` + html.EscapeString(companyName) + `. Please find the shipment summary below.</p>`)
+	b.WriteString(TrackerEmailDetailsTableHTML(trackerCreationEmailRows(o)))
+
+	b.WriteString(`<div style="margin:4px 0 8px;">`)
+	b.WriteString(TrackerEmailButtonHTML(trackingLink, "Track Shipment Live"))
+	b.WriteString(`</div>`)
+
+	if len(skippedDocs) > 0 {
+		pronoun := "them"
+		if len(skippedDocs) == 1 {
+			pronoun = "it"
+		}
+		b.WriteString(`<p style="font-size:13px;color:` + TrackerEmailTextGray + `;margin:4px 0 8px;">Note: ` +
+			html.EscapeString(strings.Join(skippedDocs, ", ")) + ` exceeded email size limits and could not be attached. You can view and download ` +
+			pronoun + ` from the tracking page above.</p>`)
+	}
+
+	b.WriteString(`<p style="font-size:12px;color:` + TrackerEmailMutedGray + `;margin-top:18px;">This is an automated shipment notification sent via Bogie Tracker.</p>`)
+
+	return TrackerEmailWrapHTML(cfg, companyName, companyLogoURL, b.String())
 }

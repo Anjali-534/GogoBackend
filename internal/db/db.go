@@ -35,7 +35,7 @@ func Init(cfg *config.Config) error {
 
 func connect(cfg *config.Config) (*DB, error) {
 	connStr := fmt.Sprintf(
-		"postgres://%s:%s@%s:%d/%s?sslmode=require",
+		"postgres://%s:%s@%s:%d/%s?sslmode=disable",
 		cfg.DBUser,
 		cfg.DBPassword,
 		cfg.DBHost,
