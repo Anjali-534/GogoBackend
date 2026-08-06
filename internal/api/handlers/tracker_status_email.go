@@ -19,6 +19,7 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"html"
 	"log"
 	"strings"
 
@@ -67,6 +68,7 @@ func maybeSendTrackerOrderStatusEmail(cfg *config.Config, companyID, orderID, st
 		       o.contact_person_name, o.contact_person_email,
 		       o.booked_for_email, o.public_tracking_token,
 		       o.received_confirmation_token, o.signature_url,
+		       o.received_confirmed_at, o.delivery_condition, o.delivery_condition_reason,
 		       c.company_name, c.logo_url
 		FROM tracker_orders o
 		JOIN tracker_companies c ON c.id = o.company_id
@@ -78,6 +80,7 @@ func maybeSendTrackerOrderStatusEmail(cfg *config.Config, companyID, orderID, st
 		&o.ContactPersonName, &o.ContactPersonEmail,
 		&o.BookedForEmail, &o.PublicTrackingToken,
 		&o.ReceivedConfirmationToken, &o.SignatureURL,
+		&o.ReceivedConfirmedAt, &o.DeliveryCondition, &o.DeliveryConditionReason,
 		&companyName, &companyLogoURL,
 	)
 	if err != nil {
@@ -136,7 +139,19 @@ func sendTrackerOrderStatusEmail(cfg *config.Config, o TrackerOrder, companyName
 			subjectRef = *o.InternalReference
 		}
 		subject := fmt.Sprintf("%s — %s from %s", emailCopy.Headline, subjectRef, companyName)
-		plainBody := buildTrackerStatusEmailBody(cfg, o, companyName, status, emailCopy, trackingLink)
+
+		var plainBody, htmlBody string
+		if status == "delivered" {
+			// Delivered gets its own bespoke builder (table layout + real
+			// delivery-condition status) instead of the generic
+			// plain-text-in-a-box every other status transition uses — see
+			// buildTrackerDeliveredEmailBody/HTML below.
+			plainBody = buildTrackerDeliveredEmailBody(cfg, o, companyName)
+			htmlBody = buildTrackerDeliveredEmailBodyHTML(cfg, o, companyName, companyLogoURL)
+		} else {
+			plainBody = buildTrackerStatusEmailBody(o, companyName, status, emailCopy, trackingLink)
+			htmlBody = trackerEmailFromPlainText(cfg, companyName, companyLogoURL, plainBody)
+		}
 
 		if err := mail.Send(cfg, mail.Message{
 			To:          strings.Join(toList, ","),
@@ -144,7 +159,7 @@ func sendTrackerOrderStatusEmail(cfg *config.Config, o TrackerOrder, companyName
 			BCC:         strings.Join(bccEmails, ","),
 			Subject:     subject,
 			Body:        plainBody,
-			HTMLBody:    trackerEmailFromPlainText(cfg, companyName, companyLogoURL, plainBody),
+			HTMLBody:    htmlBody,
 			Attachments: attachments,
 			FromName:    trackerEmailFromName(companyName),
 			ReplyTo:     trackerNoReplyAddress,
@@ -154,7 +169,10 @@ func sendTrackerOrderStatusEmail(cfg *config.Config, o TrackerOrder, companyName
 	}()
 }
 
-func buildTrackerStatusEmailBody(cfg *config.Config, o TrackerOrder, companyName, status string, emailCopy trackerStatusEmailCopyEntry, trackingLink string) string {
+// buildTrackerStatusEmailBody builds the plain-text body for every
+// non-delivered tracked transition (dispatched, in_transit, cancelled) —
+// delivered has its own dedicated builder below.
+func buildTrackerStatusEmailBody(o TrackerOrder, companyName, status string, emailCopy trackerStatusEmailCopyEntry, trackingLink string) string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("%s.\n\n", emailCopy.Headline))
 	b.WriteString(fmt.Sprintf("Company: %s\n", companyName))
@@ -178,19 +196,120 @@ func buildTrackerStatusEmailBody(cfg *config.Config, o TrackerOrder, companyName
 	case "cancelled":
 		// Nothing left to track — omit the tracking link entirely rather
 		// than sending the recipient to a dead-feeling status page.
-	case "delivered":
-		b.WriteString(fmt.Sprintf("\nTrack this shipment: %s\n", trackingLink))
-		if o.SignatureURL != nil && *o.SignatureURL != "" {
-			b.WriteString("\nSigned proof of delivery is attached to this email.\n")
-		}
-		if o.ReceivedConfirmationToken != nil && *o.ReceivedConfirmationToken != "" {
-			receiptLink := strings.TrimRight(cfg.TrackerPanelURL, "/") + "/receipt/" + *o.ReceivedConfirmationToken
-			b.WriteString(fmt.Sprintf("\nOnce your goods arrive, confirm receipt here: %s\n", receiptLink))
-		}
 	default:
 		b.WriteString(fmt.Sprintf("\nTrack this shipment live: %s\n", trackingLink))
 	}
 
 	b.WriteString("\nThis is an automated message from Bogie Tracker — please do not reply to this email.\n")
 	return b.String()
+}
+
+// trackerStatusEmailRows builds the [label, value] rows for the delivered
+// email's FIELD/DETAILS table — Company, Route, Vehicle Number, Driver,
+// mirroring trackerCreationEmailRows' shape so every tracker email's table
+// looks the same.
+func trackerStatusEmailRows(o TrackerOrder, companyName string) [][2]string {
+	rows := [][2]string{
+		{"Company", companyName},
+		{"Route", o.DispatchFrom + " -> " + o.DispatchTo},
+		{"Vehicle Number", o.VehicleNumber},
+	}
+	if o.DriverName != "" {
+		driver := o.DriverName
+		if o.DriverPhone != "" {
+			driver += " (" + o.DriverPhone + ")"
+		}
+		rows = append(rows, [2]string{"Driver", driver})
+	}
+	return rows
+}
+
+const trackerDeliveryTimestampFormat = "02 Jan 2006, 3:04 PM"
+
+// buildTrackerDeliveredEmailBody is the plain-text delivered-status body —
+// the FIELD/DETAILS table (as text) plus the real delivery-condition
+// status pulled from received_confirmed_at/delivery_condition/
+// delivery_condition_reason (migration 049), instead of a tracking link.
+// No tracking link at all here — see buildTrackerDeliveredEmailBodyHTML for
+// why it's dropped for this status specifically.
+func buildTrackerDeliveredEmailBody(cfg *config.Config, o TrackerOrder, companyName string) string {
+	var b strings.Builder
+	b.WriteString("Your Shipment Has Been Delivered.\n\n")
+	b.WriteString(TrackerEmailDetailsTableText(trackerStatusEmailRows(o, companyName)))
+
+	if o.SignatureURL != nil && *o.SignatureURL != "" {
+		b.WriteString("\nSigned proof of delivery is attached to this email.\n")
+	}
+
+	b.WriteString("\n")
+	switch {
+	case o.ReceivedConfirmedAt == nil:
+		// Consignee hasn't responded on the receipt page yet — nothing to
+		// report, so this is the one case that still gets the link.
+		if o.ReceivedConfirmationToken != nil && *o.ReceivedConfirmationToken != "" {
+			receiptLink := strings.TrimRight(cfg.TrackerPanelURL, "/") + "/receipt/" + *o.ReceivedConfirmationToken
+			b.WriteString(fmt.Sprintf("Once your goods arrive, confirm receipt here: %s\n", receiptLink))
+		}
+	case o.DeliveryCondition != nil && *o.DeliveryCondition == "bad":
+		b.WriteString("❌ Reported — not in good condition\n")
+		if o.DeliveryConditionReason != nil && *o.DeliveryConditionReason != "" {
+			b.WriteString(fmt.Sprintf("Reason: %s\n", *o.DeliveryConditionReason))
+		}
+		b.WriteString(fmt.Sprintf("Reported on %s\n", o.ReceivedConfirmedAt.Format(trackerDeliveryTimestampFormat)))
+	default:
+		b.WriteString("✅ Received in good condition\n")
+		b.WriteString(fmt.Sprintf("Confirmed on %s\n", o.ReceivedConfirmedAt.Format(trackerDeliveryTimestampFormat)))
+	}
+
+	b.WriteString("\nThis is an automated message from Bogie Tracker — please do not reply to this email.\n")
+	return b.String()
+}
+
+// buildTrackerDeliveredEmailBodyHTML is the rendered-HTML counterpart of
+// buildTrackerDeliveredEmailBody — same FIELD/DETAILS table
+// (TrackerEmailDetailsTableHTML) every other tracker email already uses,
+// plus a green/red condition badge in place of the old "Track this
+// shipment" + "Confirm receipt here" link pair. The tracking link is
+// dropped entirely for delivered — the shipment has already arrived, so a
+// live-tracking link is dead weight on a status that means tracking is
+// over; unlike dispatched/in_transit, where it's the whole point of the
+// email.
+func buildTrackerDeliveredEmailBodyHTML(cfg *config.Config, o TrackerOrder, companyName string, companyLogoURL *string) string {
+	var b strings.Builder
+	b.WriteString(`<p style="font-size:14px;color:#111827;margin:0 0 4px;">Your Shipment Has Been Delivered.</p>`)
+	b.WriteString(TrackerEmailDetailsTableHTML(trackerStatusEmailRows(o, companyName)))
+
+	if o.SignatureURL != nil && *o.SignatureURL != "" {
+		b.WriteString(`<p style="font-size:13px;color:` + TrackerEmailTextGray + `;margin:0 0 8px;">Signed proof of delivery is attached to this email.</p>`)
+	}
+
+	switch {
+	case o.ReceivedConfirmedAt == nil:
+		if o.ReceivedConfirmationToken != nil && *o.ReceivedConfirmationToken != "" {
+			receiptLink := strings.TrimRight(cfg.TrackerPanelURL, "/") + "/receipt/" + *o.ReceivedConfirmationToken
+			b.WriteString(`<div style="margin:4px 0 8px;">`)
+			b.WriteString(TrackerEmailButtonHTML(receiptLink, "Confirm Receipt"))
+			b.WriteString(`</div>`)
+		}
+	case o.DeliveryCondition != nil && *o.DeliveryCondition == "bad":
+		b.WriteString(`<div style="text-align:center;padding:16px 0;">`)
+		b.WriteString(`<p style="font-size:15px;font-weight:700;color:#DC2626;margin:0 0 8px;">&#10060; Reported — not in good condition</p>`)
+		if o.DeliveryConditionReason != nil && *o.DeliveryConditionReason != "" {
+			b.WriteString(`<p style="font-size:13px;color:#6B7280;background-color:#F9FAFB;border-radius:12px;padding:12px;text-align:left;margin:0 0 8px;">` +
+				html.EscapeString(*o.DeliveryConditionReason) + `</p>`)
+		}
+		b.WriteString(`<p style="font-size:12px;color:` + TrackerEmailMutedGray + `;margin:0;">Reported on ` +
+			o.ReceivedConfirmedAt.Format(trackerDeliveryTimestampFormat) + `</p>`)
+		b.WriteString(`</div>`)
+	default:
+		b.WriteString(`<div style="text-align:center;padding:16px 0;">`)
+		b.WriteString(`<p style="font-size:15px;font-weight:700;color:#16A34A;margin:0 0 8px;">&#9989; Received in good condition</p>`)
+		b.WriteString(`<p style="font-size:12px;color:` + TrackerEmailMutedGray + `;margin:0;">Confirmed on ` +
+			o.ReceivedConfirmedAt.Format(trackerDeliveryTimestampFormat) + `</p>`)
+		b.WriteString(`</div>`)
+	}
+
+	b.WriteString(`<p style="font-size:12px;color:` + TrackerEmailMutedGray + `;margin-top:18px;">This is an automated message from Bogie Tracker — please do not reply to this email.</p>`)
+
+	return TrackerEmailWrapHTML(cfg, companyName, companyLogoURL, b.String())
 }
