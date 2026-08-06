@@ -113,6 +113,8 @@ func getVehicleCategory(vehicleType string) string {
 	if strings.Contains(vehicleType, "ambulance") || strings.Contains(vehicleType, "life_support") {
 		return "ambulance"
 	}
+	// parcel_2w falls through to here and correctly lands on "two_wheeler"
+	// (rc/insurance/puc/vehicle_photo) — same doc set a 2-wheeler needs.
 	return "two_wheeler"
 }
 

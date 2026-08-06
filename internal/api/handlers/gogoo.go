@@ -106,6 +106,8 @@ func DriverSignup(c *gin.Context) {
 			req.VehicleCategory = "truck"
 		case len(req.VehicleType) >= 9 && req.VehicleType[:9] == "ambulance":
 			req.VehicleCategory = "ambulance"
+		case len(req.VehicleType) >= 7 && req.VehicleType[:7] == "parcel_":
+			req.VehicleCategory = "parcel"
 		default:
 			req.VehicleCategory = "cab"
 		}
@@ -727,6 +729,8 @@ func vehicleCategoryFromType(vType string) string {
 		return "truck"
 	case len(vType) >= 9 && vType[:9] == "ambulance":
 		return "ambulance"
+	case len(vType) >= 7 && vType[:7] == "parcel_":
+		return "parcel"
 	case vType == "cab_2w" || vType == "cab_3w" || vType == "cab_4w" || vType == "cab_4w_suv":
 		return "cab"
 	default:
@@ -735,11 +739,18 @@ func vehicleCategoryFromType(vType string) string {
 }
 
 func ListDrivers(c *gin.Context) {
-	categoryFilter := c.Query("category") // "cab" | "truck" | "ambulance" — empty means no filter
+	categoryFilter := c.Query("category") // "cab" | "truck" | "ambulance" | "parcel" — empty means no filter
 	// cab/truck/ambulance panels are locked to their own category regardless
 	// of what they pass in ?category= — master and support may query any.
+	// truck-panel is additionally allowed 'parcel' — folded into truck-panel
+	// operationally, no dedicated parcel-panel app (migration 056).
 	if role := c.GetString("role"); role != "master_admin" {
-		if panel := c.GetString("panel"); panel == "cab" || panel == "truck" || panel == "ambulance" {
+		switch panel := c.GetString("panel"); panel {
+		case "truck":
+			if categoryFilter != "parcel" {
+				categoryFilter = "truck"
+			}
+		case "cab", "ambulance":
 			categoryFilter = panel
 		}
 	}
@@ -1630,6 +1641,9 @@ func cancellationFeeForVehicle(vehicleType string) float64 {
 	}
 	if strings.HasPrefix(vehicleType, "truck_") {
 		return 50
+	}
+	if strings.HasPrefix(vehicleType, "parcel_") {
+		return 20
 	}
 	return 0
 }

@@ -86,7 +86,7 @@ func ListLiveDrivers(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// GET /gogoo/live/bookings?category=cab|truck|ambulance
+// GET /gogoo/live/bookings?category=cab|truck|ambulance|parcel
 // Active bookings (searching/accepted/arriving/in_progress), for admin-panel live maps.
 func ListLiveBookings(c *gin.Context) {
 	ctx := context.Background()

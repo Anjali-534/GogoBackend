@@ -420,16 +420,23 @@ func CreateNotification(c *gin.Context) {
 	// their own driver category (never riders, never another category, never
 	// hospitals); ambulance gets its drivers plus the hospitals lane (hospitals
 	// are web-portal-only — in-portal inbox, no push); support can target
-	// riders or drivers of any category but not hospitals.
+	// riders or drivers of any category but not hospitals. truck-panel is
+	// additionally allowed to target 'parcel' drivers instead of 'truck' —
+	// folded into truck-panel operationally, no dedicated parcel-panel app
+	// (migration 056) — but never anything outside {truck, parcel}.
 	if c.GetString("role") != "master_admin" {
 		switch panel := c.GetString("panel"); panel {
 		case "cab", "truck":
 			req.TargetAudience = "drivers"
-			req.TargetCategory = panel
+			targetCategory := panel
+			if panel == "truck" && req.TargetCategory == "parcel" {
+				targetCategory = "parcel"
+			}
+			req.TargetCategory = targetCategory
 			req.TargetHospitalID = ""
 			req.TargetHospitalIDs = nil
 			if len(req.TargetUserIDs) > 0 {
-				ok, err := allDriversInCategory(context.Background(), req.TargetUserIDs, panel)
+				ok, err := allDriversInCategory(context.Background(), req.TargetUserIDs, targetCategory)
 				if err != nil {
 					c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to validate recipients"})
 					return
@@ -755,14 +762,19 @@ func GetHospitalNotificationUnreadCount(c *gin.Context) {
 // ambulance panels only see broadcasts sent within their own category
 // (every broadcast they create is stamped with that category server-side,
 // so this filter is precise); support sees everything, same as master.
+// truck-panel's filter additionally includes 'parcel' — folded into
+// truck-panel operationally, no dedicated parcel-panel app (migration 056).
 func AdminListNotifications(c *gin.Context) {
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 
-	categoryFilter := ""
+	categoryFilter := []string{}
 	if c.GetString("role") != "master_admin" {
-		if panel := c.GetString("panel"); panel == "cab" || panel == "truck" || panel == "ambulance" {
-			categoryFilter = panel
+		switch panel := c.GetString("panel"); panel {
+		case "cab", "ambulance":
+			categoryFilter = []string{panel}
+		case "truck":
+			categoryFilter = []string{"truck", "parcel"}
 		}
 	}
 
@@ -784,7 +796,7 @@ func AdminListNotifications(c *gin.Context) {
 		       n.is_active, n.created_at,
 		       (SELECT COUNT(*) FROM notification_reads nr WHERE nr.notification_id = n.id) AS read_count
 		FROM notifications n
-		WHERE ($1 = '' OR n.target_category = $1)
+		WHERE (cardinality($1::text[]) = 0 OR n.target_category = ANY($1::text[]))
 		  AND ($2::timestamptz IS NULL OR n.created_at >= $2)
 		  AND ($3::timestamptz IS NULL OR n.created_at <= $3)
 		ORDER BY n.created_at `+dateutil.ParseSort(c.Query("sort"))+`
@@ -839,7 +851,9 @@ func DeleteNotification(c *gin.Context) {
 	pool := db.GetDB().GetPool()
 
 	// cab/truck/ambulance may only discontinue broadcasts in their own
-	// category; support and master can discontinue anything.
+	// category; support and master can discontinue anything. truck-panel
+	// may also discontinue 'parcel' broadcasts — folded into truck-panel
+	// operationally, no dedicated parcel-panel app (migration 056).
 	if c.GetString("role") != "master_admin" {
 		if panel := c.GetString("panel"); panel == "cab" || panel == "truck" || panel == "ambulance" {
 			var category string
@@ -848,7 +862,8 @@ func DeleteNotification(c *gin.Context) {
 				c.JSON(http.StatusNotFound, gin.H{"error": "notification not found"})
 				return
 			}
-			if category != panel {
+			allowed := category == panel || (panel == "truck" && category == "parcel")
+			if !allowed {
 				c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
 				return
 			}
