@@ -1538,3 +1538,26 @@ UPDATE service_types SET length_m = 7.3, weight_capacity_kg = 10000, fuel_types 
 
 UPDATE service_types SET length_m = 10.0, weight_capacity_kg = 20000, fuel_types = ARRAY['diesel']
   WHERE slug = 'truck_os_trailer';
+
+-- ===== 056_parcel_category.sql =====
+
+-- Parcel was seeded under category='truck' as a stopgap (see 054's insert
+-- above). Parcel is a genuine top-level category — folded operationally
+-- into truck-panel, but a distinct category value in service_types/bookings.
+UPDATE service_types SET category = 'parcel' WHERE slug = 'parcel_2w';
+
+ALTER TABLE drivers DROP CONSTRAINT IF EXISTS drivers_vehicle_type_check;
+ALTER TABLE drivers ADD CONSTRAINT drivers_vehicle_type_check
+  CHECK (vehicle_type IN (
+    -- Trucks — within city
+    'truck_city_tata_ace','truck_city_14ft','truck_city_open','truck_city_container',
+    'truck_city_eloader','truck_city_eeco','truck_city_pickup8ft',
+    -- Trucks — outstation
+    'truck_os_14ft','truck_os_20ft','truck_os_container','truck_os_trailer',
+    -- Cabs
+    'cab_2w','cab_3w','cab_4w','cab_4w_suv',
+    -- Ambulance
+    'ambulance_bls','ambulance_als','ambulance_transport',
+    -- Parcel
+    'parcel_2w'
+  ));

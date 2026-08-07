@@ -1202,7 +1202,7 @@ func GetPublicStats(c *gin.Context) {
 func ListPayments(c *gin.Context) {
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
-	query := `SELECT p.id, p.amount, p.platform_fee, p.driver_earnings, p.method, p.status, p.created_at, u.name as rider_name, b.pickup_address, b.drop_address FROM payments p JOIN riders r ON r.id=p.rider_id JOIN users u ON u.id=r.user_id JOIN bookings b ON b.id=p.booking_id`
+	query := `SELECT p.id, p.amount, p.platform_fee, p.driver_earnings, p.method, p.status, p.created_at, u.name as rider_name, b.pickup_address, b.drop_address, COALESCE(st.category,'') FROM payments p JOIN riders r ON r.id=p.rider_id JOIN users u ON u.id=r.user_id JOIN bookings b ON b.id=p.booking_id LEFT JOIN service_types st ON st.id=b.service_type_id`
 	args := []interface{}{}
 	if rangeKey := c.Query("range"); rangeKey != "" {
 		_, dr := dateutil.Resolve(rangeKey, time.Time{}, c.Query("from"), c.Query("to"))
@@ -1218,11 +1218,11 @@ func ListPayments(c *gin.Context) {
 	defer rows.Close()
 	var payments []map[string]interface{}
 	for rows.Next() {
-		var id, method, status, riderName, pickup, drop string
+		var id, method, status, riderName, pickup, drop, category string
 		var amount, fee, earnings float64
 		var createdAt time.Time
-		rows.Scan(&id, &amount, &fee, &earnings, &method, &status, &createdAt, &riderName, &pickup, &drop)
-		payments = append(payments, map[string]interface{}{"id": id, "amount": amount, "platform_fee": fee, "driver_earnings": earnings, "method": method, "status": status, "created_at": createdAt, "rider_name": riderName, "pickup_address": pickup, "drop_address": drop})
+		rows.Scan(&id, &amount, &fee, &earnings, &method, &status, &createdAt, &riderName, &pickup, &drop, &category)
+		payments = append(payments, map[string]interface{}{"id": id, "amount": amount, "platform_fee": fee, "driver_earnings": earnings, "method": method, "status": status, "created_at": createdAt, "rider_name": riderName, "pickup_address": pickup, "drop_address": drop, "category": category})
 	}
 	c.JSON(http.StatusOK, payments)
 }
