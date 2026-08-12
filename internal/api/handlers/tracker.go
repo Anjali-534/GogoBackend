@@ -1728,33 +1728,23 @@ func UpdateTrackerCompanyOrderDetails(c *gin.Context) {
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 
-	// Trip stop-edit guard (migration 055). Deliberately keyed off "this
-	// trip actually has more than one stop", not just "trip_id IS NOT
-	// NULL" — every order gets an (often single-stop) trip now (see
-	// CreateTrackerCompanyOrder), and gating edits on trip_id alone would
-	// silently lock down editing for effectively every order in the
-	// product the moment it leaves 'created'/'loading', not just genuine
-	// multi-drop runs. A single-stop trip behaves exactly like today.
+	// Status guard: editing is locked once an order leaves created/loading.
+	// Previously this only fired for genuine multi-stop trips (trip_id set
+	// AND stopCount > 1), which left single-stop orders — the vast majority
+	// — editable via this endpoint at any status, including
+	// delivered/cancelled. Generalized to apply uniformly regardless of
+	// trip_id/stop count, since there's no reason a single-stop order should
+	// be less protected than a multi-stop one.
 	var currentStatus string
-	var tripID *string
 	if err := pool.QueryRow(ctx, `
-		SELECT status, trip_id FROM tracker_orders WHERE id=$1 AND company_id=$2
-	`, orderID, companyID).Scan(&currentStatus, &tripID); err != nil {
+		SELECT status FROM tracker_orders WHERE id=$1 AND company_id=$2
+	`, orderID, companyID).Scan(&currentStatus); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
 		return
 	}
-	if tripID != nil {
-		var stopCount int
-		if err := pool.QueryRow(ctx, `
-			SELECT COUNT(*) FROM tracker_orders WHERE trip_id=$1
-		`, *tripID).Scan(&stopCount); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check trip"})
-			return
-		}
-		if stopCount > 1 && currentStatus != "created" && currentStatus != "loading" {
-			c.JSON(http.StatusConflict, gin.H{"error": "this stop has already been dispatched and can no longer be edited"})
-			return
-		}
+	if currentStatus != "created" && currentStatus != "loading" {
+		c.JSON(http.StatusConflict, gin.H{"error": "this stop has already been dispatched and can no longer be edited"})
+		return
 	}
 
 	tx, err := pool.Begin(ctx)
