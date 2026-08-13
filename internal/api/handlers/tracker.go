@@ -2301,6 +2301,105 @@ func DeleteTrackerOrderDocument(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "document removed"})
 }
 
+// DELETE /gogoo/tracker/orders/:id — only while status='created', the
+// earliest state (before loading/dispatch). Deliberately tighter than the
+// edit-flow guard (created OR loading, see UpdateTrackerCompanyOrderDetails
+// above) — editing details on a loading order is fine, but removing the
+// order entirely once loading has started is not, since by then a driver/
+// vehicle may already be staged against it.
+//
+// If the order is one stop in a multi-stop trip, the remaining stops'
+// stop_sequence values are renumbered contiguously (no gaps), and the
+// now-empty tracker_trips row is removed if this was the last stop.
+func DeleteTrackerCompanyOrder(c *gin.Context) {
+	companyID := c.GetString("company_id")
+	orderID := c.Param("id")
+
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	var currentStatus string
+	var tripID *string
+	var stopSequence int
+	if err := tx.QueryRow(ctx, `
+		SELECT status, trip_id, stop_sequence FROM tracker_orders
+		WHERE id=$1 AND company_id=$2
+		FOR UPDATE
+	`, orderID, companyID).Scan(&currentStatus, &tripID, &stopSequence); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
+		return
+	}
+	if currentStatus != "created" {
+		c.JSON(http.StatusConflict, gin.H{"error": "this order has already moved past the created stage and can no longer be deleted"})
+		return
+	}
+
+	// Documents cascade-delete with the order (ON DELETE CASCADE), but their
+	// Cloudinary-hosted files don't clean themselves up — same pattern as
+	// DeleteTrackerOrderDocument above, just gathered for every document on
+	// this order instead of one.
+	docRows, err := tx.Query(ctx, `SELECT file_url FROM tracker_order_documents WHERE order_id=$1`, orderID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	var fileURLs []string
+	for docRows.Next() {
+		var fileURL string
+		if err := docRows.Scan(&fileURL); err == nil {
+			fileURLs = append(fileURLs, fileURL)
+		}
+	}
+	docRows.Close()
+
+	if _, err := tx.Exec(ctx, `DELETE FROM tracker_orders WHERE id=$1 AND company_id=$2`, orderID, companyID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+		return
+	}
+
+	if tripID != nil {
+		if _, err := tx.Exec(ctx, `
+			UPDATE tracker_orders SET stop_sequence = stop_sequence - 1
+			WHERE trip_id=$1 AND stop_sequence > $2
+		`, *tripID, stopSequence); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to renumber remaining stops"})
+			return
+		}
+
+		var remainingStops int
+		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM tracker_orders WHERE trip_id=$1`, *tripID).Scan(&remainingStops); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+			return
+		}
+		if remainingStops == 0 {
+			if _, err := tx.Exec(ctx, `DELETE FROM tracker_trips WHERE id=$1 AND company_id=$2`, *tripID, companyID); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to remove empty trip"})
+				return
+			}
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit"})
+		return
+	}
+
+	for _, fileURL := range fileURLs {
+		if strings.HasPrefix(fileURL, "https://res.cloudinary.com") {
+			go deleteFromCloudinary(fileURL)
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "order removed"})
+}
+
 // allowedLogoMimeTypes restricts logo uploads to images only — unlike KYC
 // documents and e-way bills, a PDF doesn't make sense as a company logo.
 var allowedLogoMimeTypes = map[string]string{
