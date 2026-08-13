@@ -58,30 +58,48 @@ func maybeSendTrackerOrderStatusEmail(cfg *config.Config, companyID, orderID, st
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 
+	// Fetches every field trackerFullOrderEmailRows (the shared comprehensive
+	// FIELD/DETAILS table — see tracker_email_html.go) reads, not just the
+	// handful the old narrower per-status tables used — every status-change
+	// email now shows the same complete dispatch-sheet picture.
 	var o TrackerOrder
-	var companyName string
+	var companyName, companyGSTIN string
 	var companyLogoURL *string
 	err := pool.QueryRow(ctx, `
-		SELECT o.id, o.dispatch_from, o.dispatch_to, o.vehicle_number,
+		SELECT o.id, o.booked_for_company_name, o.booked_for_phone, o.booked_for_email,
+		       o.booked_for_gstin, o.booked_for_state,
+		       o.dispatch_from, o.dispatch_to,
+		       COALESCE(o.transporter_name,''), COALESCE(o.transporter_phone,''),
 		       COALESCE(o.driver_name,''), COALESCE(o.driver_phone,''),
-		       COALESCE(o.transporter_name,''), o.internal_reference,
-		       o.contact_person_name, o.contact_person_email,
-		       o.booked_for_email, o.public_tracking_token,
+		       o.vehicle_number, COALESCE(o.eway_bill_number,''),
+		       o.consignee_name, o.consignee_email, o.consignee_gstin, o.consignee_state,
+		       o.material, o.quantity, o.documents_enclosed,
+		       o.registered_address, o.factory_address,
+		       o.contact_person_name, o.contact_person_phone, o.contact_person_email, o.contact_person_designation,
+		       o.priority, o.expected_delivery_date, o.declared_value, o.special_handling, o.internal_reference,
+		       o.public_tracking_token,
 		       o.received_confirmation_token, o.signature_url,
 		       o.received_confirmed_at, o.delivery_condition, o.delivery_condition_reason,
-		       c.company_name, c.logo_url
+		       c.company_name, c.logo_url, COALESCE(c.gstin,'')
 		FROM tracker_orders o
 		JOIN tracker_companies c ON c.id = o.company_id
 		WHERE o.id = $1 AND o.company_id = $2
 	`, orderID, companyID).Scan(
-		&o.ID, &o.DispatchFrom, &o.DispatchTo, &o.VehicleNumber,
+		&o.ID, &o.BookedForCompanyName, &o.BookedForPhone, &o.BookedForEmail,
+		&o.BookedForGstin, &o.BookedForState,
+		&o.DispatchFrom, &o.DispatchTo,
+		&o.TransporterName, &o.TransporterPhone,
 		&o.DriverName, &o.DriverPhone,
-		&o.TransporterName, &o.InternalReference,
-		&o.ContactPersonName, &o.ContactPersonEmail,
-		&o.BookedForEmail, &o.PublicTrackingToken,
+		&o.VehicleNumber, &o.EwayBillNumber,
+		&o.ConsigneeName, &o.ConsigneeEmail, &o.ConsigneeGstin, &o.ConsigneeState,
+		&o.Material, &o.Quantity, &o.DocumentsEnclosed,
+		&o.RegisteredAddress, &o.FactoryAddress,
+		&o.ContactPersonName, &o.ContactPersonPhone, &o.ContactPersonEmail, &o.ContactPersonDesignation,
+		&o.Priority, &o.ExpectedDeliveryDate, &o.DeclaredValue, &o.SpecialHandling, &o.InternalReference,
+		&o.PublicTrackingToken,
 		&o.ReceivedConfirmationToken, &o.SignatureURL,
 		&o.ReceivedConfirmedAt, &o.DeliveryCondition, &o.DeliveryConditionReason,
-		&companyName, &companyLogoURL,
+		&companyName, &companyLogoURL, &companyGSTIN,
 	)
 	if err != nil {
 		log.Printf("tracker status email: failed to load order=%s status=%s: %v", orderID, status, err)
@@ -94,10 +112,10 @@ func maybeSendTrackerOrderStatusEmail(cfg *config.Config, companyID, orderID, st
 		return
 	}
 
-	sendTrackerOrderStatusEmail(cfg, o, companyName, companyLogoURL, status, emailCopy, ccEmails, bccEmails)
+	sendTrackerOrderStatusEmail(cfg, o, companyName, companyGSTIN, companyLogoURL, status, emailCopy, ccEmails, bccEmails)
 }
 
-func sendTrackerOrderStatusEmail(cfg *config.Config, o TrackerOrder, companyName string, companyLogoURL *string, status string, emailCopy trackerStatusEmailCopyEntry, ccEmails, bccEmails []string) {
+func sendTrackerOrderStatusEmail(cfg *config.Config, o TrackerOrder, companyName, companyGSTIN string, companyLogoURL *string, status string, emailCopy trackerStatusEmailCopyEntry, ccEmails, bccEmails []string) {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -142,15 +160,14 @@ func sendTrackerOrderStatusEmail(cfg *config.Config, o TrackerOrder, companyName
 
 		var plainBody, htmlBody string
 		if status == "delivered" {
-			// Delivered gets its own bespoke builder (table layout + real
-			// delivery-condition status) instead of the generic
-			// plain-text-in-a-box every other status transition uses — see
-			// buildTrackerDeliveredEmailBody/HTML below.
-			plainBody = buildTrackerDeliveredEmailBody(cfg, o, companyName)
-			htmlBody = buildTrackerDeliveredEmailBodyHTML(cfg, o, companyName, companyLogoURL)
+			// Delivered gets its own bespoke builder (comprehensive table +
+			// real delivery-condition status in place of a tracking link) —
+			// see buildTrackerDeliveredEmailBody/HTML below.
+			plainBody = buildTrackerDeliveredEmailBody(cfg, o, companyName, companyGSTIN)
+			htmlBody = buildTrackerDeliveredEmailBodyHTML(cfg, o, companyName, companyGSTIN, companyLogoURL)
 		} else {
-			plainBody = buildTrackerStatusEmailBody(o, companyName, status, emailCopy, trackingLink)
-			htmlBody = buildTrackerStatusEmailBodyHTML(cfg, o, companyName, companyLogoURL, status, emailCopy, trackingLink)
+			plainBody = buildTrackerStatusEmailBody(o, companyName, companyGSTIN, status, emailCopy, trackingLink)
+			htmlBody = buildTrackerStatusEmailBodyHTML(cfg, o, companyName, companyGSTIN, companyLogoURL, status, emailCopy, trackingLink)
 		}
 
 		if err := mail.Send(cfg, mail.Message{
@@ -169,45 +186,16 @@ func sendTrackerOrderStatusEmail(cfg *config.Config, o TrackerOrder, companyName
 	}()
 }
 
-// trackerStatusChangeEmailRows builds the [label, value] rows for the
-// dispatched/in_transit/cancelled status emails' FIELD/DETAILS table — same
-// fields (Company, Route, Vehicle Number, Driver, Transporter, Internal
-// Reference) buildTrackerStatusEmailBody used to write as "Label: value"
-// plain-text lines, so the plain-text and HTML versions below never drift
-// out of sync with each other. Kept separate from trackerStatusEmailRows
-// (delivered's row set) since delivered intentionally shows a different,
-// narrower field list.
-func trackerStatusChangeEmailRows(o TrackerOrder, companyName string) [][2]string {
-	rows := [][2]string{
-		{"Company", companyName},
-		{"Route", o.DispatchFrom + " -> " + o.DispatchTo},
-		{"Vehicle Number", o.VehicleNumber},
-	}
-	if o.DriverName != "" {
-		driver := o.DriverName
-		if o.DriverPhone != "" {
-			driver += " (" + o.DriverPhone + ")"
-		}
-		rows = append(rows, [2]string{"Driver", driver})
-	}
-	if o.TransporterName != "" {
-		rows = append(rows, [2]string{"Transporter", o.TransporterName})
-	}
-	if o.InternalReference != nil && *o.InternalReference != "" {
-		rows = append(rows, [2]string{"Internal Reference", *o.InternalReference})
-	}
-	return rows
-}
-
 // buildTrackerStatusEmailBody builds the plain-text body for every
 // non-delivered tracked transition (dispatched, in_transit, cancelled) —
-// delivered has its own dedicated builder below. Same SR/HEADS/DESCRIPTION
-// table (via TrackerEmailDetailsTableText) every other tracker plain-text
-// email already uses, instead of "Label: value" lines.
-func buildTrackerStatusEmailBody(o TrackerOrder, companyName, status string, emailCopy trackerStatusEmailCopyEntry, trackingLink string) string {
+// delivered has its own dedicated builder below. Uses the same shared
+// comprehensive FIELD/DETAILS table (trackerFullOrderEmailRows, see
+// tracker_email_html.go) as every other tracker order email now, instead of
+// a narrower per-status field list.
+func buildTrackerStatusEmailBody(o TrackerOrder, companyName, companyGSTIN, status string, emailCopy trackerStatusEmailCopyEntry, trackingLink string) string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("%s.\n\n", emailCopy.Headline))
-	b.WriteString(TrackerEmailDetailsTableText(trackerStatusChangeEmailRows(o, companyName)))
+	b.WriteString(TrackerEmailDetailsTableText(trackerFullOrderEmailRows(o, companyName, companyGSTIN)))
 
 	switch status {
 	case "cancelled":
@@ -222,15 +210,14 @@ func buildTrackerStatusEmailBody(o TrackerOrder, companyName, status string, ema
 }
 
 // buildTrackerStatusEmailBodyHTML is the rendered-HTML counterpart of
-// buildTrackerStatusEmailBody — same fields (via trackerStatusChangeEmailRows)
-// as the real bordered FIELD/DETAILS table (TrackerEmailDetailsTableHTML)
-// every other tracker email already uses, instead of the generic
-// plain-text-in-a-box treatment trackerEmailFromPlainText gave this status
-// group before.
-func buildTrackerStatusEmailBodyHTML(cfg *config.Config, o TrackerOrder, companyName string, companyLogoURL *string, status string, emailCopy trackerStatusEmailCopyEntry, trackingLink string) string {
+// buildTrackerStatusEmailBody — same comprehensive table
+// (trackerFullOrderEmailRows via TrackerEmailDetailsTableHTML) every other
+// tracker order email uses, plus this status group's "Track Shipment Live"
+// button (omitted for cancelled — nothing left to track).
+func buildTrackerStatusEmailBodyHTML(cfg *config.Config, o TrackerOrder, companyName, companyGSTIN string, companyLogoURL *string, status string, emailCopy trackerStatusEmailCopyEntry, trackingLink string) string {
 	var b strings.Builder
 	b.WriteString(`<p style="font-size:14px;color:#111827;margin:0 0 4px;">` + html.EscapeString(emailCopy.Headline) + `.</p>`)
-	b.WriteString(TrackerEmailDetailsTableHTML(trackerStatusChangeEmailRows(o, companyName)))
+	b.WriteString(TrackerEmailDetailsTableHTML(trackerFullOrderEmailRows(o, companyName, companyGSTIN)))
 
 	if status != "cancelled" {
 		b.WriteString(`<div style="margin:4px 0 8px;">`)
@@ -243,38 +230,19 @@ func buildTrackerStatusEmailBodyHTML(cfg *config.Config, o TrackerOrder, company
 	return TrackerEmailWrapHTML(cfg, companyName, companyLogoURL, b.String())
 }
 
-// trackerStatusEmailRows builds the [label, value] rows for the delivered
-// email's FIELD/DETAILS table — Company, Route, Vehicle Number, Driver,
-// mirroring trackerCreationEmailRows' shape so every tracker email's table
-// looks the same.
-func trackerStatusEmailRows(o TrackerOrder, companyName string) [][2]string {
-	rows := [][2]string{
-		{"Company", companyName},
-		{"Route", o.DispatchFrom + " -> " + o.DispatchTo},
-		{"Vehicle Number", o.VehicleNumber},
-	}
-	if o.DriverName != "" {
-		driver := o.DriverName
-		if o.DriverPhone != "" {
-			driver += " (" + o.DriverPhone + ")"
-		}
-		rows = append(rows, [2]string{"Driver", driver})
-	}
-	return rows
-}
-
 const trackerDeliveryTimestampFormat = "02 Jan 2006, 3:04 PM"
 
 // buildTrackerDeliveredEmailBody is the plain-text delivered-status body —
-// the FIELD/DETAILS table (as text) plus the real delivery-condition
-// status pulled from received_confirmed_at/delivery_condition/
-// delivery_condition_reason (migration 049), instead of a tracking link.
-// No tracking link at all here — see buildTrackerDeliveredEmailBodyHTML for
-// why it's dropped for this status specifically.
-func buildTrackerDeliveredEmailBody(cfg *config.Config, o TrackerOrder, companyName string) string {
+// the same shared comprehensive FIELD/DETAILS table (as text) plus the real
+// delivery-condition status pulled from received_confirmed_at/
+// delivery_condition/delivery_condition_reason (migration 049), instead of
+// a tracking link. No tracking link at all here — see
+// buildTrackerDeliveredEmailBodyHTML for why it's dropped for this status
+// specifically.
+func buildTrackerDeliveredEmailBody(cfg *config.Config, o TrackerOrder, companyName, companyGSTIN string) string {
 	var b strings.Builder
 	b.WriteString("Your Shipment Has Been Delivered.\n\n")
-	b.WriteString(TrackerEmailDetailsTableText(trackerStatusEmailRows(o, companyName)))
+	b.WriteString(TrackerEmailDetailsTableText(trackerFullOrderEmailRows(o, companyName, companyGSTIN)))
 
 	if o.SignatureURL != nil && *o.SignatureURL != "" {
 		b.WriteString("\nSigned proof of delivery is attached to this email.\n")
@@ -313,10 +281,10 @@ func buildTrackerDeliveredEmailBody(cfg *config.Config, o TrackerOrder, companyN
 // live-tracking link is dead weight on a status that means tracking is
 // over; unlike dispatched/in_transit, where it's the whole point of the
 // email.
-func buildTrackerDeliveredEmailBodyHTML(cfg *config.Config, o TrackerOrder, companyName string, companyLogoURL *string) string {
+func buildTrackerDeliveredEmailBodyHTML(cfg *config.Config, o TrackerOrder, companyName, companyGSTIN string, companyLogoURL *string) string {
 	var b strings.Builder
 	b.WriteString(`<p style="font-size:14px;color:#111827;margin:0 0 4px;">Your Shipment Has Been Delivered.</p>`)
-	b.WriteString(TrackerEmailDetailsTableHTML(trackerStatusEmailRows(o, companyName)))
+	b.WriteString(TrackerEmailDetailsTableHTML(trackerFullOrderEmailRows(o, companyName, companyGSTIN)))
 
 	if o.SignatureURL != nil && *o.SignatureURL != "" {
 		b.WriteString(`<p style="font-size:13px;color:` + TrackerEmailTextGray + `;margin:0 0 8px;">Signed proof of delivery is attached to this email.</p>`)

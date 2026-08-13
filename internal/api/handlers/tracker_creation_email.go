@@ -1,22 +1,13 @@
 package handlers
 
-// Bogie Tracker — shipment-creation summary email (Phase 3). Sent to Booked
-// For + Contact Person + all CC/BCC addresses, with the order's uploaded
-// documents genuinely attached (not just linked) wherever they fit within
-// Resend's size cap.
-//
-// This does NOT fire from inside CreateTrackerCompanyOrder. Documents are
-// staged client-side and uploaded via separate POST .../documents calls
-// AFTER the order already exists (see orders/new/page.tsx), so at the
-// moment CreateTrackerCompanyOrder commits, the document set isn't known
-// yet. The frontend instead calls this endpoint once, after its upload
-// loop finishes (successes and failures alike — a failed document upload
-// shouldn't also suppress the email for the documents that did make it).
+// Bogie Tracker — shared document-attachment helpers for tracker order
+// emails (Cloudinary fetch + byte-budget packing, doc-type display labels),
+// used by tracker_notify.go's Dispatch Details email and the delivered
+// status email's proof-of-delivery attachment. The "Shipment Created" email
+// that used to live in this file has been retired — see
+// SendTrackerOrderCreationEmail below.
 
 import (
-	"context"
-	"fmt"
-	"html"
 	"io"
 	"log"
 	"net/http"
@@ -24,8 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/deploykit/backend/internal/config"
-	"github.com/deploykit/backend/internal/db"
 	"github.com/deploykit/backend/internal/mail"
 	"github.com/gin-gonic/gin"
 )
@@ -47,111 +36,18 @@ var trackerDocTypeDisplayLabels = map[string]string{
 }
 
 // POST /gogoo/tracker/orders/:id/creation-email
+//
+// Retired: order creation no longer sends its own "Shipment Created"
+// stakeholder email — the first email a booked-for/contact-person/consignee
+// now gets is the Dispatched status-change email (see
+// tracker_status_email.go), which carries the same comprehensive
+// FIELD/DETAILS table this endpoint used to send on its own. The frontend
+// still calls this endpoint once after order creation + document upload
+// finishes (see orders/new/page.tsx) as a fire-and-forget call whose result
+// nothing depends on, so this stays a harmless 200 no-op rather than
+// requiring a frontend change to stop calling it.
 func SendTrackerOrderCreationEmail(c *gin.Context) {
-	companyID := c.GetString("company_id")
-	orderID := c.Param("id")
-
-	ctx := context.Background()
-	pool := db.GetDB().GetPool()
-
-	var o TrackerOrder
-	var companyName string
-	var companyLogoURL *string
-	err := pool.QueryRow(ctx, `
-		SELECT o.id, o.dispatch_from, o.dispatch_to,
-		       o.material, o.priority, o.internal_reference,
-		       o.contact_person_name, o.contact_person_phone, o.contact_person_email, o.contact_person_designation,
-		       o.booked_for_email, o.public_tracking_token,
-		       c.company_name, c.logo_url
-		FROM tracker_orders o
-		JOIN tracker_companies c ON c.id = o.company_id
-		WHERE o.id = $1 AND o.company_id = $2
-	`, orderID, companyID).Scan(
-		&o.ID, &o.DispatchFrom, &o.DispatchTo,
-		&o.Material, &o.Priority, &o.InternalReference,
-		&o.ContactPersonName, &o.ContactPersonPhone, &o.ContactPersonEmail, &o.ContactPersonDesignation,
-		&o.BookedForEmail, &o.PublicTrackingToken,
-		&companyName, &companyLogoURL,
-	)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
-		return
-	}
-
-	ccEmails, bccEmails, err := fetchTrackerOrderCCEmails(ctx, pool, orderID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error: " + err.Error()})
-		return
-	}
-
-	docs, err := fetchTrackerOrderDocuments(ctx, pool, orderID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error: " + err.Error()})
-		return
-	}
-
-	cfg := c.MustGet("config").(*config.Config)
-	sendTrackerOrderCreationEmail(cfg, o, companyName, companyLogoURL, ccEmails, bccEmails, docs)
-
-	c.JSON(http.StatusOK, gin.H{"message": "creation email queued"})
-}
-
-// sendTrackerOrderCreationEmail is fire-and-forget, same pattern as
-// tracker_mail.go's lifecycle emails — creating a shipment (or this
-// follow-up call) must never fail, or surface an error to the company,
-// just because Resend hiccuped or a Cloudinary fetch timed out.
-func sendTrackerOrderCreationEmail(cfg *config.Config, o TrackerOrder, companyName string, companyLogoURL *string, ccEmails, bccEmails []string, docs []TrackerOrderDocument) {
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("tracker creation email: recovered from panic: %v", r)
-			}
-		}()
-		if !mail.IsConfigured(cfg) {
-			return
-		}
-
-		var toList []string
-		if o.BookedForEmail != nil && *o.BookedForEmail != "" {
-			toList = append(toList, *o.BookedForEmail)
-		}
-		if o.ContactPersonEmail != nil && *o.ContactPersonEmail != "" &&
-			(o.BookedForEmail == nil || *o.ContactPersonEmail != *o.BookedForEmail) {
-			toList = append(toList, *o.ContactPersonEmail)
-		}
-		if len(toList) == 0 && len(ccEmails) == 0 && len(bccEmails) == 0 {
-			return // nobody to send to
-		}
-
-		var attachables []trackerEmailAttachable
-		for _, d := range docs {
-			attachables = append(attachables, trackerEmailAttachable{Label: trackerDocDisplayLabel(d), FileURL: d.FileURL})
-		}
-		attachments, skipped := buildTrackerEmailAttachments(attachables)
-
-		trackingLink := strings.TrimRight(cfg.TrackerPanelURL, "/") + "/track/" + o.PublicTrackingToken
-
-		subjectRef := o.ID
-		if o.InternalReference != nil && *o.InternalReference != "" {
-			subjectRef = *o.InternalReference
-		}
-		subject := fmt.Sprintf("Shipment Details — %s from %s", subjectRef, companyName)
-		plainBody := buildTrackerCreationEmailBody(o, companyName, trackingLink, skipped)
-		htmlBody := buildTrackerCreationEmailBodyHTML(cfg, o, companyName, companyLogoURL, trackingLink, skipped)
-
-		if err := mail.Send(cfg, mail.Message{
-			To:          strings.Join(toList, ","),
-			CC:          strings.Join(ccEmails, ","),
-			BCC:         strings.Join(bccEmails, ","),
-			Subject:     subject,
-			Body:        plainBody,
-			HTMLBody:    htmlBody,
-			Attachments: attachments,
-			FromName:    trackerEmailFromName(companyName),
-		}); err != nil {
-			log.Printf("tracker creation email: send failed for order=%s: %v", o.ID, err)
-		}
-	}()
+	c.JSON(http.StatusOK, gin.H{"message": "creation email disabled"})
 }
 
 // trackerEmailAttachable is a genericized (label, file URL) pair — the
@@ -253,124 +149,3 @@ func trackerDocFileExt(fileURL string) string {
 	return ext
 }
 
-func buildTrackerCreationEmailBody(o TrackerOrder, companyName, trackingLink string, skippedDocs []string) string {
-	material := "—"
-	if o.Material != nil && *o.Material != "" {
-		material = *o.Material
-	}
-
-	contact := "—"
-	if o.ContactPersonName != nil && *o.ContactPersonName != "" {
-		contact = *o.ContactPersonName
-		if o.ContactPersonDesignation != nil && *o.ContactPersonDesignation != "" {
-			contact += " (" + *o.ContactPersonDesignation + ")"
-		}
-		if o.ContactPersonPhone != nil && *o.ContactPersonPhone != "" {
-			contact += " · " + *o.ContactPersonPhone
-		}
-	}
-
-	priorityLabel, ok := map[string]string{"normal": "Normal", "urgent": "Urgent", "same_day": "Same-day"}[o.Priority]
-	if !ok {
-		priorityLabel = "Normal"
-	}
-
-	var b strings.Builder
-	b.WriteString(fmt.Sprintf("A new shipment has been created by %s.\n\n", companyName))
-	b.WriteString("SHIPMENT SUMMARY\n")
-	b.WriteString("=================\n\n")
-	b.WriteString(fmt.Sprintf("Company: %s\n", companyName))
-	b.WriteString(fmt.Sprintf("Route: %s -> %s\n", o.DispatchFrom, o.DispatchTo))
-	b.WriteString(fmt.Sprintf("Material Description: %s\n", material))
-	b.WriteString(fmt.Sprintf("Priority: %s\n", priorityLabel))
-	b.WriteString(fmt.Sprintf("Contact Person: %s\n", contact))
-	if o.InternalReference != nil && *o.InternalReference != "" {
-		b.WriteString(fmt.Sprintf("Internal Reference: %s\n", *o.InternalReference))
-	}
-	b.WriteString(fmt.Sprintf("\nTrack this shipment live: %s\n", trackingLink))
-
-	if len(skippedDocs) > 0 {
-		pronoun := "them"
-		if len(skippedDocs) == 1 {
-			pronoun = "it"
-		}
-		b.WriteString(fmt.Sprintf(
-			"\nNote: %s exceeded email size limits and could not be attached. You can view and download %s from the tracking page above.\n",
-			strings.Join(skippedDocs, ", "), pronoun,
-		))
-	}
-
-	b.WriteString("\nThis is an automated shipment notification sent via Bogie Tracker.\n")
-	return b.String()
-}
-
-// trackerCreationEmailRows builds the shared [label, value] field list for
-// the creation email's HTML table, mirroring the same Company/Route/Material
-// Description/Priority/Contact Person/Internal Reference fields
-// buildTrackerCreationEmailBody writes as plain text, so the two never drift
-// out of sync.
-func trackerCreationEmailRows(o TrackerOrder, companyName string) [][2]string {
-	material := "—"
-	if o.Material != nil && *o.Material != "" {
-		material = *o.Material
-	}
-
-	contact := "—"
-	if o.ContactPersonName != nil && *o.ContactPersonName != "" {
-		contact = *o.ContactPersonName
-		if o.ContactPersonDesignation != nil && *o.ContactPersonDesignation != "" {
-			contact += " (" + *o.ContactPersonDesignation + ")"
-		}
-		if o.ContactPersonPhone != nil && *o.ContactPersonPhone != "" {
-			contact += " · " + *o.ContactPersonPhone
-		}
-	}
-
-	priorityLabel, ok := map[string]string{"normal": "Normal", "urgent": "Urgent", "same_day": "Same-day"}[o.Priority]
-	if !ok {
-		priorityLabel = "Normal"
-	}
-
-	rows := [][2]string{
-		{"Company", companyName},
-		{"Route", o.DispatchFrom + " -> " + o.DispatchTo},
-		{"Material Description", material},
-		{"Priority", priorityLabel},
-		{"Contact Person", contact},
-	}
-	if o.InternalReference != nil && *o.InternalReference != "" {
-		rows = append(rows, [2]string{"Internal Reference", *o.InternalReference})
-	}
-	return rows
-}
-
-// buildTrackerCreationEmailBodyHTML is the rendered-HTML counterpart of
-// buildTrackerCreationEmailBody — same fields (via trackerCreationEmailRows),
-// same tracking link and skipped-docs note, but as the real bordered
-// FIELD/DETAILS table (TrackerEmailDetailsTableHTML) every other tracker
-// email already uses, instead of the generic plain-text-in-a-box treatment
-// trackerEmailFromPlainText gives everything else.
-func buildTrackerCreationEmailBodyHTML(cfg *config.Config, o TrackerOrder, companyName string, companyLogoURL *string, trackingLink string, skippedDocs []string) string {
-	var b strings.Builder
-	b.WriteString(`<p style="font-size:14px;color:#111827;margin:0 0 4px;">Dear Sir,</p>`)
-	b.WriteString(`<p style="font-size:14px;color:` + TrackerEmailTextGray + `;margin:0 0 4px;">A new shipment has been created by ` + html.EscapeString(companyName) + `. Please find the shipment summary below.</p>`)
-	b.WriteString(TrackerEmailDetailsTableHTML(trackerCreationEmailRows(o, companyName)))
-
-	b.WriteString(`<div style="margin:4px 0 8px;">`)
-	b.WriteString(TrackerEmailButtonHTML(trackingLink, "Track Shipment Live"))
-	b.WriteString(`</div>`)
-
-	if len(skippedDocs) > 0 {
-		pronoun := "them"
-		if len(skippedDocs) == 1 {
-			pronoun = "it"
-		}
-		b.WriteString(`<p style="font-size:13px;color:` + TrackerEmailTextGray + `;margin:4px 0 8px;">Note: ` +
-			html.EscapeString(strings.Join(skippedDocs, ", ")) + ` exceeded email size limits and could not be attached. You can view and download ` +
-			pronoun + ` from the tracking page above.</p>`)
-	}
-
-	b.WriteString(`<p style="font-size:12px;color:` + TrackerEmailMutedGray + `;margin-top:18px;">This is an automated shipment notification sent via Bogie Tracker.</p>`)
-
-	return TrackerEmailWrapHTML(cfg, companyName, companyLogoURL, b.String())
-}

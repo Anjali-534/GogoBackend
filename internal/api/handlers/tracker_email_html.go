@@ -173,3 +173,159 @@ func trackerEmailFromPlainText(cfg *config.Config, companyName string, companyLo
 	bodyHTML := `<div style="font-size:14px;color:` + TrackerEmailTextGray + `;white-space:pre-wrap;line-height:1.6;">` + escaped + `</div>`
 	return TrackerEmailWrapHTML(cfg, companyName, companyLogoURL, bodyHTML)
 }
+
+// trackerGSTStateCodes is the standard 2-digit GST state/UT code table —
+// same official codes as the panel's client-side lib/gstin.ts, kept as an
+// independent copy here since this package can't import frontend code.
+// Used only to derive the sending company's own state for the "Bill From"
+// row below (BookedFor*/Consignee* already have a stored *_state field
+// straight from the order, no derivation needed for those).
+var trackerGSTStateCodes = map[string]string{
+	"01": "Jammu and Kashmir", "02": "Himachal Pradesh", "03": "Punjab", "04": "Chandigarh",
+	"05": "Uttarakhand", "06": "Haryana", "07": "Delhi", "08": "Rajasthan", "09": "Uttar Pradesh",
+	"10": "Bihar", "11": "Sikkim", "12": "Arunachal Pradesh", "13": "Nagaland", "14": "Manipur",
+	"15": "Mizoram", "16": "Tripura", "17": "Meghalaya", "18": "Assam", "19": "West Bengal",
+	"20": "Jharkhand", "21": "Odisha", "22": "Chhattisgarh", "23": "Madhya Pradesh", "24": "Gujarat",
+	"25": "Daman and Diu", "26": "Dadra and Nagar Haveli and Daman and Diu", "27": "Maharashtra",
+	"28": "Andhra Pradesh (Old)", "29": "Karnataka", "30": "Goa", "31": "Lakshadweep", "32": "Kerala",
+	"33": "Tamil Nadu", "34": "Puducherry", "35": "Andaman and Nicobar Islands", "36": "Telangana",
+	"37": "Andhra Pradesh", "38": "Ladakh", "97": "Other Territory", "99": "Centre Jurisdiction",
+}
+
+func trackerGSTState(gstin string) string {
+	if len(gstin) < 2 {
+		return ""
+	}
+	return trackerGSTStateCodes[gstin[:2]]
+}
+
+// trackerFullOrderEmailRows builds the comprehensive FIELD/DETAILS table
+// shared by every tracker order-lifecycle stakeholder email (dispatched,
+// in_transit, delivered, cancelled — see tracker_status_email.go). Every
+// dispatch-sheet-relevant field captured on the order, not a per-status
+// subset, so recipients see the same complete picture regardless of which
+// stage triggered the email — replaces the old narrower, per-email row
+// lists (trackerStatusChangeEmailRows/trackerStatusEmailRows) that used to
+// vary what each status showed.
+func trackerFullOrderEmailRows(o TrackerOrder, companyName, companyGSTIN string) [][2]string {
+	rows := [][2]string{{"Company", companyName}}
+
+	billFrom := companyName
+	if companyGSTIN != "" {
+		billFrom += " · GSTIN: " + companyGSTIN
+		if state := trackerGSTState(companyGSTIN); state != "" {
+			billFrom += " · " + state
+		}
+	}
+	rows = append(rows, [2]string{"Bill From", billFrom})
+
+	billTo := o.BookedForCompanyName
+	if o.BookedForPhone != "" {
+		billTo += " · " + o.BookedForPhone
+	}
+	if o.BookedForEmail != nil && *o.BookedForEmail != "" {
+		billTo += " · " + *o.BookedForEmail
+	}
+	if o.BookedForGstin != nil && *o.BookedForGstin != "" {
+		billTo += " · GSTIN: " + *o.BookedForGstin
+	}
+	if o.BookedForState != nil && *o.BookedForState != "" {
+		billTo += " · " + *o.BookedForState
+	}
+	rows = append(rows, [2]string{"Bill To", billTo})
+
+	rows = append(rows, [2]string{"Dispatch From", o.DispatchFrom})
+	rows = append(rows, [2]string{"Ship To", o.DispatchTo})
+	if o.RegisteredAddress != nil && *o.RegisteredAddress != "" {
+		rows = append(rows, [2]string{"Registered Address", *o.RegisteredAddress})
+	}
+	if o.FactoryAddress != nil && *o.FactoryAddress != "" {
+		rows = append(rows, [2]string{"Factory / Godown Address", *o.FactoryAddress})
+	}
+
+	if o.ConsigneeName != nil && *o.ConsigneeName != "" {
+		consignee := *o.ConsigneeName
+		if o.ConsigneeEmail != nil && *o.ConsigneeEmail != "" {
+			consignee += " · " + *o.ConsigneeEmail
+		}
+		if o.ConsigneeGstin != nil && *o.ConsigneeGstin != "" {
+			consignee += " · GSTIN: " + *o.ConsigneeGstin
+		}
+		if o.ConsigneeState != nil && *o.ConsigneeState != "" {
+			consignee += " · " + *o.ConsigneeState
+		}
+		rows = append(rows, [2]string{"Consignee", consignee})
+	}
+
+	material := "—"
+	if o.Material != nil && *o.Material != "" {
+		material = *o.Material
+	}
+	rows = append(rows, [2]string{"Material Description", material})
+
+	if o.Quantity != nil && *o.Quantity != "" {
+		rows = append(rows, [2]string{"Quantity", *o.Quantity})
+	}
+
+	rows = append(rows, [2]string{"Vehicle Number", o.VehicleNumber})
+
+	if o.DriverName != "" {
+		driver := o.DriverName
+		if o.DriverPhone != "" {
+			driver += " (" + o.DriverPhone + ")"
+		}
+		rows = append(rows, [2]string{"Driver", driver})
+	}
+
+	if o.TransporterName != "" {
+		transporter := o.TransporterName
+		if o.TransporterPhone != "" {
+			transporter += " (" + o.TransporterPhone + ")"
+		}
+		rows = append(rows, [2]string{"Transporter", transporter})
+	}
+
+	if o.EwayBillNumber != "" {
+		rows = append(rows, [2]string{"E-way Bill Number", o.EwayBillNumber})
+	}
+	if o.DocumentsEnclosed != nil && *o.DocumentsEnclosed != "" {
+		rows = append(rows, [2]string{"Documents Enclosed", *o.DocumentsEnclosed})
+	}
+
+	priorityLabel, ok := map[string]string{"normal": "Normal", "urgent": "Urgent", "same_day": "Same-day"}[o.Priority]
+	if !ok {
+		priorityLabel = "Normal"
+	}
+	rows = append(rows, [2]string{"Priority", priorityLabel})
+
+	if o.ExpectedDeliveryDate != nil {
+		rows = append(rows, [2]string{"Expected Delivery Date", o.ExpectedDeliveryDate.Format("02 Jan 2006")})
+	}
+
+	contact := "—"
+	if o.ContactPersonName != nil && *o.ContactPersonName != "" {
+		contact = *o.ContactPersonName
+		if o.ContactPersonDesignation != nil && *o.ContactPersonDesignation != "" {
+			contact += " (" + *o.ContactPersonDesignation + ")"
+		}
+		if o.ContactPersonPhone != nil && *o.ContactPersonPhone != "" {
+			contact += " · " + *o.ContactPersonPhone
+		}
+		if o.ContactPersonEmail != nil && *o.ContactPersonEmail != "" {
+			contact += " · " + *o.ContactPersonEmail
+		}
+	}
+	rows = append(rows, [2]string{"Contact Person", contact})
+
+	if o.DeclaredValue != nil {
+		rows = append(rows, [2]string{"Declared Value", fmt.Sprintf("₹%.2f", *o.DeclaredValue)})
+	}
+	if len(o.SpecialHandling) > 0 {
+		rows = append(rows, [2]string{"Special Handling", strings.Join(o.SpecialHandling, ", ")})
+	}
+	if o.InternalReference != nil && *o.InternalReference != "" {
+		rows = append(rows, [2]string{"Internal Reference", *o.InternalReference})
+	}
+
+	return rows
+}
