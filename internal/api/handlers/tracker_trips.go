@@ -158,6 +158,14 @@ func GetPublicTrackerTrip(c *gin.Context) {
 		return
 	}
 
+	// Trip-level route trail (migration 057) — same shape as
+	// GetPublicTrackerOrder's location_pings, filtered by trip_id.
+	pings, err := fetchTripLocationPings(ctx, pool, tripID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"dispatch_from":    dispatchFrom,
 		"vehicle_number":   vehicleNumber,
@@ -172,5 +180,6 @@ func GetPublicTrackerTrip(c *gin.Context) {
 		"company_name":     companyName,
 		"company_logo_url": companyLogoURL,
 		"stops":            stops,
+		"location_pings":   pings,
 	})
 }

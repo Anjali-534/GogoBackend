@@ -816,6 +816,31 @@ func fetchLocationPings(ctx context.Context, pool *pgxpool.Pool, orderID string)
 	return pings, nil
 }
 
+// fetchTripLocationPings is fetchLocationPings' trip-level counterpart
+// (migration 057) — same shape, filtered by trip_id instead of order_id.
+func fetchTripLocationPings(ctx context.Context, pool *pgxpool.Pool, tripID string) ([]TrackerLocationPing, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT lat, lng, created_at
+		FROM tracker_location_pings
+		WHERE trip_id = $1
+		ORDER BY created_at ASC
+	`, tripID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	pings := []TrackerLocationPing{}
+	for rows.Next() {
+		var p TrackerLocationPing
+		if err := rows.Scan(&p.Lat, &p.Lng, &p.CreatedAt); err != nil {
+			continue
+		}
+		pings = append(pings, p)
+	}
+	return pings, nil
+}
+
 // GET /gogoo/tracker/orders
 func ListTrackerCompanyOwnOrders(c *gin.Context) {
 	companyID := c.GetString("company_id")
@@ -2902,13 +2927,40 @@ func PostTrackerDriverLocation(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "trip is in a terminal state (" + tripStatus + ") and is no longer tracked"})
 			return
 		}
-		_, err := pool.Exec(ctx, `
+
+		tripTx, err := pool.Begin(ctx)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+			return
+		}
+		defer tripTx.Rollback(ctx)
+
+		_, err = tripTx.Exec(ctx, `
 			UPDATE tracker_trips SET last_lat=$1, last_lng=$2, last_location_at=NOW() WHERE id=$3
 		`, *req.Lat, *req.Lng, tripID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "update failed"})
 			return
 		}
+
+		// See migration 057 — trip_id is the trip-level counterpart to the
+		// order-token path's order_id below (exactly one of the two set per
+		// row), giving trip tracking pages the same route-trail history
+		// single-stop orders already have.
+		_, err = tripTx.Exec(ctx, `
+			INSERT INTO tracker_location_pings (id, trip_id, lat, lng)
+			VALUES ($1,$2,$3,$4)
+		`, uuid.New(), tripID, *req.Lat, *req.Lng)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to log ping"})
+			return
+		}
+
+		if err := tripTx.Commit(ctx); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit"})
+			return
+		}
+
 		c.JSON(http.StatusOK, gin.H{"message": "location updated"})
 		return
 	}
