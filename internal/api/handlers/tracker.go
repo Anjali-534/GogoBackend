@@ -857,7 +857,7 @@ func ListTrackerCompanyOwnOrders(c *gin.Context) {
 		       o.vehicle_number, COALESCE(o.eway_bill_number,''), COALESCE(o.eway_bill_file_url,''),
 		       o.status, o.public_tracking_token, o.created_at,
 		       o.consignee_name, o.material, o.quantity, o.dispatch_datetime, o.documents_enclosed,
-		       o.order_type, o.trip_id, o.stop_sequence,
+		       o.order_type, o.trip_id, o.stop_sequence, o.priority,
 		       (SELECT COUNT(*) FROM tracker_orders o2 WHERE o2.trip_id = o.trip_id),
 		       t.public_tracking_token
 		FROM tracker_orders o
@@ -889,7 +889,7 @@ func ListTrackerCompanyOwnOrders(c *gin.Context) {
 			&o.VehicleNumber, &o.EwayBillNumber, &o.EwayBillFileURL,
 			&o.Status, &o.PublicTrackingToken, &o.CreatedAt,
 			&o.ConsigneeName, &o.Material, &o.Quantity, &o.DispatchDatetime, &o.DocumentsEnclosed,
-			&o.OrderType, &o.TripID, &o.StopSequence, &o.TripStopCount, &o.TripPublicTrackingToken,
+			&o.OrderType, &o.TripID, &o.StopSequence, &o.Priority, &o.TripStopCount, &o.TripPublicTrackingToken,
 		); err != nil {
 			continue
 		}
