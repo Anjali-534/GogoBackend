@@ -150,7 +150,7 @@ func sendTrackerOrderStatusEmail(cfg *config.Config, o TrackerOrder, companyName
 			htmlBody = buildTrackerDeliveredEmailBodyHTML(cfg, o, companyName, companyLogoURL)
 		} else {
 			plainBody = buildTrackerStatusEmailBody(o, companyName, status, emailCopy, trackingLink)
-			htmlBody = trackerEmailFromPlainText(cfg, companyName, companyLogoURL, plainBody)
+			htmlBody = buildTrackerStatusEmailBodyHTML(cfg, o, companyName, companyLogoURL, status, emailCopy, trackingLink)
 		}
 
 		if err := mail.Send(cfg, mail.Message{
@@ -169,28 +169,45 @@ func sendTrackerOrderStatusEmail(cfg *config.Config, o TrackerOrder, companyName
 	}()
 }
 
-// buildTrackerStatusEmailBody builds the plain-text body for every
-// non-delivered tracked transition (dispatched, in_transit, cancelled) —
-// delivered has its own dedicated builder below.
-func buildTrackerStatusEmailBody(o TrackerOrder, companyName, status string, emailCopy trackerStatusEmailCopyEntry, trackingLink string) string {
-	var b strings.Builder
-	b.WriteString(fmt.Sprintf("%s.\n\n", emailCopy.Headline))
-	b.WriteString(fmt.Sprintf("Company: %s\n", companyName))
-	b.WriteString(fmt.Sprintf("Route: %s -> %s\n", o.DispatchFrom, o.DispatchTo))
-	b.WriteString(fmt.Sprintf("Vehicle Number: %s\n", o.VehicleNumber))
+// trackerStatusChangeEmailRows builds the [label, value] rows for the
+// dispatched/in_transit/cancelled status emails' FIELD/DETAILS table — same
+// fields (Company, Route, Vehicle Number, Driver, Transporter, Internal
+// Reference) buildTrackerStatusEmailBody used to write as "Label: value"
+// plain-text lines, so the plain-text and HTML versions below never drift
+// out of sync with each other. Kept separate from trackerStatusEmailRows
+// (delivered's row set) since delivered intentionally shows a different,
+// narrower field list.
+func trackerStatusChangeEmailRows(o TrackerOrder, companyName string) [][2]string {
+	rows := [][2]string{
+		{"Company", companyName},
+		{"Route", o.DispatchFrom + " -> " + o.DispatchTo},
+		{"Vehicle Number", o.VehicleNumber},
+	}
 	if o.DriverName != "" {
 		driver := o.DriverName
 		if o.DriverPhone != "" {
 			driver += " (" + o.DriverPhone + ")"
 		}
-		b.WriteString(fmt.Sprintf("Driver: %s\n", driver))
+		rows = append(rows, [2]string{"Driver", driver})
 	}
 	if o.TransporterName != "" {
-		b.WriteString(fmt.Sprintf("Transporter: %s\n", o.TransporterName))
+		rows = append(rows, [2]string{"Transporter", o.TransporterName})
 	}
 	if o.InternalReference != nil && *o.InternalReference != "" {
-		b.WriteString(fmt.Sprintf("Internal Reference: %s\n", *o.InternalReference))
+		rows = append(rows, [2]string{"Internal Reference", *o.InternalReference})
 	}
+	return rows
+}
+
+// buildTrackerStatusEmailBody builds the plain-text body for every
+// non-delivered tracked transition (dispatched, in_transit, cancelled) —
+// delivered has its own dedicated builder below. Same SR/HEADS/DESCRIPTION
+// table (via TrackerEmailDetailsTableText) every other tracker plain-text
+// email already uses, instead of "Label: value" lines.
+func buildTrackerStatusEmailBody(o TrackerOrder, companyName, status string, emailCopy trackerStatusEmailCopyEntry, trackingLink string) string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("%s.\n\n", emailCopy.Headline))
+	b.WriteString(TrackerEmailDetailsTableText(trackerStatusChangeEmailRows(o, companyName)))
 
 	switch status {
 	case "cancelled":
@@ -202,6 +219,28 @@ func buildTrackerStatusEmailBody(o TrackerOrder, companyName, status string, ema
 
 	b.WriteString("\nThis is an automated message from Bogie Tracker — please do not reply to this email.\n")
 	return b.String()
+}
+
+// buildTrackerStatusEmailBodyHTML is the rendered-HTML counterpart of
+// buildTrackerStatusEmailBody — same fields (via trackerStatusChangeEmailRows)
+// as the real bordered FIELD/DETAILS table (TrackerEmailDetailsTableHTML)
+// every other tracker email already uses, instead of the generic
+// plain-text-in-a-box treatment trackerEmailFromPlainText gave this status
+// group before.
+func buildTrackerStatusEmailBodyHTML(cfg *config.Config, o TrackerOrder, companyName string, companyLogoURL *string, status string, emailCopy trackerStatusEmailCopyEntry, trackingLink string) string {
+	var b strings.Builder
+	b.WriteString(`<p style="font-size:14px;color:#111827;margin:0 0 4px;">` + html.EscapeString(emailCopy.Headline) + `.</p>`)
+	b.WriteString(TrackerEmailDetailsTableHTML(trackerStatusChangeEmailRows(o, companyName)))
+
+	if status != "cancelled" {
+		b.WriteString(`<div style="margin:4px 0 8px;">`)
+		b.WriteString(TrackerEmailButtonHTML(trackingLink, "Track Shipment Live"))
+		b.WriteString(`</div>`)
+	}
+
+	b.WriteString(`<p style="font-size:12px;color:` + TrackerEmailMutedGray + `;margin-top:18px;">This is an automated message from Bogie Tracker — please do not reply to this email.</p>`)
+
+	return TrackerEmailWrapHTML(cfg, companyName, companyLogoURL, b.String())
 }
 
 // trackerStatusEmailRows builds the [label, value] rows for the delivered
