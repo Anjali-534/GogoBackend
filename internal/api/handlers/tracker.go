@@ -1679,6 +1679,93 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"order": o, "events": events, "location_pings": pings, "company_logo_url": companyLogoURL})
 }
 
+// outstationRouteKmThreshold is the route_distance_km (or straight-line
+// fallback) above which the order-detail page's live-route poll backs off
+// to a 5-minute interval instead of 60s — long-haul trips stay in_transit
+// for hours, so recomputing every 60s for their whole duration would burn
+// through Ola's free-tier call budget for no real benefit (see the cost
+// investigation this feature was scoped against). Same value the frontend
+// poll interval decision is keyed on; kept here too since the frontend
+// can't compute it without route_distance_km, which this endpoint already
+// has in scope.
+const outstationRouteKmThreshold = 200.0
+
+// GET /gogoo/tracker/orders/:id/live-route — dispatcher-monitoring-only,
+// company-scoped. Fetches a FRESH traffic-aware route (+ alternatives) from
+// the driver's current position to the destination on every call — this is
+// deliberately NOT cached/stored anywhere (unlike route_polyline/
+// route_distance_km/route_duration_mins, which stay the one-time
+// creation-time planned route and are untouched by this endpoint). Meant to
+// be polled client-side only while the order-detail page is open and the
+// order is actively in transit — see TrackingMap.tsx's poll effect, which
+// mirrors the existing GPS-poll's mount/unmount lifecycle at a 60s/5min
+// cadence (outstation vs normal) rather than a server-side background job,
+// to keep Ola API usage bounded by "someone is actually watching," not by
+// total order volume.
+func GetTrackerOrderLiveRoute(c *gin.Context) {
+	companyID := c.GetString("company_id")
+	orderID := c.Param("id")
+
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+
+	var status string
+	var lastLat, lastLng, dispatchFromLat, dispatchFromLng, dispatchToLat, dispatchToLng, routeDistanceKm *float64
+	err := pool.QueryRow(ctx, `
+		SELECT status, last_lat, last_lng,
+		       dispatch_from_lat, dispatch_from_lng, dispatch_to_lat, dispatch_to_lng,
+		       route_distance_km
+		FROM tracker_orders
+		WHERE id = $1 AND company_id = $2
+	`, orderID, companyID).Scan(
+		&status, &lastLat, &lastLng,
+		&dispatchFromLat, &dispatchFromLng, &dispatchToLat, &dispatchToLng,
+		&routeDistanceKm,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "db error: " + err.Error()})
+		}
+		return
+	}
+
+	if status != "dispatched" && status != "in_transit" {
+		c.JSON(http.StatusOK, gin.H{"routes": []OlaLiveRoute{}, "outstation": false})
+		return
+	}
+	if lastLat == nil || lastLng == nil || dispatchToLat == nil || dispatchToLng == nil {
+		c.JSON(http.StatusOK, gin.H{"routes": []OlaLiveRoute{}, "outstation": false})
+		return
+	}
+
+	// Outstation classification: the cached planned-route distance if we have
+	// it, else a straight-line fallback from the original dispatch endpoints
+	// (not from the current position — this is about the trip's overall
+	// length, not how far along it is).
+	var tripKm float64
+	if routeDistanceKm != nil {
+		tripKm = *routeDistanceKm
+	} else if dispatchFromLat != nil && dispatchFromLng != nil {
+		tripKm = haversineKm(*dispatchFromLat, *dispatchFromLng, *dispatchToLat, *dispatchToLng)
+	}
+	outstation := tripKm > outstationRouteKmThreshold
+
+	from := fmt.Sprintf("%f,%f", *lastLat, *lastLng)
+	to := fmt.Sprintf("%f,%f", *dispatchToLat, *dispatchToLng)
+	routes, err := fetchOlaDirectionsLive(from, to)
+	if err != nil {
+		// Best-effort like ProxyOlaRoute — a transient Ola failure shouldn't
+		// error the page, just leave the live-route stats absent this poll.
+		log.Printf("GetTrackerOrderLiveRoute: directions fetch failed for order=%s: %v", orderID, err)
+		c.JSON(http.StatusOK, gin.H{"routes": []OlaLiveRoute{}, "outstation": outstation})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"routes": routes, "outstation": outstation})
+}
+
 // PATCH /gogoo/tracker/orders/:id/details — edits the dispatch-sheet fields
 // (everything CreateTrackerCompanyOrder accepts except driver reassignment
 // and coordinates, which have route-caching side effects best left to

@@ -213,6 +213,93 @@ func fetchOlaDirections(from, to string) (polyline string, distanceKm float64, d
 	return route.OverviewPolyline, distanceKm, durationMins, nil
 }
 
+// OlaLiveRoute is one route option from fetchOlaDirectionsLive — TravelAdvisory
+// is Ola's raw "startPointIdx,endPointIdx,congestionLevel" pipe-separated
+// string (verified live: indices are into the decoded overview_polyline's
+// point array, e.g. "0,6,0|6,7,5|..." — congestion levels observed 0/5/10/15,
+// higher = more congested), left unparsed here for the frontend to decode
+// alongside the polyline using the same decodePolyline() it already has.
+type OlaLiveRoute struct {
+	DistanceKm     float64 `json:"distance_km"`
+	DurationMins   int     `json:"duration_mins"`
+	Polyline       string  `json:"polyline"`
+	TravelAdvisory string  `json:"travel_advisory"`
+}
+
+// fetchOlaDirectionsLive calls the same Ola directions endpoint as
+// fetchOlaDirections but with alternatives=true&traffic_metadata=true and
+// returns every route option, not just the first — verified live against
+// Ola's actual API (2 test calls, same origin/destination): alternatives=true
+// returns multiple distinct full route objects each with their own
+// polyline/distance/duration; traffic_metadata=true populates each route's
+// travel_advisory (empty without the flag) but does NOT change the numeric
+// distance/duration on the same route — so "traffic-aware" here means a
+// congestion overlay + Ola's own route ordering, not a second "duration in
+// traffic" number to display separately.
+//
+// Deliberately a separate function from fetchOlaDirections, not a shared code
+// path with an added parameter — this is called fresh on every poll tick and
+// must never be wired into the create-time cache-once path by an accidental
+// shared call site.
+func fetchOlaDirectionsLive(from, to string) ([]OlaLiveRoute, error) {
+	if from == "" || to == "" || !isLatLng(from) || !isLatLng(to) {
+		return nil, fmt.Errorf("invalid from/to coordinates")
+	}
+
+	apiKey := os.Getenv("OLA_MAPS_KEY")
+	if apiKey == "" {
+		return nil, fmt.Errorf("OLA_MAPS_KEY not set")
+	}
+
+	url := "https://api.olamaps.io/routing/v1/directions?origin=" + from +
+		"&destination=" + to + "&alternatives=true&traffic_metadata=true&api_key=" + apiKey
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Post(url, "application/json", bytes.NewBuffer(nil))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("ola directions returned status %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Routes []struct {
+			OverviewPolyline string `json:"overview_polyline"`
+			TravelAdvisory   string `json:"travel_advisory"`
+			Legs             []struct {
+				Distance float64 `json:"distance"`
+				Duration float64 `json:"duration"`
+			} `json:"legs"`
+		} `json:"routes"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	if len(result.Routes) == 0 {
+		return nil, fmt.Errorf("ola directions returned no routes")
+	}
+
+	out := make([]OlaLiveRoute, 0, len(result.Routes))
+	for _, route := range result.Routes {
+		var distanceKm float64
+		var durationMins int
+		if len(route.Legs) > 0 {
+			distanceKm = route.Legs[0].Distance / 1000
+			durationMins = int(route.Legs[0].Duration / 60)
+		}
+		out = append(out, OlaLiveRoute{
+			DistanceKm:     distanceKm,
+			DurationMins:   durationMins,
+			Polyline:       route.OverviewPolyline,
+			TravelAdvisory: route.TravelAdvisory,
+		})
+	}
+	return out, nil
+}
+
 // GET /gogoo/route?from=lat,lng&to=lat,lng
 // Server-side proxy to Ola Maps directions so the Ola key never reaches panel frontends.
 // Always returns 200 — degrades to an empty polyline on any failure so callers can
