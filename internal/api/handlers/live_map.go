@@ -220,10 +220,35 @@ func fetchOlaDirections(from, to string) (polyline string, distanceKm float64, d
 // higher = more congested), left unparsed here for the frontend to decode
 // alongside the polyline using the same decodePolyline() it already has.
 type OlaLiveRoute struct {
-	DistanceKm     float64 `json:"distance_km"`
-	DurationMins   int     `json:"duration_mins"`
-	Polyline       string  `json:"polyline"`
-	TravelAdvisory string  `json:"travel_advisory"`
+	DistanceKm     float64        `json:"distance_km"`
+	DurationMins   int            `json:"duration_mins"`
+	Polyline       string         `json:"polyline"`
+	TravelAdvisory string         `json:"travel_advisory"`
+	Steps          []OlaRouteStep `json:"steps"`
+}
+
+// OlaRouteStep is one turn-by-turn maneuver from Ola's legs[].steps[] —
+// verified live against a real Delhi NCR route (45 steps returned): Maneuver
+// is a stable enum ("depart", "turn-left", "turn-right", "turn-slight-left",
+// "turn-slight-right", "continue", "enter-roundabout", "arrive", etc.),
+// Instructions is Ola's own plain-English text ("Head west on Kartavya
+// Path"), and BearingBefore/BearingAfter (degrees, 0-360) are the step's own
+// direction-of-travel either side of the maneuver — usable for the driver
+// page's map rotation without depending solely on the device compass.
+type OlaRouteStep struct {
+	Instructions   string    `json:"instructions"`
+	DistanceMeters float64   `json:"distance_meters"`
+	DurationSecs   float64   `json:"duration_secs"`
+	Maneuver       string    `json:"maneuver"`
+	StartLocation  OlaLatLng `json:"start_location"`
+	EndLocation    OlaLatLng `json:"end_location"`
+	BearingBefore  float64   `json:"bearing_before"`
+	BearingAfter   float64   `json:"bearing_after"`
+}
+
+type OlaLatLng struct {
+	Lat float64 `json:"lat"`
+	Lng float64 `json:"lng"`
 }
 
 // fetchOlaDirectionsLive calls the same Ola directions endpoint as
@@ -272,6 +297,16 @@ func fetchOlaDirectionsLive(from, to string) ([]OlaLiveRoute, error) {
 			Legs             []struct {
 				Distance float64 `json:"distance"`
 				Duration float64 `json:"duration"`
+				Steps    []struct {
+					Instructions  string    `json:"instructions"`
+					Distance      float64   `json:"distance"`
+					Duration      float64   `json:"duration"`
+					Maneuver      string    `json:"maneuver"`
+					StartLocation OlaLatLng `json:"start_location"`
+					EndLocation   OlaLatLng `json:"end_location"`
+					BearingBefore float64   `json:"bearing_before"`
+					BearingAfter  float64   `json:"bearing_after"`
+				} `json:"steps"`
 			} `json:"legs"`
 		} `json:"routes"`
 	}
@@ -286,15 +321,31 @@ func fetchOlaDirectionsLive(from, to string) ([]OlaLiveRoute, error) {
 	for _, route := range result.Routes {
 		var distanceKm float64
 		var durationMins int
+		var steps []OlaRouteStep
 		if len(route.Legs) > 0 {
-			distanceKm = route.Legs[0].Distance / 1000
-			durationMins = int(route.Legs[0].Duration / 60)
+			leg := route.Legs[0]
+			distanceKm = leg.Distance / 1000
+			durationMins = int(leg.Duration / 60)
+			steps = make([]OlaRouteStep, 0, len(leg.Steps))
+			for _, s := range leg.Steps {
+				steps = append(steps, OlaRouteStep{
+					Instructions:   s.Instructions,
+					DistanceMeters: s.Distance,
+					DurationSecs:   s.Duration,
+					Maneuver:       s.Maneuver,
+					StartLocation:  s.StartLocation,
+					EndLocation:    s.EndLocation,
+					BearingBefore:  s.BearingBefore,
+					BearingAfter:   s.BearingAfter,
+				})
+			}
 		}
 		out = append(out, OlaLiveRoute{
 			DistanceKm:     distanceKm,
 			DurationMins:   durationMins,
 			Polyline:       route.OverviewPolyline,
 			TravelAdvisory: route.TravelAdvisory,
+			Steps:          steps,
 		})
 	}
 	return out, nil
