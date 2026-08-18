@@ -153,6 +153,14 @@ type TrackerOrder struct {
 	RouteDistanceKm   *float64 `json:"route_distance_km"`
 	RouteDurationMins *int     `json:"route_duration_mins"`
 
+	// SelectedRouteIndex (live-route redesign) — which of the driver's live
+	// route options (see GetTrackerOrderLiveRoute) the driver has tapped to
+	// select on their own map, written by PostTrackerDriverSelectedRoute.
+	// Read-only from the company panel's side: dispatchers see the driver's
+	// choice, they don't make it. Null means no explicit selection yet —
+	// both sides default to index 0 (the first/recommended Ola route).
+	SelectedRouteIndex *int `json:"selected_route_index"`
+
 	// Proof-of-delivery signature — set once by the driver-token-gated
 	// signature upload after a 'delivery_claimed' event; the company still
 	// confirms the actual 'delivered' status transition in the panel.

@@ -1561,3 +1561,8 @@ ALTER TABLE drivers ADD CONSTRAINT drivers_vehicle_type_check
     -- Parcel
     'parcel_2w'
   ));
+
+-- Migration 057 — Live-route redesign: driver-selected route index.
+-- Null means no explicit selection yet — both sides default to index 0.
+ALTER TABLE tracker_orders ADD COLUMN IF NOT EXISTS selected_route_index INT;
+ALTER TABLE tracker_trips ADD COLUMN IF NOT EXISTS selected_route_index INT;

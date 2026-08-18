@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1566,7 +1567,7 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 		       o.consignee_name, o.material, o.quantity, o.dispatch_datetime, o.documents_enclosed,
 		       o.driver_tracking_token, o.last_lat, o.last_lng, o.last_location_at,
 		       o.dispatch_from_lat, o.dispatch_from_lng, o.dispatch_to_lat, o.dispatch_to_lng,
-		       o.route_polyline, o.route_distance_km, o.route_duration_mins,
+		       o.route_polyline, o.route_distance_km, o.route_duration_mins, o.selected_route_index,
 		       o.signature_url, o.booked_for_email, o.consignee_email, o.transporter_email,
 		       o.received_confirmation_token, o.received_confirmed_at,
 		       o.delivery_condition, o.delivery_condition_reason, o.needs_staff_attention,
@@ -1590,7 +1591,7 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 		&o.ConsigneeName, &o.Material, &o.Quantity, &o.DispatchDatetime, &o.DocumentsEnclosed,
 		&o.DriverTrackingToken, &o.LastLat, &o.LastLng, &o.LastLocationAt,
 		&o.DispatchFromLat, &o.DispatchFromLng, &o.DispatchToLat, &o.DispatchToLng,
-		&o.RoutePolyline, &o.RouteDistanceKm, &o.RouteDurationMins,
+		&o.RoutePolyline, &o.RouteDistanceKm, &o.RouteDurationMins, &o.SelectedRouteIndex,
 		&o.SignatureURL, &o.BookedForEmail, &o.ConsigneeEmail, &o.TransporterEmail,
 		&o.ReceivedConfirmationToken, &o.ReceivedConfirmedAt,
 		&o.DeliveryCondition, &o.DeliveryConditionReason, &o.NeedsStaffAttention,
@@ -2868,24 +2869,29 @@ func GetTrackerDriverOrder(c *gin.Context) {
 	// booked_for_company_name reflect the CURRENT active stop (lowest
 	// stop_sequence not yet delivered/cancelled) — that's what the driver
 	// is actually driving toward right now. route_polyline/distance/
-	// duration have no trip-level equivalent (route caching is per-stop,
-	// same reason the trip's live-map/public-page rows never have one
-	// either) and stay null on a trip response.
+	// duration still have no trip-level equivalent (route caching is
+	// per-stop, same reason the trip's live-map/public-page rows never have
+	// one either) and stay null on a trip response — but dispatch_to_lat/lng
+	// DO come from the active stop below (needed for the live-route feature:
+	// without a destination, the driver page can't fetch/render route
+	// options at all for a trip-based link).
 	var tripID string
 	tripErr := pool.QueryRow(ctx, `SELECT id::text FROM tracker_trips WHERE driver_tracking_token = $1`, driverToken).Scan(&tripID)
 	if tripErr == nil {
 		var tripStatus, tripDispatchFrom, tripVehicleNumber, companyName string
 		var companyLogoURL *string
 		var activeDispatchTo, activeBookedFor *string
+		var activeDispatchToLat, activeDispatchToLng *float64
 		var currentStopSequence, totalStops int
 		err := pool.QueryRow(ctx, `
 			SELECT t.overall_status, t.dispatch_from, t.vehicle_number, c.company_name, c.logo_url,
 			       active.dispatch_to, active.booked_for_company_name, COALESCE(active.stop_sequence, 0),
+			       active.dispatch_to_lat, active.dispatch_to_lng,
 			       (SELECT COUNT(*) FROM tracker_orders WHERE trip_id = t.id)
 			FROM tracker_trips t
 			JOIN tracker_companies c ON c.id = t.company_id
 			LEFT JOIN LATERAL (
-				SELECT dispatch_to, booked_for_company_name, stop_sequence
+				SELECT dispatch_to, booked_for_company_name, stop_sequence, dispatch_to_lat, dispatch_to_lng
 				FROM tracker_orders
 				WHERE trip_id = t.id AND status NOT IN ('delivered','cancelled')
 				ORDER BY stop_sequence ASC
@@ -2894,7 +2900,8 @@ func GetTrackerDriverOrder(c *gin.Context) {
 			WHERE t.id = $1
 		`, tripID).Scan(
 			&tripStatus, &tripDispatchFrom, &tripVehicleNumber, &companyName, &companyLogoURL,
-			&activeDispatchTo, &activeBookedFor, &currentStopSequence, &totalStops,
+			&activeDispatchTo, &activeBookedFor, &currentStopSequence,
+			&activeDispatchToLat, &activeDispatchToLng, &totalStops,
 		)
 		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "tracking link not found"})
@@ -2918,8 +2925,8 @@ func GetTrackerDriverOrder(c *gin.Context) {
 			"is_terminal":             tripStatus == "completed" || tripStatus == "cancelled",
 			"dispatch_from_lat":       nil,
 			"dispatch_from_lng":       nil,
-			"dispatch_to_lat":         nil,
-			"dispatch_to_lng":         nil,
+			"dispatch_to_lat":         activeDispatchToLat,
+			"dispatch_to_lng":         activeDispatchToLng,
 			"route_polyline":          nil,
 			"route_distance_km":       nil,
 			"route_duration_mins":     nil,
@@ -3094,6 +3101,159 @@ func PostTrackerDriverLocation(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "location updated"})
+}
+
+// resolveDriverActiveOrder resolves a driver_token (trip or legacy
+// single-stop order) to the tracker_orders row the driver is actively
+// driving toward right now — for a trip, that's the active stop (lowest
+// stop_sequence not yet delivered/cancelled), the same resolution
+// GetTrackerDriverOrder already uses for dispatch_to/booked_for_company_name;
+// for a legacy single-stop order, it's just that order itself.
+//
+// Shared by PostTrackerDriverSelectedRoute and GetTrackerDriverLiveRoute so
+// both agree on "which order" a given driver link's route selection/options
+// are actually about. Deliberately resolves to an ORDER row in both cases
+// (never tracker_trips) — route selection is inherently per-destination
+// (each stop has its own dispatch_to), unlike last_lat/last_lng, which is
+// genuinely trip-shared physical position and stays on tracker_trips per
+// PostTrackerDriverLocation. tracker_trips.selected_route_index exists
+// (same migration as tracker_orders') but is intentionally left unused by
+// this design — see the live-route redesign notes.
+func resolveDriverActiveOrder(ctx context.Context, pool *pgxpool.Pool, driverToken string) (string, error) {
+	var tripID string
+	tripErr := pool.QueryRow(ctx, `SELECT id::text FROM tracker_trips WHERE driver_tracking_token = $1`, driverToken).Scan(&tripID)
+	if tripErr == nil {
+		var orderID string
+		err := pool.QueryRow(ctx, `
+			SELECT id::text FROM tracker_orders
+			WHERE trip_id = $1 AND status NOT IN ('delivered','cancelled')
+			ORDER BY stop_sequence ASC LIMIT 1
+		`, tripID).Scan(&orderID)
+		return orderID, err
+	}
+	var orderID string
+	err := pool.QueryRow(ctx, `SELECT id::text FROM tracker_orders WHERE driver_tracking_token = $1`, driverToken).Scan(&orderID)
+	return orderID, err
+}
+
+// POST /gogoo/public/tracker/driver/:driver_token/selected-route — driver
+// taps a route option on their own map; this persists the choice so the
+// company panel's read-only display can show "Driver is on Route X". Index
+// is whatever position that route held in the driver's most recent
+// GetTrackerDriverLiveRoute response — see resolveDriverActiveOrder's
+// comment for why this always writes to the active stop's order row.
+func PostTrackerDriverSelectedRoute(c *gin.Context) {
+	driverToken := c.Param("driver_token")
+	var req struct {
+		// Pointer, not plain int, so binding:"required" rejects a genuinely
+		// missing field but still accepts index 0 (Route 1) — same reasoning
+		// as Lat/Lng above.
+		Index *int `json:"index" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if *req.Index < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "index must be >= 0"})
+		return
+	}
+
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+
+	orderID, err := resolveDriverActiveOrder(ctx, pool, driverToken)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "tracking link not found"})
+		return
+	}
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE tracker_orders SET selected_route_index=$1, updated_at=NOW() WHERE id=$2
+	`, *req.Index, orderID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "update failed"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "route selection updated"})
+}
+
+// GET /gogoo/public/tracker/driver/:driver_token/live-route?lat=&lng= —
+// public, token-based counterpart to GetTrackerOrderLiveRoute (company-side,
+// company-JWT-authenticated). Same fresh-every-call, never-cached contract.
+//
+// Unlike the company-side endpoint (which reads the driver's last GPS ping
+// from the DB, since the dispatcher has no live position of their own), this
+// one requires the caller to pass lat/lng directly — the driver's own page
+// already has a live navigator.geolocation fix, which is fresher than
+// anything a round trip through the DB could offer, and the driver page
+// never has a reason to call this before it has a fix anyway (route
+// selection is meaningless without knowing where "current position" is).
+func GetTrackerDriverLiveRoute(c *gin.Context) {
+	driverToken := c.Param("driver_token")
+	lat, latErr := strconv.ParseFloat(c.Query("lat"), 64)
+	lng, lngErr := strconv.ParseFloat(c.Query("lng"), 64)
+	if latErr != nil || lngErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "lat and lng required"})
+		return
+	}
+
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+
+	orderID, err := resolveDriverActiveOrder(ctx, pool, driverToken)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "tracking link not found"})
+		return
+	}
+
+	var status string
+	var dispatchFromLat, dispatchFromLng, dispatchToLat, dispatchToLng, routeDistanceKm *float64
+	var selectedRouteIndex *int
+	err = pool.QueryRow(ctx, `
+		SELECT status, dispatch_from_lat, dispatch_from_lng, dispatch_to_lat, dispatch_to_lng,
+		       route_distance_km, selected_route_index
+		FROM tracker_orders WHERE id = $1
+	`, orderID).Scan(
+		&status, &dispatchFromLat, &dispatchFromLng, &dispatchToLat, &dispatchToLng,
+		&routeDistanceKm, &selectedRouteIndex,
+	)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "tracking link not found"})
+		return
+	}
+
+	if status != "dispatched" && status != "in_transit" {
+		c.JSON(http.StatusOK, gin.H{"routes": []OlaLiveRoute{}, "outstation": false, "selected_route_index": selectedRouteIndex})
+		return
+	}
+	if dispatchToLat == nil || dispatchToLng == nil {
+		c.JSON(http.StatusOK, gin.H{"routes": []OlaLiveRoute{}, "outstation": false, "selected_route_index": selectedRouteIndex})
+		return
+	}
+
+	// Same outstation classification as the company-side endpoint —
+	// route_distance_km if cached, else straight-line from the original
+	// dispatch endpoints (the trip's overall length, not how far along it
+	// is right now).
+	var tripKm float64
+	if routeDistanceKm != nil {
+		tripKm = *routeDistanceKm
+	} else if dispatchFromLat != nil && dispatchFromLng != nil {
+		tripKm = haversineKm(*dispatchFromLat, *dispatchFromLng, *dispatchToLat, *dispatchToLng)
+	}
+	outstation := tripKm > outstationRouteKmThreshold
+
+	from := fmt.Sprintf("%f,%f", lat, lng)
+	to := fmt.Sprintf("%f,%f", *dispatchToLat, *dispatchToLng)
+	routes, err := fetchOlaDirectionsLive(from, to)
+	if err != nil {
+		log.Printf("GetTrackerDriverLiveRoute: directions fetch failed for order=%s: %v", orderID, err)
+		c.JSON(http.StatusOK, gin.H{"routes": []OlaLiveRoute{}, "outstation": outstation, "selected_route_index": selectedRouteIndex})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"routes": routes, "outstation": outstation, "selected_route_index": selectedRouteIndex})
 }
 
 // tryAutoCompleteDelivery transitions an order to 'delivered' the instant

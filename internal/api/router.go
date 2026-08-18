@@ -138,6 +138,11 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogooPublic.POST("/public/tracker/driver/:driver_token/event", handlers.PostTrackerDriverEvent)
 		gogooPublic.POST("/public/tracker/driver/:driver_token/signature", handlers.UploadTrackerDriverSignature)
 		gogooPublic.GET("/public/tracker/driver/:driver_token/messages", handlers.GetTrackerDriverMessages)
+		// Live-route redesign — driver taps a route option on their own
+		// map; live-route mirrors the company-side GetTrackerOrderLiveRoute
+		// but takes lat/lng from the caller instead of the last DB ping.
+		gogooPublic.GET("/public/tracker/driver/:driver_token/live-route", handlers.GetTrackerDriverLiveRoute)
+		gogooPublic.POST("/public/tracker/driver/:driver_token/selected-route", handlers.PostTrackerDriverSelectedRoute)
 
 		// Bogie Tracker — consignee goods-received receipt confirmation,
 		// protected only by the unguessable received_confirmation_token
