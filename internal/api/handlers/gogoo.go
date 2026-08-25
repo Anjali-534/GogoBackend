@@ -2087,6 +2087,21 @@ func GetEarningsSummary(c *gin.Context) {
         AND created_at >= date_trunc('month', CURRENT_DATE)
     `, driverID).Scan(&monthEarnings)
 
+	// All-time total — unlike today/week/month above, this is never
+	// date-scoped. Without it, a driver's real historical earnings from
+	// outside the current day/week/month legitimately summed to zero here
+	// even though driver_earnings had the rows all along.
+	var totalEarnings float64
+	var totalTrips int
+	pool.QueryRow(ctx, `
+        SELECT COALESCE(SUM(amount),0), COUNT(*)
+        FROM driver_earnings
+        WHERE driver_id = $1 AND is_debit = false AND type = 'ride'
+    `, driverID).Scan(&totalEarnings, &totalTrips)
+
+	var walletBalance float64
+	pool.QueryRow(ctx, `SELECT COALESCE(wallet_balance,0) FROM drivers WHERE id = $1`, driverID).Scan(&walletBalance)
+
 	dRows, _ := pool.Query(ctx, `
         SELECT DATE(created_at) AS day, COALESCE(SUM(amount),0) AS earnings, COUNT(*) AS trips
         FROM driver_earnings
@@ -2118,10 +2133,12 @@ func GetEarningsSummary(c *gin.Context) {
 		daily = []DayEarning{}
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"today": gin.H{"earnings": todayEarnings, "trips": todayTrips},
-		"week":  gin.H{"earnings": weekEarnings, "trips": weekTrips},
-		"month": gin.H{"earnings": monthEarnings},
-		"daily": daily,
+		"today":          gin.H{"earnings": todayEarnings, "trips": todayTrips},
+		"week":           gin.H{"earnings": weekEarnings, "trips": weekTrips},
+		"month":          gin.H{"earnings": monthEarnings},
+		"total":          gin.H{"earnings": totalEarnings, "trips": totalTrips},
+		"wallet_balance": walletBalance,
+		"daily":          daily,
 	})
 }
 

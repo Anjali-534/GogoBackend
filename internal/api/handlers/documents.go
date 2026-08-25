@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -48,6 +49,9 @@ var requiredDocs = map[string][]string{
 		"vehicle_photo", "vehicle_photo_side",
 	},
 	"two_wheeler": {
+		"rc", "insurance", "puc", "vehicle_photo",
+	},
+	"cab": {
 		"rc", "insurance", "puc", "vehicle_photo",
 	},
 	"packers": {
@@ -99,6 +103,16 @@ func getVehicleCategory(vehicleType string) string {
 		return "packers"
 	case "ambulance":
 		return "ambulance"
+	// cab_2w/cab_3w/cab_4w/cab_4w_suv are the current vehicle_type values
+	// for cab drivers (see service_types seed data); sedan/suv/mini/xl/auto
+	// are the legacy pre-taxonomy labels for the same vehicle classes.
+	// Previously none of these matched any case here, so every cab driver
+	// silently fell through to the "two_wheeler" default below — same doc
+	// set as it happens (rc/insurance/puc/vehicle_photo), but by accident,
+	// not by explicit intent. Named explicitly now so cab requirements can
+	// diverge from two_wheeler's later without relying on that coincidence.
+	case "cab_2w", "cab_3w", "cab_4w", "cab_4w_suv", "sedan", "suv", "mini", "xl", "auto":
+		return "cab"
 	}
 	// Fallback for legacy / free-form labels.
 	if strings.HasPrefix(vehicleType, "truck") || vehicleType == "tata_ace" || vehicleType == "bolero_pickup" {
@@ -112,6 +126,9 @@ func getVehicleCategory(vehicleType string) string {
 	}
 	if strings.Contains(vehicleType, "ambulance") || strings.Contains(vehicleType, "life_support") {
 		return "ambulance"
+	}
+	if strings.HasPrefix(vehicleType, "cab") {
+		return "cab"
 	}
 	// parcel_2w falls through to here and correctly lands on "two_wheeler"
 	// (rc/insurance/puc/vehicle_photo) — same doc set a 2-wheeler needs.
@@ -323,6 +340,7 @@ func isDriverOwner(ctx context.Context, pool *pgxpool.Pool, driverID, userID str
 
 func GetDriverDocuments(c *gin.Context) {
 	driverID := c.Param("id")
+	log.Printf("DEBUG GetDriverDocuments: path driverID=%q, JWT user_id=%q", driverID, c.GetString("user_id"))
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 
@@ -339,7 +357,14 @@ func GetDriverDocuments(c *gin.Context) {
 	}
 
 	var vehicleType string
-	pool.QueryRow(ctx, "SELECT vehicle_type FROM drivers WHERE id=$1", driverID).Scan(&vehicleType)
+	if err := pool.QueryRow(ctx, "SELECT vehicle_type FROM drivers WHERE id=$1", driverID).Scan(&vehicleType); err != nil {
+		// Previously ignored: a failed lookup silently left vehicleType=""
+		// and getVehicleCategory("") still fell through to a non-empty
+		// "two_wheeler" default, so this never surfaced as an error — it
+		// just quietly handed back the wrong document checklist instead.
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to look up driver's vehicle type"})
+		return
+	}
 
 	rows, err := pool.Query(ctx, `
 		SELECT doc_type, file_url, COALESCE(file_name,''), COALESCE(file_size,0),
