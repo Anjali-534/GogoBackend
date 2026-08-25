@@ -456,6 +456,35 @@ func UploadDriverDocument(c *gin.Context) {
 	docNumber := c.PostForm("doc_number")
 	expiryDate := c.PostForm("expiry_date")
 
+	// Ban-evasion check: an Aadhaar number that hashes to a driver_aadhaar_hashes
+	// row marked is_banned=true was submitted by an account that was banned
+	// (drivers.is_blocked=true) at the moment it deleted itself — see
+	// DeleteDriverAccount. Reject before saving the file/number so a banned
+	// driver can't quietly re-register a new account under a new email/phone.
+	// A hash with is_banned=false (or no match) is a legitimate re-signup and
+	// proceeds normally — this check is for evading a ban, not for blocking
+	// every returning driver.
+	if docType == "aadhaar" || docType == "aadhaar_front" {
+		if trimmed := strings.TrimSpace(docNumber); trimmed != "" {
+			var isBanned bool
+			err := pool.QueryRow(ctx, `
+				SELECT EXISTS(
+					SELECT 1 FROM driver_aadhaar_hashes WHERE aadhaar_hash=$1 AND is_banned=true
+				)
+			`, hashAadhaar(trimmed)).Scan(&isBanned)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+				return
+			}
+			if isBanned {
+				c.JSON(http.StatusForbidden, gin.H{
+					"error": "This Aadhaar number is linked to a previously banned account. Your submission has been flagged for manual review — please contact support.",
+				})
+				return
+			}
+		}
+	}
+
 	file, header, err := c.Request.FormFile("file")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "file is required"})

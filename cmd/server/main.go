@@ -90,6 +90,11 @@ func main() {
 	go handlers.StartScheduledDispatcher()
 	log.Println("✓ Scheduled ride dispatcher running")
 
+	// Deleted-account purge — ticks daily, hard-deletes location history
+	// for riders whose account deletion was requested 30+ days ago.
+	go handlers.StartAccountPurge()
+	log.Println("✓ Account purge job running")
+
 	// Monthly driver earnings statement emailer — ticks daily, sends on the 1st.
 	go ledger.StartMonthlyStatementMailer(cfg)
 	log.Println("✓ Monthly statement mailer running")

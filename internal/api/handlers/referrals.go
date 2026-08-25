@@ -292,6 +292,8 @@ func GetMyReferralCode(c *gin.Context) {
         "total_referred":  totalReferred,
         "total_earned":    totalEarned,
         "pending_rewards": pendingRewards,
+        "level1_amount":   referralLevel1Amount,
+        "level2_amount":   referralLevel2Amount,
     })
 }
 

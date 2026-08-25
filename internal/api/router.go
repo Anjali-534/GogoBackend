@@ -65,6 +65,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		// User
 		protected.GET("/auth/me", handlers.Me)
 		protected.POST("/auth/logout", handlers.Logout)
+		protected.PUT("/auth/change-password", handlers.ChangePassword)
 
 		// Projects
 		protected.GET("/projects", handlers.ListProjects)
@@ -211,6 +212,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.GET("/rider/saved-places", handlers.GetSavedPlaces)
 		gogoo.POST("/rider/saved-places", handlers.SavePlace)
 		gogoo.DELETE("/rider/saved-places/:label", handlers.DeleteSavedPlace)
+		gogoo.DELETE("/rider/account", handlers.DeleteRiderAccount)
+		gogoo.POST("/driver/account/delete-check", handlers.CheckDriverDeletionEligibility)
+		gogoo.DELETE("/driver/account", handlers.DeleteDriverAccount)
 		// Driver ride history + block management (admin)
 		gogoo.GET("/drivers/:id/bookings", middleware.RequirePanel("cab"), handlers.ListDriverBookingsByID)
 		gogoo.PATCH("/drivers/:id/block", middleware.RequirePanel("cab", "truck", "ambulance", "support"), handlers.ManageDriverBlock)

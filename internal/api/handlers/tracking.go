@@ -80,6 +80,7 @@ func UpdateDriverLocation(c *gin.Context) {
 		Lat     float64 `json:"lat" binding:"required"`
 		Lng     float64 `json:"lng" binding:"required"`
 		Heading float64 `json:"heading"`
+		Speed   float64 `json:"speed"` // km/h, already converted client-side
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -109,10 +110,10 @@ func UpdateDriverLocation(c *gin.Context) {
 	// Mirror onto any active booking for this driver.
 	pool.Exec(ctx,
 		`UPDATE bookings
-		   SET driver_lat=$1, driver_lng=$2, driver_heading=$3, driver_updated_at=NOW()
-		 WHERE driver_id=$4
+		   SET driver_lat=$1, driver_lng=$2, driver_heading=$3, driver_speed=$4, driver_updated_at=NOW()
+		 WHERE driver_id=$5
 		   AND status IN ('accepted','arriving','in_progress')`,
-		req.Lat, req.Lng, req.Heading, driverID,
+		req.Lat, req.Lng, req.Heading, req.Speed, driverID,
 	)
 
 	c.JSON(http.StatusOK, gin.H{"ok": true})
@@ -157,24 +158,25 @@ func writeBookingDetail(c *gin.Context, ctx context.Context, pool *pgxpool.Pool,
 		pLat, pLng, dLat, dLng                           float64
 		pAddr, dAddr                                     string
 		fare, dist                                       float64
-		driverLat, driverLng, driverHeading              *float64
+		driverLat, driverLng, driverHeading, driverSpeed *float64
 		driverUpdatedAt                                  *time.Time
 		driverName, driverPhone, vehicleNumber, vehModel *string
 		driverRating                                     *float64
 		riderName, riderPhone, serviceName               string
+		paymentMethod                                    string
 		rideOTP                                          *string
 		finalFare                                        *float64
 		startedAt, completedAt                           *time.Time
 		// Ambulance fields
 		hospitalID, hospitalName, ambulanceSubType, purposeType, patientName *string
-		isFreeAmbulance                                                       bool
+		isFreeAmbulance                                                      bool
 		// Cancellation + scheduling
-		vehicleCategory                          string
-		cancellationFee                          float64
-		cancelledBy, cancelReason                 string
-		cancelledAt                               *time.Time
-		isScheduled                               bool
-		scheduledAt                               *time.Time
+		vehicleCategory           string
+		cancellationFee           float64
+		cancelledBy, cancelReason string
+		cancelledAt               *time.Time
+		isScheduled               bool
+		scheduledAt               *time.Time
 		// Receiver details (truck/parcel deliveries)
 		receiverName, receiverPhone *string
 	)
@@ -184,11 +186,12 @@ func writeBookingDetail(c *gin.Context, ctx context.Context, pool *pgxpool.Pool,
 		       b.pickup_lat, b.pickup_lng, b.pickup_address,
 		       b.drop_lat, b.drop_lng, b.drop_address,
 		       COALESCE(b.estimated_fare,0), COALESCE(b.distance_km,0),
-		       b.driver_lat, b.driver_lng, b.driver_heading, b.driver_updated_at,
+		       b.driver_lat, b.driver_lng, b.driver_heading, b.driver_speed, b.driver_updated_at,
 		       du.name, d.phone, d.vehicle_number, d.vehicle_model, d.rating,
 		       COALESCE(u_r.name,'') AS rider_name,
 		       COALESCE(r.phone,'')  AS rider_phone,
 		       COALESCE(st.name,'')  AS service_name,
+		       COALESCE(b.payment_method,'cash') AS payment_method,
 		       b.ride_otp,
 		       b.final_fare,
 		       b.started_at,
@@ -219,9 +222,10 @@ func writeBookingDetail(c *gin.Context, ctx context.Context, pool *pgxpool.Pool,
 		&id, &riderID, &status, &driverID,
 		&pLat, &pLng, &pAddr, &dLat, &dLng, &dAddr,
 		&fare, &dist,
-		&driverLat, &driverLng, &driverHeading, &driverUpdatedAt,
+		&driverLat, &driverLng, &driverHeading, &driverSpeed, &driverUpdatedAt,
 		&driverName, &driverPhone, &vehicleNumber, &vehModel, &driverRating,
 		&riderName, &riderPhone, &serviceName,
+		&paymentMethod,
 		&rideOTP,
 		&finalFare, &startedAt, &completedAt,
 		&hospitalID, &hospitalName, &ambulanceSubType,
@@ -246,6 +250,7 @@ func writeBookingDetail(c *gin.Context, ctx context.Context, pool *pgxpool.Pool,
 		"rider_name":         riderName,
 		"rider_phone":        riderPhone,
 		"service_name":       serviceName,
+		"payment_method":     paymentMethod,
 		"final_fare":         finalFare,
 		"started_at":         startedAt,
 		"completed_at":       completedAt,
@@ -310,6 +315,9 @@ func writeBookingDetail(c *gin.Context, ctx context.Context, pool *pgxpool.Pool,
 			driver["lng"] = *driverLng
 			if driverHeading != nil {
 				driver["heading"] = *driverHeading
+			}
+			if driverSpeed != nil {
+				driver["speed"] = *driverSpeed
 			}
 			if driverUpdatedAt != nil {
 				driver["updated_at"] = *driverUpdatedAt

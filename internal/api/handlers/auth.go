@@ -20,6 +20,11 @@ type LoginRequest struct {
 	Password string `json:"password" binding:"required,min=6"`
 }
 
+type ChangePasswordRequest struct {
+	CurrentPassword string `json:"current_password" binding:"required"`
+	NewPassword     string `json:"new_password" binding:"required,min=8"`
+}
+
 type SignupRequest struct {
 	Email    string `json:"email" binding:"required,email"`
 	Name     string `json:"name" binding:"required"`
@@ -171,6 +176,55 @@ func Login(c *gin.Context) {
 		AccessToken: token,
 		ExpiresIn:   int(cfg.JWTExpiration.Seconds()),
 	})
+}
+
+// ChangePassword updates the calling user's own password — user_id comes
+// from the JWT (set by AuthMiddleware), never a request param, so a caller
+// can only ever change their own password. Shared by riders and drivers,
+// since both authenticate against the same users table via /auth/login.
+func ChangePassword(c *gin.Context) {
+	var req ChangePasswordRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	userID := c.GetString("user_id")
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+
+	var passwordHash string
+	if err := pool.QueryRow(ctx,
+		"SELECT password_hash FROM users WHERE id = $1", userID,
+	).Scan(&passwordHash); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.CurrentPassword)); err != nil {
+		// 403, not 401: the driver-app's shared axios interceptor treats any
+		// 401 as an expired session and force-logs-out to the login screen
+		// (see services/api.ts) — a wrong current-password guess must not
+		// trigger that, it needs to surface inline on this form instead.
+		c.JSON(http.StatusForbidden, gin.H{"error": "current password is incorrect"})
+		return
+	}
+
+	newHash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to hash password"})
+		return
+	}
+
+	if _, err := pool.Exec(ctx,
+		"UPDATE users SET password_hash = $2, updated_at = NOW() WHERE id = $1",
+		userID, string(newHash),
+	); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update password"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "password changed"})
 }
 
 // Me returns the current authenticated user

@@ -35,6 +35,22 @@ func AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
+		// claims.UserID only names a row in the `users` table for
+		// blank-panel tokens (plain /auth/login, rider/driver signup) — every
+		// panel login (panel_access, ambulance_hospitals, tracker_companies,
+		// tracker_staff_users) signs its own table's row id into this same
+		// claim via signPanelToken, with panel always non-empty (see
+		// AdminLogin, RegisterHospitalHandler-equivalent, tracker login).
+		// Running the users lookup for those would 401 every panel login on
+		// a row that was never going to exist in `users`. Scope the check to
+		// blank-panel tokens only, matching what DeleteRiderAccount actually
+		// deletes.
+		if claims.Panel == "" && !isUserActive(claims.UserID.String()) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "account deleted"})
+			c.Abort()
+			return
+		}
+
 		c.Set("user_id", claims.UserID.String())
 		c.Set("user_email", claims.Email)
 		c.Set("user_name", claims.Name)
@@ -44,6 +60,23 @@ func AuthMiddleware() gin.HandlerFunc {
 		c.Set("jwt_is_owner", claims.IsOwner)
 		c.Next()
 	}
+}
+
+// isUserActive re-checks users.is_active on every authenticated request —
+// same idiom as RequireTrackerCompany's live-status check below. There's no
+// session/token-revocation store in this codebase, so this indexed PK
+// lookup is how a deleted account's already-issued JWT is cut off before it
+// naturally expires, instead of only cleaning up local client state.
+func isUserActive(userID string) bool {
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+	var isActive bool
+	if err := pool.QueryRow(ctx, `SELECT is_active FROM users WHERE id=$1`, userID).Scan(&isActive); err != nil {
+		// Row missing entirely is unexpected for a validly-signed token; fail
+		// closed rather than let a dangling/foreign user_id through.
+		return false
+	}
+	return isActive
 }
 
 // DownloadAuthMiddleware accepts the JWT either via the Authorization header
