@@ -1777,12 +1777,16 @@ func UpdateTrackerCompanyOrderDetails(c *gin.Context) {
 	companyID := c.GetString("company_id")
 	orderID := c.Param("id")
 	var req struct {
-		BookedForCompanyName string `json:"booked_for_company_name" binding:"required"`
-		BookedForPhone       string `json:"booked_for_phone" binding:"required"`
-		DispatchFrom         string `json:"dispatch_from" binding:"required"`
-		DispatchTo           string `json:"dispatch_to" binding:"required"`
-		TransporterName      string `json:"transporter_name"`
-		TransporterPhone     string `json:"transporter_phone"`
+		BookedForCompanyName string   `json:"booked_for_company_name" binding:"required"`
+		BookedForPhone       string   `json:"booked_for_phone" binding:"required"`
+		DispatchFrom         string   `json:"dispatch_from" binding:"required"`
+		DispatchFromLat      *float64 `json:"dispatch_from_lat"`
+		DispatchFromLng      *float64 `json:"dispatch_from_lng"`
+		DispatchTo           string   `json:"dispatch_to" binding:"required"`
+		DispatchToLat        *float64 `json:"dispatch_to_lat"`
+		DispatchToLng        *float64 `json:"dispatch_to_lng"`
+		TransporterName      string   `json:"transporter_name"`
+		TransporterPhone     string   `json:"transporter_phone"`
 		// DriverName/DriverPhone are the snapshot text fields set at order
 		// creation (see driverName/driverPhone in CreateTrackerCompanyOrder) —
 		// distinct from DriverID reassignment, which stays create-time-only
@@ -1849,9 +1853,11 @@ func UpdateTrackerCompanyOrderDetails(c *gin.Context) {
 	// trip_id/stop count, since there's no reason a single-stop order should
 	// be less protected than a multi-stop one.
 	var currentStatus string
+	var prevFromLat, prevFromLng, prevToLat, prevToLng *float64
 	if err := pool.QueryRow(ctx, `
-		SELECT status FROM tracker_orders WHERE id=$1 AND company_id=$2
-	`, orderID, companyID).Scan(&currentStatus); err != nil {
+		SELECT status, dispatch_from_lat, dispatch_from_lng, dispatch_to_lat, dispatch_to_lng
+		FROM tracker_orders WHERE id=$1 AND company_id=$2
+	`, orderID, companyID).Scan(&currentStatus, &prevFromLat, &prevFromLng, &prevToLat, &prevToLng); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
 		return
 	}
@@ -1884,8 +1890,12 @@ func UpdateTrackerCompanyOrderDetails(c *gin.Context) {
 			priority=$27, expected_delivery_date=$28, declared_value=$29,
 			special_handling=$30, internal_reference=$31,
 			driver_name=$32, driver_phone=$33,
+			dispatch_from_lat=COALESCE($34, dispatch_from_lat),
+			dispatch_from_lng=COALESCE($35, dispatch_from_lng),
+			dispatch_to_lat=COALESCE($36, dispatch_to_lat),
+			dispatch_to_lng=COALESCE($37, dispatch_to_lng),
 			updated_at=NOW()
-		WHERE id=$34 AND company_id=$35
+		WHERE id=$38 AND company_id=$39
 	`, req.BookedForCompanyName, req.BookedForPhone,
 		req.DispatchFrom, req.DispatchTo,
 		nullIfEmpty(req.TransporterName), nullIfEmpty(req.TransporterPhone),
@@ -1901,6 +1911,7 @@ func UpdateTrackerCompanyOrderDetails(c *gin.Context) {
 		priority, req.ExpectedDeliveryDate, req.DeclaredValue,
 		req.SpecialHandling, nullIfEmpty(req.InternalReference),
 		nullIfEmpty(req.DriverName), nullIfEmpty(req.DriverPhone),
+		req.DispatchFromLat, req.DispatchFromLng, req.DispatchToLat, req.DispatchToLng,
 		orderID, companyID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "update failed: " + err.Error()})
@@ -1938,6 +1949,36 @@ func UpdateTrackerCompanyOrderDetails(c *gin.Context) {
 	if err := tx.Commit(ctx); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit"})
 		return
+	}
+
+	// Recompute the cached route if either endpoint's coordinates actually
+	// moved as part of this edit — otherwise route_polyline/route_distance_km/
+	// route_duration_mins would stay stuck on whatever was fetched at order
+	// creation, silently mismatching the just-edited addresses. Mirrors the
+	// COALESCE semantics used in the UPDATE above: an endpoint the client
+	// didn't send keeps its previous value, so it can't spuriously trigger a
+	// refetch. Fire-and-forget, same as creation — never blocks or fails this
+	// request over the directions call.
+	finalFromLat, finalFromLng := prevFromLat, prevFromLng
+	finalToLat, finalToLng := prevToLat, prevToLng
+	if req.DispatchFromLat != nil {
+		finalFromLat = req.DispatchFromLat
+	}
+	if req.DispatchFromLng != nil {
+		finalFromLng = req.DispatchFromLng
+	}
+	if req.DispatchToLat != nil {
+		finalToLat = req.DispatchToLat
+	}
+	if req.DispatchToLng != nil {
+		finalToLng = req.DispatchToLng
+	}
+	coordsChanged := (req.DispatchFromLat != nil && (prevFromLat == nil || *req.DispatchFromLat != *prevFromLat)) ||
+		(req.DispatchFromLng != nil && (prevFromLng == nil || *req.DispatchFromLng != *prevFromLng)) ||
+		(req.DispatchToLat != nil && (prevToLat == nil || *req.DispatchToLat != *prevToLat)) ||
+		(req.DispatchToLng != nil && (prevToLng == nil || *req.DispatchToLng != *prevToLng))
+	if coordsChanged && finalFromLat != nil && finalFromLng != nil && finalToLat != nil && finalToLng != nil {
+		go cacheTrackerOrderRoute(orderID, *finalFromLat, *finalFromLng, *finalToLat, *finalToLng)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "order details updated"})
