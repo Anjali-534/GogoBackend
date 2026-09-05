@@ -29,6 +29,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		// Auth
 		public.POST("/auth/signup", handlers.Signup)
 		public.POST("/auth/login", handlers.Login)
+		public.POST("/auth/google", handlers.GoogleLogin)
 		public.POST("/auth/refresh", handlers.Refresh)
 
 		// GitHub OAuth

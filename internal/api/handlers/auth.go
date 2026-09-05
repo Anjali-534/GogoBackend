@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/crypto/bcrypt"
+	"google.golang.org/api/idtoken"
 )
 
 type LoginRequest struct {
@@ -308,4 +309,149 @@ func Logout(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "logged out"})
 }
 
-// POST /auth/google — Google OAuth login
+// GoogleLoginRequest carries the ID token Google Identity Services hands
+// the frontend after a successful "Sign in with Google" — the frontend
+// never sees or handles credentials itself, just forwards this token here
+// for signature/audience verification.
+type GoogleLoginRequest struct {
+	IDToken string `json:"id_token" binding:"required"`
+}
+
+// GoogleLogin verifies a Google ID token and logs the rider in, creating a
+// new account on first sign-in. Runs alongside plain email+password login
+// (POST /auth/login) — this doesn't replace it.
+//
+// Matching/linking is by verified email, same as GitHub's github_id lookup
+// but keyed on email instead: users.email is UNIQUE, so an email can only
+// ever belong to one row, and linking here (rather than creating a second
+// account) is the only option that doesn't collide with that constraint.
+// A first-time Google sign-in for an email that already has a
+// password_hash account links google_id onto that existing row instead of
+// creating a duplicate; either sign-in method works for it from then on.
+func GoogleLogin(c *gin.Context) {
+	var req GoogleLoginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	cfg := c.MustGet("config").(*config.Config)
+	if cfg.GoogleClientID == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "google sign-in not configured"})
+		return
+	}
+
+	ctx := context.Background()
+
+	// Validate checks the token's signature against Google's published keys
+	// and that its audience matches our client ID — never trust an ID token
+	// without both checks.
+	payload, err := idtoken.Validate(ctx, req.IDToken, cfg.GoogleClientID)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid google token"})
+		return
+	}
+
+	email, _ := payload.Claims["email"].(string)
+	if email == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "google account has no email"})
+		return
+	}
+	if verified, _ := payload.Claims["email_verified"].(bool); !verified {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "google email not verified"})
+		return
+	}
+	name, _ := payload.Claims["name"].(string)
+	if name == "" {
+		name = strings.SplitN(email, "@", 2)[0]
+	}
+	avatarURL, _ := payload.Claims["picture"].(string)
+	googleID := payload.Subject
+
+	pool := db.GetDB().GetPool()
+
+	var userID uuid.UUID
+	var existingName string
+	var existingAvatar *string
+	var existingGoogleID *string
+	err = pool.QueryRow(ctx,
+		"SELECT id, name, avatar_url, google_id FROM users WHERE email = $1",
+		email,
+	).Scan(&userID, &existingName, &existingAvatar, &existingGoogleID)
+
+	if err == pgx.ErrNoRows {
+		// New account: no password, flagged as Google-authenticated via
+		// google_id. Also create the riders row (same dual-insert as
+		// RiderSignup) so GetRiderProfile doesn't 404 on this user's next
+		// page load — phone is left NULL (nullable since migration 059) and
+		// can be added later; there's no phone on a Google identity to seed it with.
+		userID = uuid.New()
+		riderID := uuid.New()
+		tx, txErr := pool.Begin(ctx)
+		if txErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+			return
+		}
+		defer tx.Rollback(ctx)
+
+		if _, err := tx.Exec(ctx,
+			"INSERT INTO users (id, email, name, google_id, avatar_url, is_verified) VALUES ($1, $2, $3, $4, $5, true)",
+			userID, email, name, googleID, nullIfEmpty(avatarURL),
+		); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create user"})
+			return
+		}
+		if _, err := tx.Exec(ctx,
+			"INSERT INTO riders (id, user_id, phone) VALUES ($1, $2, NULL)",
+			riderID, userID,
+		); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create rider profile"})
+			return
+		}
+		if err := tx.Commit(ctx); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+			return
+		}
+		existingName = name
+		if avatarURL != "" {
+			existingAvatar = &avatarURL
+		}
+	} else if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	} else if existingGoogleID == nil {
+		// Existing password-account signing in with Google for the first
+		// time — link, don't duplicate.
+		if _, err := pool.Exec(ctx,
+			"UPDATE users SET google_id = $2, updated_at = NOW() WHERE id = $1",
+			userID, googleID,
+		); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to link google account"})
+			return
+		}
+	}
+
+	// Same admin-role rule as password login (see Login above).
+	cfgRole := ""
+	adminEmail := os.Getenv("ADMIN_EMAIL")
+	if adminEmail != "" && strings.EqualFold(email, adminEmail) {
+		cfgRole = "master_admin"
+	}
+
+	token, err := auth.GenerateToken(userID, email, existingName, cfgRole, cfg)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
+		return
+	}
+
+	c.JSON(http.StatusOK, AuthResponse{
+		User: UserResponse{
+			ID:        userID.String(),
+			Email:     email,
+			Name:      existingName,
+			AvatarURL: existingAvatar,
+		},
+		AccessToken: token,
+		ExpiresIn:   int(cfg.JWTExpiration.Seconds()),
+	})
+}

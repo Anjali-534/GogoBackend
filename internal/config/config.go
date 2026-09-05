@@ -33,7 +33,12 @@ type Config struct {
 	GitLabClientID    string
 	GitLabClientSecret string
 	GitLabRedirectURL string
-	
+
+	// Google Sign-In (bogie.in rider/website login) — ID-token flow, so only
+	// the Client ID (the token's expected audience) is needed server-side.
+	// No client secret: the frontend never does the OAuth code exchange.
+	GoogleClientID string
+
 	// Frontend URLs
 	DashboardURL      string
 	APIBaseURL        string
@@ -99,7 +104,9 @@ func Load() *Config {
 		GitLabClientID:   getString("GITLAB_CLIENT_ID", ""),
 		GitLabClientSecret: getString("GITLAB_CLIENT_SECRET", ""),
 		GitLabRedirectURL: getString("GITLAB_REDIRECT_URL", "http://localhost:3000/auth/gitlab/callback"),
-		
+
+		GoogleClientID: getString("GOOGLE_CLIENT_ID", ""),
+
 		DashboardURL:     getString("DASHBOARD_URL", "http://localhost:3000"),
 		APIBaseURL:       getString("API_BASE_URL", "http://localhost:8080"),
 		
