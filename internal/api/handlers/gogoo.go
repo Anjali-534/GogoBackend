@@ -174,6 +174,137 @@ func DriverSignup(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"user_id": userID, "driver_id": driverID, "message": "Driver account created. Pending verification."})
 }
 
+// CompleteDriverProfile finishes registration for a driver whose account
+// started as a minimal placeholder profile — currently only reachable via
+// DriverGoogleLogin, which can't collect vehicle/bank/MVAG details from a
+// Google token. Requires the same MVAG self-declaration DriverSignup does
+// (a legal checkbox, never defaulted), fills in the real vehicle/bank
+// fields, and charges the one-time registration fee at this point instead
+// of at signup time — mirrors DriverSignup's fee logic but via UPDATE
+// since the drivers/users rows already exist. Authenticated: the driver
+// row is found via the caller's own JWT, never a request param.
+func CompleteDriverProfile(c *gin.Context) {
+	userID := c.GetString("user_id")
+
+	var req struct {
+		Phone                   string `json:"phone"`
+		LicenseNum              string `json:"license_number"`
+		VehicleType             string `json:"vehicle_type"`
+		VehicleCategory         string `json:"vehicle_category"`
+		VehicleNum              string `json:"vehicle_number"`
+		VehicleModel            string `json:"vehicle_model"`
+		VehicleColor            string `json:"vehicle_color"`
+		BankAccountHolder       string `json:"bank_account_holder"`
+		BankAccountNumber       string `json:"bank_account_number"`
+		BankIFSC                string `json:"bank_ifsc"`
+		BankName                string `json:"bank_name"`
+		UPIID                   string `json:"upi_id"`
+		GSTNumber               string `json:"gst_number"`
+		ReferredByCode          string `json:"referred_by_code"`
+		MVAGDeclarationAccepted bool   `json:"mvag_declaration_accepted"`
+		DateOfBirth             string `json:"date_of_birth"` // optional, "2006-01-02"
+		Address                 string `json:"address"`       // optional
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !req.MVAGDeclarationAccepted {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "You must accept the MVAG self-declaration to complete registration"})
+		return
+	}
+
+	var dateOfBirth interface{}
+	if req.DateOfBirth != "" {
+		parsed, err := time.Parse("2006-01-02", req.DateOfBirth)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "date_of_birth must be in YYYY-MM-DD format"})
+			return
+		}
+		dateOfBirth = parsed
+	}
+	if req.VehicleType == "" {
+		req.VehicleType = "cab_4w"
+	}
+	if req.VehicleCategory == "" {
+		switch {
+		case len(req.VehicleType) >= 6 && req.VehicleType[:6] == "truck_":
+			req.VehicleCategory = "truck"
+		case len(req.VehicleType) >= 9 && req.VehicleType[:9] == "ambulance":
+			req.VehicleCategory = "ambulance"
+		case len(req.VehicleType) >= 7 && req.VehicleType[:7] == "parcel_":
+			req.VehicleCategory = "parcel"
+		default:
+			req.VehicleCategory = "cab"
+		}
+	}
+	if req.VehicleNum == "" {
+		req.VehicleNum = "PENDING"
+	}
+	if req.VehicleModel == "" {
+		req.VehicleModel = "N/A"
+	}
+	if req.VehicleColor == "" {
+		req.VehicleColor = "N/A"
+	}
+	if req.LicenseNum == "" {
+		req.LicenseNum = "PENDING"
+	}
+
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+
+	var driverID uuid.UUID
+	var alreadyAccepted bool
+	if err := pool.QueryRow(ctx,
+		"SELECT id, COALESCE(mvag_declaration_accepted, false) FROM drivers WHERE user_id = $1",
+		userID,
+	).Scan(&driverID, &alreadyAccepted); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "driver profile not found"})
+		return
+	}
+	if alreadyAccepted {
+		c.JSON(http.StatusConflict, gin.H{"error": "registration already completed"})
+		return
+	}
+
+	if _, err := pool.Exec(ctx,
+		`UPDATE drivers SET
+			phone = COALESCE(NULLIF($2, ''), phone),
+			license_number = $3, vehicle_type = $4, vehicle_category = $5,
+			vehicle_number = $6, vehicle_model = $7, vehicle_color = $8,
+			bank_account_holder = $9, bank_account_number = $10, bank_ifsc = $11,
+			bank_name = $12, upi_id = $13, gst_number = $14,
+			mvag_declaration_accepted = true, mvag_declaration_at = NOW(),
+			date_of_birth = $15, address = $16, updated_at = NOW()
+		 WHERE id = $1`,
+		driverID, req.Phone, req.LicenseNum, req.VehicleType, req.VehicleCategory,
+		req.VehicleNum, req.VehicleModel, req.VehicleColor,
+		nullIfEmpty(req.BankAccountHolder), nullIfEmpty(req.BankAccountNumber), nullIfEmpty(req.BankIFSC),
+		nullIfEmpty(req.BankName), nullIfEmpty(req.UPIID), nullIfEmpty(req.GSTNumber),
+		dateOfBirth, nullIfEmpty(req.Address),
+	); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to complete driver profile: " + err.Error()})
+		return
+	}
+
+	applyReferral("driver", driverID, req.ReferredByCode)
+
+	// One-time registration fee, charged now instead of at minimal-row
+	// creation time (DriverGoogleLogin left wallet_balance at 0).
+	_, _ = pool.Exec(ctx, `
+        INSERT INTO driver_earnings
+            (id, driver_id, amount, type, description, is_debit, debit_type)
+        VALUES
+            ($1, $2, 700.00, 'adjustment',
+             'One-time registration fee — bogie onboarding',
+             true, 'registration_fee')
+    `, uuid.New(), driverID)
+	_, _ = pool.Exec(ctx, `UPDATE drivers SET wallet_balance = wallet_balance - 700.00 WHERE id = $1`, driverID)
+
+	c.JSON(http.StatusOK, gin.H{"driver_id": driverID, "message": "Driver registration completed"})
+}
+
 func nullIfEmpty(s string) interface{} {
 	if s == "" {
 		return nil

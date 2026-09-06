@@ -30,6 +30,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		public.POST("/auth/signup", handlers.Signup)
 		public.POST("/auth/login", handlers.Login)
 		public.POST("/auth/google", handlers.GoogleLogin)
+		public.POST("/auth/driver/google", handlers.DriverGoogleLogin)
 		public.POST("/auth/refresh", handlers.Refresh)
 
 		// GitHub OAuth
@@ -204,6 +205,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 
 		// Driver profile & history
 		gogoo.GET("/driver/profile", handlers.GetDriverProfile)
+		gogoo.POST("/driver/complete-profile", handlers.CompleteDriverProfile)
 		gogoo.GET("/driver/active-booking", handlers.GetDriverActiveBooking)
 		gogoo.GET("/driver/bookings", handlers.ListDriverBookings)
 		gogoo.GET("/driver/reviews", handlers.GetDriverReviews)

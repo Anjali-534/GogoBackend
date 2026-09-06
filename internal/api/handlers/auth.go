@@ -455,3 +455,168 @@ func GoogleLogin(c *gin.Context) {
 		ExpiresIn:   int(cfg.JWTExpiration.Seconds()),
 	})
 }
+
+// DriverGoogleLogin is driver-app's equivalent of GoogleLogin, kept fully
+// separate so nothing here can affect the rider path. Verifies the same
+// way, but a driver account can't be fully created from a Google token
+// alone: DriverSignup requires an explicit MVAG self-declaration
+// acceptance (a legal checkbox — never something a backend can default to
+// true) plus real vehicle/bank details. So a new driver here gets a
+// minimal row instead — same PENDING/N/A sentinel values DriverSignup
+// already uses for blank fields, phone left NULL (nullable since
+// migration 060), mvag_declaration_accepted left at its default false,
+// and wallet_balance explicitly 0 rather than the column's -700 default:
+// no registration fee is charged until the driver actually finishes
+// registration via POST /gogoo/driver/complete-profile, which is also
+// where that fee gets charged. The response's profile_complete flag
+// tells the app whether to route the driver home or into the existing
+// vehicle/document onboarding flow.
+func DriverGoogleLogin(c *gin.Context) {
+	var req GoogleLoginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	cfg := c.MustGet("config").(*config.Config)
+	if cfg.GoogleClientID == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "google sign-in not configured"})
+		return
+	}
+
+	ctx := context.Background()
+
+	payload, err := idtoken.Validate(ctx, req.IDToken, cfg.GoogleClientID)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid google token"})
+		return
+	}
+
+	email, _ := payload.Claims["email"].(string)
+	if email == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "google account has no email"})
+		return
+	}
+	if verified, _ := payload.Claims["email_verified"].(bool); !verified {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "google email not verified"})
+		return
+	}
+	name, _ := payload.Claims["name"].(string)
+	if name == "" {
+		name = strings.SplitN(email, "@", 2)[0]
+	}
+	avatarURL, _ := payload.Claims["picture"].(string)
+	googleID := payload.Subject
+
+	pool := db.GetDB().GetPool()
+
+	var userID uuid.UUID
+	var existingName string
+	var existingAvatar *string
+	var existingGoogleID *string
+	err = pool.QueryRow(ctx,
+		"SELECT id, name, avatar_url, google_id FROM users WHERE email = $1",
+		email,
+	).Scan(&userID, &existingName, &existingAvatar, &existingGoogleID)
+
+	var mvagAccepted bool
+
+	if err == pgx.ErrNoRows {
+		// Brand-new account: create users + a minimal drivers row together.
+		userID = uuid.New()
+		driverID := uuid.New()
+		referralCode := generateReferralCode(ctx, "drivers", "GD")
+		tx, txErr := pool.Begin(ctx)
+		if txErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+			return
+		}
+		defer tx.Rollback(ctx)
+
+		if _, err := tx.Exec(ctx,
+			"INSERT INTO users (id, email, name, google_id, avatar_url, is_verified) VALUES ($1, $2, $3, $4, $5, true)",
+			userID, email, name, googleID, nullIfEmpty(avatarURL),
+		); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create user"})
+			return
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO drivers (id, user_id, phone, license_number, vehicle_type, vehicle_category, vehicle_number, vehicle_model, vehicle_color, wallet_balance, referral_code)
+			 VALUES ($1, $2, NULL, 'PENDING', 'cab_4w', 'cab', 'PENDING', 'N/A', 'N/A', 0, $3)`,
+			driverID, userID, referralCode,
+		); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create driver profile"})
+			return
+		}
+		if err := tx.Commit(ctx); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+			return
+		}
+		existingName = name
+		if avatarURL != "" {
+			existingAvatar = &avatarURL
+		}
+		mvagAccepted = false
+	} else if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	} else {
+		if existingGoogleID == nil {
+			// Existing password-account signing in with Google for the
+			// first time — link, don't duplicate.
+			if _, err := pool.Exec(ctx,
+				"UPDATE users SET google_id = $2, updated_at = NOW() WHERE id = $1",
+				userID, googleID,
+			); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to link google account"})
+				return
+			}
+		}
+
+		// A users row can exist without a drivers row — e.g. this email
+		// already signed into user-app as a rider. Treat that exactly like
+		// a brand-new driver: create the minimal drivers row now.
+		var driverID uuid.UUID
+		err = pool.QueryRow(ctx, "SELECT id, COALESCE(mvag_declaration_accepted, false) FROM drivers WHERE user_id = $1", userID).Scan(&driverID, &mvagAccepted)
+		if err == pgx.ErrNoRows {
+			driverID = uuid.New()
+			referralCode := generateReferralCode(ctx, "drivers", "GD")
+			if _, err := pool.Exec(ctx,
+				`INSERT INTO drivers (id, user_id, phone, license_number, vehicle_type, vehicle_category, vehicle_number, vehicle_model, vehicle_color, wallet_balance, referral_code)
+				 VALUES ($1, $2, NULL, 'PENDING', 'cab_4w', 'cab', 'PENDING', 'N/A', 'N/A', 0, $3)`,
+				driverID, userID, referralCode,
+			); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create driver profile"})
+				return
+			}
+			mvagAccepted = false
+		} else if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+			return
+		}
+	}
+
+	cfgRole := ""
+	adminEmail := os.Getenv("ADMIN_EMAIL")
+	if adminEmail != "" && strings.EqualFold(email, adminEmail) {
+		cfgRole = "master_admin"
+	}
+
+	token, err := auth.GenerateToken(userID, email, existingName, cfgRole, cfg)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"user": UserResponse{
+			ID:        userID.String(),
+			Email:     email,
+			Name:      existingName,
+			AvatarURL: existingAvatar,
+		},
+		"access_token":     token,
+		"expires_in":       int(cfg.JWTExpiration.Seconds()),
+		"profile_complete": mvagAccepted,
+	})
+}
