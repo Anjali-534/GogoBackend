@@ -1529,16 +1529,70 @@ func UpdateBookingStatus(c *gin.Context) {
 
 	switch req.Status {
 	case "arriving":
-		pool.Exec(ctx, `UPDATE bookings SET status='arriving',arrived_at=NOW() WHERE id=$1`, bookingID)
+		// Guarded on the expected prior status (like AcceptBooking's own
+		// searching->accepted guard) so a lost-response retry or a stray
+		// duplicate tap just no-ops with a clean 409 instead of silently
+		// re-running arrived_at=NOW() or masking a real state mismatch.
+		tag, err := pool.Exec(ctx, `UPDATE bookings SET status='arriving',arrived_at=NOW() WHERE id=$1 AND status='accepted'`, bookingID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update status"})
+			return
+		}
+		if tag.RowsAffected() == 0 {
+			c.JSON(http.StatusConflict, gin.H{"error": "invalid_transition", "message": "Booking is not awaiting driver arrival"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "arriving"})
+		return
 	case "in_progress":
-		pool.Exec(ctx, `UPDATE bookings SET status='in_progress',started_at=NOW() WHERE id=$1`, bookingID)
+		// Same guard as VerifyRideOTP's own status!="arriving" check — this
+		// path exists for callers other than the OTP flow, so it needs the
+		// identical prior-status requirement to stay consistent with it.
+		tag, err := pool.Exec(ctx, `UPDATE bookings SET status='in_progress',started_at=NOW() WHERE id=$1 AND status='arriving'`, bookingID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update status"})
+			return
+		}
+		if tag.RowsAffected() == 0 {
+			c.JSON(http.StatusConflict, gin.H{"error": "invalid_transition", "message": "Booking is not awaiting ride start"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "in_progress"})
+		return
 	case "completed":
 		// final_fare is never taken from the client — no legitimate caller
 		// sends it (the app always relies on the estimated_fare fallback),
 		// so accepting it here was a pure fare-tampering hole.
 		var finalFare float64
 		pool.QueryRow(ctx, `SELECT COALESCE(estimated_fare,0) FROM bookings WHERE id=$1`, bookingID).Scan(&finalFare)
-		pool.Exec(ctx, `UPDATE bookings SET status='completed',completed_at=NOW(),final_fare=$1 WHERE id=$2`, finalFare, bookingID)
+
+		// Guard against completing the same booking twice: the manual
+		// "Complete Trip" button and the GPS-proximity auto-complete
+		// (startGpsPush in the driver app) can both hit this endpoint for
+		// the same booking within moments of each other, and a lost
+		// response can make the client retry a completion that already
+		// landed. Only the request that actually flips in_progress ->
+		// completed may run the wallet/earnings settlement below; the
+		// loser gets a clean "already_completed" instead of re-running it.
+		tag, err := pool.Exec(ctx, `UPDATE bookings SET status='completed',completed_at=NOW(),final_fare=$1 WHERE id=$2 AND status='in_progress'`, finalFare, bookingID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update status"})
+			return
+		}
+		if tag.RowsAffected() == 0 {
+			var currentStatus string
+			pool.QueryRow(ctx, `SELECT status FROM bookings WHERE id=$1`, bookingID).Scan(&currentStatus)
+			if currentStatus == "completed" {
+				c.JSON(http.StatusConflict, gin.H{
+					"error":   "already_completed",
+					"message": "This trip is already marked complete",
+					"status":  "completed",
+				})
+				return
+			}
+			c.JSON(http.StatusConflict, gin.H{"error": "invalid_transition", "message": "Booking is not in progress"})
+			return
+		}
 
 		// Wallet debit — the only place a ride's fare is actually collected
 		// from a rider's wallet. Booked as payment_method='wallet' but the
