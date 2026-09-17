@@ -1683,11 +1683,40 @@ func UpdateBookingStatus(c *gin.Context) {
 			fee, _, _, _ = calcCancellationFee(status, category, vehicleType, acceptedAt)
 		}
 
-		pool.Exec(ctx, `
+		// Guard against cancelling a booking twice — e.g. a driver retrying a
+		// cancel that actually already landed (see the driver-app GPS-poll
+		// race that could make a successful cancel look like it silently
+		// failed), or any other duplicate/late request. Cancellation is
+		// valid from any state except one already terminal: support/admin
+		// panels can cancel an in_progress ride (dispute handling — see
+		// cab-panel's own "not cancelled/completed" rule), scheduled rides
+		// cancel free before dispatch, and calcCancellationFee above already
+		// handles searching/scheduled/accepted+ uniformly. So the guard is a
+		// blocklist on the terminal states, not an allowlist of one specific
+		// prior status like the other transitions above.
+		tag, err := pool.Exec(ctx, `
             UPDATE bookings
             SET status='cancelled', cancelled_at=NOW(), cancelled_by=$1, cancel_reason=$2, cancellation_fee=$3
-            WHERE id=$4
+            WHERE id=$4 AND status NOT IN ('completed','cancelled')
         `, req.CancelBy, req.CancelReason, fee, bookingID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update status"})
+			return
+		}
+		if tag.RowsAffected() == 0 {
+			var currentStatus string
+			pool.QueryRow(ctx, `SELECT status FROM bookings WHERE id=$1`, bookingID).Scan(&currentStatus)
+			if currentStatus == "cancelled" {
+				c.JSON(http.StatusConflict, gin.H{
+					"error":   "already_cancelled",
+					"message": "This ride is already cancelled",
+					"status":  "cancelled",
+				})
+				return
+			}
+			c.JSON(http.StatusConflict, gin.H{"error": "invalid_transition", "message": "This ride can no longer be cancelled"})
+			return
+		}
 
 		var cancelRiderID string
 		pool.QueryRow(ctx, `SELECT rider_id FROM bookings WHERE id=$1`, bookingID).Scan(&cancelRiderID)
