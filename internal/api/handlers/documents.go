@@ -92,6 +92,30 @@ var docLabels = map[string]string{
 	"vehicle_photo_side":    "Vehicle Photo (Side)",
 }
 
+// docTypeAliases maps a doc_type an upload flow actually sends to the
+// requiredDocs entry it satisfies. Unlike the *_front/*_back pairs in
+// docLabels (genuinely different uploads for the same document), these are
+// two different apps/flows naming the exact same real-world document
+// differently: driver-register.tsx's truck_outstation step collects the
+// permit as "national_permit" while requiredDocs["truck"] — shared with
+// truck_city — expects "permit". Resolved at read time (GetDriverDocuments,
+// maybeAutoVerifyDriver) rather than by renaming, so a driver who already
+// has a national_permit row uploaded is immediately recognized, not just
+// new uploads going forward.
+var docTypeAliases = map[string]string{
+	"national_permit": "permit",
+}
+
+// canonicalDocType resolves a doc_type as actually stored in driver_documents
+// to the requiredDocs id it counts against, via docTypeAliases. Returns
+// docType unchanged when it has no alias.
+func canonicalDocType(docType string) string {
+	if canon, ok := docTypeAliases[docType]; ok {
+		return canon
+	}
+	return docType
+}
+
 func getVehicleCategory(vehicleType string) string {
 	// The app now sends the category code directly.
 	switch vehicleType {
@@ -378,6 +402,11 @@ func GetDriverDocuments(c *gin.Context) {
 	}
 	defer rows.Close()
 
+	// Keyed by canonicalDocType so an upload under an alias (e.g.
+	// "national_permit") is found when checking the "permit" requirement.
+	// The real stored doc_type still goes into the value under "doc_type" —
+	// review/delete actions target the actual row, not the alias's canonical
+	// name, which may not exist as a row at all.
 	uploaded := map[string]map[string]interface{}{}
 	for rows.Next() {
 		var docType, fileURL, fileName, mimeType, status, rejectReason, docNumber, expiryDate string
@@ -385,7 +414,8 @@ func GetDriverDocuments(c *gin.Context) {
 		var uploadedAt time.Time
 		rows.Scan(&docType, &fileURL, &fileName, &fileSize, &mimeType, &status, &rejectReason,
 			&docNumber, &expiryDate, &uploadedAt)
-		uploaded[docType] = map[string]interface{}{
+		uploaded[canonicalDocType(docType)] = map[string]interface{}{
+			"doc_type":      docType,
 			"file_url":      fileURL,
 			"file_name":     fileName,
 			"file_size":     fileSize,
@@ -680,13 +710,35 @@ func maybeAutoVerifyDriver(ctx context.Context, pool *pgxpool.Pool, driverID str
 	category := getVehicleCategory(vehicleType)
 	required := append(append([]string{}, requiredDocs["common"]...), requiredDocs[category]...)
 
-	var approvedCount int
-	pool.QueryRow(ctx, `
-		SELECT COUNT(*) FROM driver_documents
-		WHERE driver_id=$1 AND status='approved' AND doc_type = ANY($2)
-	`, driverID, required).Scan(&approvedCount)
+	// Search for both each required doc_type and any alias that satisfies it
+	// (e.g. an approved "national_permit" row counts toward "permit"), then
+	// count distinct canonical types rather than raw rows — a driver with
+	// approved rows under both a canonical id and its alias must still only
+	// count once toward len(required).
+	searchTypes := append([]string{}, required...)
+	for alias, canon := range docTypeAliases {
+		for _, r := range required {
+			if r == canon {
+				searchTypes = append(searchTypes, alias)
+				break
+			}
+		}
+	}
 
-	allApproved := approvedCount == len(required)
+	rows, _ := pool.Query(ctx, `
+		SELECT DISTINCT doc_type FROM driver_documents
+		WHERE driver_id=$1 AND status='approved' AND doc_type = ANY($2)
+	`, driverID, searchTypes)
+	approvedCanon := map[string]bool{}
+	for rows.Next() {
+		var dt string
+		if err := rows.Scan(&dt); err == nil {
+			approvedCanon[canonicalDocType(dt)] = true
+		}
+	}
+	rows.Close()
+
+	allApproved := len(approvedCanon) == len(required)
 
 	if allApproved && bgStatus != "flagged" {
 		pool.Exec(ctx, `
