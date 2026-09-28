@@ -90,6 +90,14 @@ func main() {
 	go handlers.StartScheduledDispatcher()
 	log.Println("✓ Scheduled ride dispatcher running")
 
+	// Booking expiry sweeper — ticks every 15s, auto-cancels a 'searching'
+	// booking once no driver has accepted within cfg.SearchTimeoutSeconds.
+	// The read-side guard in ListPendingBookings is the primary defense
+	// (hides a stale request from drivers immediately); this is the backstop
+	// that actually settles the booking's own status.
+	go handlers.StartBookingExpirySweeper(cfg)
+	log.Println("✓ Booking expiry sweeper running")
+
 	// Deleted-account purge — ticks daily, hard-deletes location history
 	// for riders whose account deletion was requested 30+ days ago.
 	go handlers.StartAccountPurge()

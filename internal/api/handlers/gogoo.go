@@ -1480,6 +1480,18 @@ func AcceptBooking(c *gin.Context) {
 
 	tag, _ := pool.Exec(ctx, `UPDATE bookings SET driver_id=$1,status='accepted',accepted_at=NOW() WHERE id=$2 AND status='searching'`, driverID, bookingID)
 	if tag.RowsAffected() == 0 {
+		// Distinguish "the rider already sees this as failed" (expiry
+		// sweeper got there first — see expiry.go) from a genuine race with
+		// another driver, so the client isn't told a ride simply "got taken"
+		// when it actually timed out and the rider has already been shown a
+		// no-driver-found screen.
+		var currentStatus, currentCancelReason string
+		pool.QueryRow(ctx, `SELECT status, COALESCE(cancel_reason,'') FROM bookings WHERE id=$1`, bookingID).
+			Scan(&currentStatus, &currentCancelReason)
+		if currentStatus == "cancelled" && currentCancelReason == "no_driver_found" {
+			c.JSON(http.StatusConflict, gin.H{"error": "expired", "message": "This request has expired"})
+			return
+		}
 		c.JSON(http.StatusConflict, gin.H{"error": "This ride was already accepted by another driver"})
 		return
 	}

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/deploykit/backend/internal/config"
 	"github.com/deploykit/backend/internal/db"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -14,9 +15,20 @@ import (
 // Driver feed: all unassigned ride requests, newest first.
 // (MVP: returns all 'searching' bookings. Geo-filtering by driver
 // proximity can be layered on later using current_lat/current_lng.)
+//
+// The read-side expiry guard below (b.updated_at cutoff) is the important
+// one, not the sweeper (StartBookingExpirySweeper): even if the sweeper is
+// late or down, a request whose search window has elapsed must still
+// vanish from every driver's feed immediately. updated_at is the right
+// "search started" instant for both an instant booking (defaults to
+// created_at at INSERT) and a scheduled one dispatched later (the
+// scheduled dispatcher explicitly bumps updated_at at dispatch time,
+// in scheduler.go) — requested_at is NOT used here because it stays at
+// the scheduled ride's original creation time.
 func ListPendingBookings(c *gin.Context) {
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
+	cfg := c.MustGet("config").(*config.Config)
 
 	// rider_phone is deliberately NOT in this feed: it goes to every driver
 	// for every un-accepted booking. Drivers get the phone from GetBooking
@@ -27,15 +39,16 @@ func ListPendingBookings(c *gin.Context) {
            b.drop_lat, b.drop_lng, b.drop_address,
            COALESCE(b.estimated_fare,0), COALESCE(b.distance_km,0),
            COALESCE(u.name,''),
-           COALESCE(st.name,''), b.requested_at
+           COALESCE(st.name,''), b.requested_at, b.updated_at
     FROM bookings b
     JOIN riders r ON r.id = b.rider_id
     JOIN users u  ON u.id = r.user_id
     LEFT JOIN service_types st ON st.id = b.service_type_id
     WHERE b.status = 'searching'
+      AND b.updated_at > NOW() - ($1 || ' seconds')::interval
     ORDER BY b.requested_at DESC
     LIMIT 50
-`)
+`, cfg.SearchTimeoutSeconds)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
@@ -47,27 +60,32 @@ func ListPendingBookings(c *gin.Context) {
 		var id, riderID, serviceTypeID, status string
 		var pLat, pLng, dLat, dLng, fare, dist float64
 		var pAddr, dAddr, riderName, serviceName string
-		var requestedAt interface{}
+		var requestedAt, searchStartedAt interface{}
 		if err := rows.Scan(&id, &riderID, &serviceTypeID, &status,
 			&pLat, &pLng, &pAddr, &dLat, &dLng, &dAddr,
-			&fare, &dist, &riderName, &serviceName, &requestedAt); err != nil {
+			&fare, &dist, &riderName, &serviceName, &requestedAt, &searchStartedAt); err != nil {
 			continue
 		}
 		out = append(out, gin.H{
-			"id":              id,
-			"rider_id":        riderID,
-			"service_type_id": serviceTypeID,
-			"service_name":    serviceName,
-			"status":          status,
-			"pickup":          gin.H{"lat": pLat, "lng": pLng, "address": pAddr},
-			"drop":            gin.H{"lat": dLat, "lng": dLng, "address": dAddr},
-			"estimated_fare":  fare,
-			"distance_km":     dist,
-			"rider_name":      riderName,
-			"requested_at":    requestedAt,
+			"id":                id,
+			"rider_id":          riderID,
+			"service_type_id":   serviceTypeID,
+			"service_name":      serviceName,
+			"status":            status,
+			"pickup":            gin.H{"lat": pLat, "lng": pLng, "address": pAddr},
+			"drop":              gin.H{"lat": dLat, "lng": dLng, "address": dAddr},
+			"estimated_fare":    fare,
+			"distance_km":       dist,
+			"rider_name":        riderName,
+			"requested_at":      requestedAt,
+			// When the current search window actually started (see the
+			// query comment above) — the driver-app countdown is derived
+			// from this plus /gogoo/services' search_timeout_seconds, not
+			// requested_at.
+			"search_started_at": searchStartedAt,
 		})
 	}
-	c.JSON(http.StatusOK, gin.H{"bookings": out})
+	c.JSON(http.StatusOK, gin.H{"bookings": out, "search_timeout_seconds": cfg.SearchTimeoutSeconds})
 }
 
 // POST /gogoo/drivers/:id/location
@@ -153,7 +171,7 @@ func GetBooking(c *gin.Context) {
 // calling this instead of GetBooking's rider/driver JWT-based check.
 func writeBookingDetail(c *gin.Context, ctx context.Context, pool *pgxpool.Pool, bookingID string) {
 	var (
-		id, riderID, status                              string
+		id, riderID, status, serviceTypeID               string
 		driverID                                         *string
 		pLat, pLng, dLat, dLng                           float64
 		pAddr, dAddr                                     string
@@ -182,7 +200,7 @@ func writeBookingDetail(c *gin.Context, ctx context.Context, pool *pgxpool.Pool,
 	)
 
 	err := pool.QueryRow(ctx, `
-		SELECT b.id, b.rider_id, b.status, b.driver_id,
+		SELECT b.id, b.rider_id, b.status, b.service_type_id, b.driver_id,
 		       b.pickup_lat, b.pickup_lng, b.pickup_address,
 		       b.drop_lat, b.drop_lng, b.drop_address,
 		       COALESCE(b.estimated_fare,0), COALESCE(b.distance_km,0),
@@ -219,7 +237,7 @@ func writeBookingDetail(c *gin.Context, ctx context.Context, pool *pgxpool.Pool,
 		LEFT JOIN service_types st ON st.id   = b.service_type_id
 		WHERE b.id = $1
 	`, bookingID).Scan(
-		&id, &riderID, &status, &driverID,
+		&id, &riderID, &status, &serviceTypeID, &driverID,
 		&pLat, &pLng, &pAddr, &dLat, &dLng, &dAddr,
 		&fare, &dist,
 		&driverLat, &driverLng, &driverHeading, &driverSpeed, &driverUpdatedAt,
@@ -243,6 +261,7 @@ func writeBookingDetail(c *gin.Context, ctx context.Context, pool *pgxpool.Pool,
 		"id":                 id,
 		"rider_id":           riderID,
 		"status":             status,
+		"service_type_id":    serviceTypeID,
 		"pickup":             gin.H{"lat": pLat, "lng": pLng, "address": pAddr},
 		"drop":               gin.H{"lat": dLat, "lng": dLng, "address": dAddr},
 		"estimated_fare":     fare,

@@ -394,6 +394,35 @@ func notifyDriversOfNewRide(bookingID, category, pickupAddress string, fare floa
 	}()
 }
 
+// notifyRiderNoDriverFound tells a rider their search timed out with no
+// driver accepting — fired once per booking by the expiry sweeper
+// (expiry.go). riderID is bookings.rider_id (the riders.id row), not the
+// user_id push_tokens is keyed by, hence the join.
+func notifyRiderNoDriverFound(riderID, bookingID string) {
+	go func() {
+		ctx := context.Background()
+		pool := db.GetDB().GetPool()
+
+		var token string
+		pool.QueryRow(ctx, `
+			SELECT pt.token FROM push_tokens pt
+			JOIN riders r ON r.user_id = pt.user_id::uuid
+			WHERE r.id = $1 AND pt.token <> ''
+		`, riderID).Scan(&token)
+		if token == "" {
+			return
+		}
+
+		dispatchExpoPush(
+			[]string{token},
+			"No driver found",
+			"No drivers were available nearby. Tap to try again.",
+			"no_driver_found",
+			map[string]string{"booking_id": bookingID},
+		)
+	}()
+}
+
 // POST /gogoo/admin/notifications
 func CreateNotification(c *gin.Context) {
 	var req struct {

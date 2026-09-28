@@ -23,7 +23,11 @@ type Config struct {
 	// JWT
 	JWTSecret         string
 	JWTExpiration     time.Duration
-	
+
+	// Ride matching — how long a booking stays in 'searching' before the
+	// sweeper (StartBookingExpirySweeper) auto-cancels it as no_driver_found.
+	SearchTimeoutSeconds int
+
 	// GitHub OAuth
 	GitHubClientID    string
 	GitHubClientSecret string
@@ -96,7 +100,9 @@ func Load() *Config {
 		
 		JWTSecret:        getString("JWT_SECRET", ""),
 		JWTExpiration:    time.Hour * 24 * 30,
-		
+
+		SearchTimeoutSeconds: getInt("SEARCH_TIMEOUT_SECONDS", 180),
+
 		GitHubClientID:   getString("GITHUB_CLIENT_ID", ""),
 		GitHubClientSecret: getString("GITHUB_CLIENT_SECRET", ""),
 		GitHubRedirectURL: getString("GITHUB_REDIRECT_URL", "http://localhost:3000/auth/github/callback"),
