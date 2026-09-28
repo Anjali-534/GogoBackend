@@ -1,6 +1,7 @@
 package config
 
 import (
+	"log"
 	"os"
 	"strconv"
 	"time"
@@ -137,6 +138,14 @@ func Load() *Config {
 		ResendFromEmail: getString("RESEND_FROM_EMAIL", "statements@bogie.in"),
 
 		TrackerPanelURL: getString("TRACKER_PANEL_URL", "https://bogie-tracker.bogie.in"),
+	}
+
+	if cfg.SearchTimeoutSeconds <= 0 {
+		log.Printf("config: SEARCH_TIMEOUT_SECONDS=%d invalid, using 180", cfg.SearchTimeoutSeconds)
+		cfg.SearchTimeoutSeconds = 180
+	} else if cfg.SearchTimeoutSeconds < 15 {
+		log.Printf("config: SEARCH_TIMEOUT_SECONDS=%d too low, using 15", cfg.SearchTimeoutSeconds)
+		cfg.SearchTimeoutSeconds = 15
 	}
 
 	return cfg
