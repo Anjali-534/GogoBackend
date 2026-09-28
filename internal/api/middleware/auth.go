@@ -2,12 +2,16 @@ package middleware
 
 import (
 	"context"
+	"errors"
+	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/deploykit/backend/internal/auth"
 	"github.com/deploykit/backend/internal/db"
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
 )
 
 // AuthMiddleware validates JWT tokens
@@ -15,6 +19,7 @@ func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
 		if authHeader == "" {
+			log.Printf("AuthMiddleware: 401 branch=missing_header user_id=unknown")
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "missing authorization header"})
 			c.Abort()
 			return
@@ -22,6 +27,7 @@ func AuthMiddleware() gin.HandlerFunc {
 
 		parts := strings.Split(authHeader, " ")
 		if len(parts) != 2 || parts[0] != "Bearer" {
+			log.Printf("AuthMiddleware: 401 branch=malformed_header user_id=unknown")
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid authorization header"})
 			c.Abort()
 			return
@@ -30,6 +36,7 @@ func AuthMiddleware() gin.HandlerFunc {
 		token := parts[1]
 		claims, err := auth.ValidateToken(token)
 		if err != nil {
+			log.Printf("AuthMiddleware: 401 branch=invalid_token user_id=unknown")
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
 			c.Abort()
 			return
@@ -45,10 +52,26 @@ func AuthMiddleware() gin.HandlerFunc {
 		// a row that was never going to exist in `users`. Scope the check to
 		// blank-panel tokens only, matching what DeleteRiderAccount actually
 		// deletes.
-		if claims.Panel == "" && !isUserActive(claims.UserID.String()) {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "account deleted"})
-			c.Abort()
-			return
+		if claims.Panel == "" {
+			active, err := isUserActive(claims.UserID.String())
+			if err != nil {
+				// The is_active lookup itself failed (DB down, pool
+				// exhausted, timeout, ...) — this says nothing about whether
+				// the session is valid, so it must not look like one. A
+				// client that treats every 401 as "log out" would otherwise
+				// force out a genuinely active rider over an unrelated
+				// backend hiccup.
+				log.Printf("AuthMiddleware: 503 branch=db_error user_id=%s err=%v", claims.UserID.String(), err)
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "temporarily unavailable"})
+				c.Abort()
+				return
+			}
+			if !active {
+				log.Printf("AuthMiddleware: 401 branch=account_deleted user_id=%s", claims.UserID.String())
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "account deleted"})
+				c.Abort()
+				return
+			}
 		}
 
 		c.Set("user_id", claims.UserID.String())
@@ -67,16 +90,29 @@ func AuthMiddleware() gin.HandlerFunc {
 // session/token-revocation store in this codebase, so this indexed PK
 // lookup is how a deleted account's already-issued JWT is cut off before it
 // naturally expires, instead of only cleaning up local client state.
-func isUserActive(userID string) bool {
-	ctx := context.Background()
+//
+// Returns (active, err). err is non-nil only for a genuine query failure —
+// a missing row is a definitive "not active" (false, nil), not a transient
+// error, so callers can fail closed on both while still telling "this
+// account is gone" apart from "we couldn't check right now".
+func isUserActive(userID string) (bool, error) {
+	// This runs on every authenticated request, so a slow query must not hang
+	// the request indefinitely — bound it and let the timeout fall through
+	// to the same db_error/503 path as any other query failure.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	pool := db.GetDB().GetPool()
 	var isActive bool
-	if err := pool.QueryRow(ctx, `SELECT is_active FROM users WHERE id=$1`, userID).Scan(&isActive); err != nil {
+	err := pool.QueryRow(ctx, `SELECT is_active FROM users WHERE id=$1`, userID).Scan(&isActive)
+	if errors.Is(err, pgx.ErrNoRows) {
 		// Row missing entirely is unexpected for a validly-signed token; fail
 		// closed rather than let a dangling/foreign user_id through.
-		return false
+		return false, nil
 	}
-	return isActive
+	if err != nil {
+		return false, err
+	}
+	return isActive, nil
 }
 
 // DownloadAuthMiddleware accepts the JWT either via the Authorization header
