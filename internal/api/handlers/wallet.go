@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"time"
@@ -36,7 +37,7 @@ func riderIDForUser(ctx context.Context, pool *pgxpool.Pool, userID string) (str
 
 // POST /gogoo/wallet/topup/create-order
 func CreateWalletTopupOrder(c *gin.Context) {
-	if rzp == nil {
+	if rzp == nil || !riderOnlinePaymentsEnabled() {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "payments not yet configured"})
 		return
 	}
@@ -75,10 +76,21 @@ func CreateWalletTopupOrder(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	resp := gin.H{
 		"order_id": orderID,
 		"amount":   req.Amount,
-	})
+	}
+	token, err := payments.GenerateCheckoutToken(orderID, riderID, amountPaise, 15*time.Minute)
+	if err != nil {
+		// The order already exists on Razorpay's side at this point — that's
+		// fine, it just expires unused on their end. Don't fail the whole
+		// request over a missing checkout URL; the client still has
+		// order_id if it ever needs to fall back.
+		log.Printf("CreateWalletTopupOrder: failed to sign checkout token for order=%s: %v", orderID, err)
+	} else {
+		resp["checkout_url"] = "https://" + c.Request.Host + "/gogoo/wallet/topup/checkout?t=" + token
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // POST /gogoo/wallet/topup/webhook — public (no JWT: this is Razorpay
@@ -217,7 +229,7 @@ func GetWalletLedger(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"balance":            balance,
-		"payments_available": rzp != nil,
+		"payments_available": rzp != nil && riderOnlinePaymentsEnabled(),
 		"ledger":             out,
 	})
 }

@@ -45,8 +45,17 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 
 		// Bogie Wallet top-up webhook — Razorpay calls this directly with no
 		// app JWT. Trust comes entirely from the verified signature inside
-		// the handler, never from auth middleware.
+		// the handler, never from auth middleware. Deliberately NOT gated by
+		// RIDER_ONLINE_PAYMENTS_ENABLED — a payment already captured must
+		// still be credited even if the flag is later flipped off.
 		public.POST("/gogoo/wallet/topup/webhook", handlers.WalletTopupWebhook)
+
+		// Hosted Razorpay Checkout for a rider wallet top-up — opened in the
+		// rider's external mobile browser (no app JWT available there), so
+		// the signed token in ?t= is the only auth. Both routes public;
+		// both self-gate on RIDER_ONLINE_PAYMENTS_ENABLED inside the handler.
+		public.GET("/gogoo/wallet/topup/checkout", handlers.WalletTopupCheckoutPage)
+		public.POST("/gogoo/wallet/topup/checkout-return", handlers.WalletTopupCheckoutReturn)
 
 		// Driver Wallet — Razorpay (top-up) and RazorpayX (payout) webhooks,
 		// both public for the same reason as above: the caller is the payment

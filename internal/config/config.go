@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -165,4 +166,18 @@ func getInt(key string, defaultVal int) int {
 		}
 	}
 	return defaultVal
+}
+
+// getBool is unused by RIDER_ONLINE_PAYMENTS_ENABLED on purpose: Load() runs
+// once at boot, so anything read through Config would freeze the flag's
+// value for the process lifetime. That flag is read fresh via os.Getenv on
+// every call instead (see handlers.riderOnlinePaymentsEnabled), so it can be
+// flipped in Railway without a redeploy. This helper exists for any future
+// boot-time-cached bool config that doesn't need that property.
+func getBool(key string, defaultVal bool) bool {
+	val := strings.TrimSpace(os.Getenv(key))
+	if val == "" {
+		return defaultVal
+	}
+	return val == "true" || val == "1"
 }

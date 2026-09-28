@@ -31,6 +31,17 @@ type RazorpayClient interface {
 	// the raw request body. Nothing from a webhook payload is trusted until
 	// this returns true.
 	VerifyWebhookSignature(body []byte, signature string) bool
+
+	// VerifyPaymentSignature checks the razorpay_signature Razorpay's hosted
+	// Checkout redirects to callback_url with — HMAC-SHA256 of
+	// "order_id|payment_id" keyed with key_secret. This is a DIFFERENT
+	// formula from VerifyWebhookSignature (which HMACs the raw webhook body
+	// with a separate webhook secret) — the two are not interchangeable.
+	// This check is for logging/observability only: the callback arrives
+	// from the user's own browser, not from Razorpay's servers directly, so
+	// even a valid signature here must never be what credits money — only
+	// the signature-verified webhook may do that.
+	VerifyPaymentSignature(orderID, paymentID, signature string) bool
 }
 
 type razorpayClient struct {
@@ -114,6 +125,16 @@ func (r *razorpayClient) VerifyWebhookSignature(body []byte, signature string) b
 	}
 	mac := hmac.New(sha256.New, []byte(r.webhookSecret))
 	mac.Write(body)
+	expected := hex.EncodeToString(mac.Sum(nil))
+	return hmac.Equal([]byte(expected), []byte(signature))
+}
+
+func (r *razorpayClient) VerifyPaymentSignature(orderID, paymentID, signature string) bool {
+	if signature == "" || orderID == "" || paymentID == "" {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(r.keySecret))
+	mac.Write([]byte(orderID + "|" + paymentID))
 	expected := hex.EncodeToString(mac.Sum(nil))
 	return hmac.Equal([]byte(expected), []byte(signature))
 }
