@@ -38,7 +38,7 @@ func TestRiderOnlinePaymentsEnabled(t *testing.T) {
 }
 
 func TestRazorpayOrderIDPattern(t *testing.T) {
-	valid := []string{"order_9A33XWu170gUtm", "order_ABC123", "order_a"}
+	valid := []string{"order_TestOrder123", "order_ABC123", "order_a"}
 	invalid := []string{
 		"", "order_", "ORDER_abc", "order_abc def", "order_abc;drop table",
 		"order_abc\n", "order_../../etc/passwd", "pay_abc123", "order_abc'--",
@@ -65,7 +65,7 @@ func TestRazorpayOrderIDPattern(t *testing.T) {
 func TestCheckoutPageTemplate_EscapesUntrustedValues(t *testing.T) {
 	hostileName := `</script><script>alert(document.cookie)</script>`
 	opts := checkoutOptions{
-		Key:         "rzp_test_abc",
+		Key:         "test-key-id",
 		Amount:      5000,
 		Currency:    "INR",
 		Name:        "Bogie",
