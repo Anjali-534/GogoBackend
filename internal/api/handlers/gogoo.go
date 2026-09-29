@@ -16,6 +16,7 @@ import (
 	"github.com/deploykit/backend/internal/config"
 	"github.com/deploykit/backend/internal/dateutil"
 	"github.com/deploykit/backend/internal/db"
+	"github.com/deploykit/backend/internal/services/invoicemail"
 	"github.com/deploykit/backend/internal/services/trackerrider"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
@@ -1688,8 +1689,15 @@ func UpdateBookingStatus(c *gin.Context) {
 		// above reaches here, and assignBookingInvoiceNumber never overwrites
 		// an existing number. A failure is logged, not surfaced: the ride is
 		// already completed and settled regardless.
-		if _, err := assignBookingInvoiceNumber(ctx, pool, bookingID); err != nil {
+		if invoiceNumber, err := assignBookingInvoiceNumber(ctx, pool, bookingID); err != nil {
 			log.Printf("UpdateBookingStatus: invoice number assignment failed booking=%s: %v", bookingID, err)
+		} else if invoiceNumber != "" {
+			// Emails the invoice in a recovered goroutine — never blocks this
+			// response. No-op unless INVOICE_EMAIL_ENABLED is on.
+			if cfg, ok := c.Get("config"); ok {
+				appCfg, _ := cfg.(*config.Config)
+				invoicemail.Enqueue(appCfg, bookingID)
+			}
 		}
 
 		c.JSON(http.StatusOK, gin.H{

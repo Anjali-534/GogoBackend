@@ -55,6 +55,27 @@ type Message struct {
 	// ReplyTo, when set, routes recipient replies to that address instead of
 	// cfg.ResendFromEmail — e.g. a company's notification_email.
 	ReplyTo string
+
+	// IdempotencyKey, when set, is sent as Resend's Idempotency-Key header
+	// (1–256 chars, remembered for 24h): a repeat request with the same key
+	// and payload returns the original email instead of sending again, while
+	// the same key with a different payload fails with 409
+	// invalid_idempotent_request (see APIError). Empty sends no header —
+	// the behavior every caller had before this field existed.
+	IdempotencyKey string
+}
+
+// APIError is a non-2xx response from Resend. Error() is the exact text Send
+// has always returned for this case, so callers that only log the error see
+// no change; callers that care can errors.As it for the status and name.
+type APIError struct {
+	StatusCode int
+	Name       string // Resend's error name, e.g. "invalid_idempotent_request"; "" if the body wasn't JSON
+	Body       string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("resend API error (status %d): %s", e.StatusCode, e.Body)
 }
 
 // IsConfigured reports whether enough settings are present to attempt
@@ -140,6 +161,9 @@ func Send(cfg *config.Config, msg Message) error {
 	}
 	req.Header.Set("Authorization", "Bearer "+cfg.ResendAPIKey)
 	req.Header.Set("Content-Type", "application/json")
+	if msg.IdempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", msg.IdempotencyKey)
+	}
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
@@ -150,7 +174,14 @@ func Send(cfg *config.Config, msg Message) error {
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("resend API error (status %d): %s", resp.StatusCode, string(respBody))
+		apiErr := &APIError{StatusCode: resp.StatusCode, Body: string(respBody)}
+		var parsed struct {
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(respBody, &parsed) == nil {
+			apiErr.Name = parsed.Name
+		}
+		return apiErr
 	}
 	return nil
 }

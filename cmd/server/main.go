@@ -13,6 +13,7 @@ import (
 	"github.com/deploykit/backend/internal/auth"
 	"github.com/deploykit/backend/internal/config"
 	"github.com/deploykit/backend/internal/db"
+	"github.com/deploykit/backend/internal/services/invoicemail"
 	"github.com/deploykit/backend/internal/services/ledger"
 	"github.com/deploykit/backend/internal/services/trackerdelivery"
 	"github.com/deploykit/backend/internal/services/trackersub"
@@ -119,6 +120,11 @@ func main() {
 	// Monthly driver earnings statement emailer — ticks daily, sends on the 1st.
 	go ledger.StartMonthlyStatementMailer(cfg)
 	log.Println("✓ Monthly statement mailer running")
+
+	// Post-ride invoice email retries — ticks every minute, retries failed
+	// sends with backoff. No-op while INVOICE_EMAIL_ENABLED is off.
+	go invoicemail.StartRetrySweeper(cfg)
+	log.Println("✓ Invoice email retry sweeper running")
 
 	// Bogie Tracker subscription renewal reminders — ticks daily, emails
 	// companies expiring in 7 or 1 days.
