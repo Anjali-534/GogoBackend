@@ -99,7 +99,11 @@ VALUES
   ('BLK Super Speciality Hospital','private','011-30403040','ambulance@blkhospital.com','Pusa Road, New Delhi','Pusa Road','110005',28.6422,77.1756,ARRAY['BLS','ALS','Cardiac'],3,800,35,true,true)
 ON CONFLICT DO NOTHING;
 
--- Ambulance panel_access entry
+-- Ambulance panel_access entry, seeded LOCKED (see 012) — set a password
+-- via Master Panel before use. DO NOTHING never overwrites an existing hash.
+-- Any production row still on the old default hash needs a one-time manual
+-- UPDATE (Master Panel UI or manual SQL, not part of this migration) — DO
+-- NOTHING means this migration will never touch an existing row.
 INSERT INTO panel_access (panel_name, email, password_hash, role)
-VALUES ('ambulance','ambulance@bogie.in','$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi','manager')
+VALUES ('ambulance','ambulance@bogie.in','!locked','manager')
 ON CONFLICT (panel_name, email) DO NOTHING;
