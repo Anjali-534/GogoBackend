@@ -33,6 +33,19 @@ func main() {
 		log.Fatal("FATAL: JWT_SECRET environment variable is required and cannot be empty")
 	}
 
+	// No scaffold default for the DB password — a missing var must stop the
+	// boot, not silently try a well-known credential.
+	if cfg.DBPassword == "" {
+		log.Fatal("FATAL: DB_PASSWORD environment variable is required and cannot be empty")
+	}
+
+	// hashAadhaar falls back to an unpeppered SHA-256 when this is unset —
+	// brute-forceable over the 12-digit Aadhaar space, and it silently stops
+	// matching hashes made with the real pepper (breaking the ban check).
+	if os.Getenv("AADHAAR_HASH_PEPPER") == "" {
+		log.Fatal("FATAL: AADHAAR_HASH_PEPPER environment variable is required and cannot be empty")
+	}
+
 	// Initialize JWT
 	auth.Init(cfg)
 

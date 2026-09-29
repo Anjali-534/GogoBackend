@@ -96,7 +96,7 @@ func Load() *Config {
 		DBHost:            getString("DB_HOST", "localhost"),
 		DBPort:            getInt("DB_PORT", 5432),
 		DBUser:            getString("DB_USER", "deploykit"),
-		DBPassword:        getString("DB_PASSWORD", "deploykit"),
+		DBPassword:        getString("DB_PASSWORD", ""),
 		DBName:            getString("DB_NAME", "deploykit"),
 		DBMaxConnections:  getInt("DB_MAX_CONNECTIONS", 25),
 		
