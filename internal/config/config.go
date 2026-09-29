@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/deploykit/backend/internal/services/bookinginvoice"
 )
 
 type Config struct {
@@ -85,6 +87,12 @@ type Config struct {
 	// placeholder MUST be overridden with the real panel URL via
 	// TRACKER_PANEL_URL once it is.
 	TrackerPanelURL string
+
+	// InvoiceIssuer is the business named on post-ride invoices. No
+	// defaults: if any mandatory field (legal name, address, state, GSTIN)
+	// is unset, bookings get a plain "Receipt" instead of an invoice / bill
+	// of supply — see bookinginvoice.Issuer.Complete.
+	InvoiceIssuer bookinginvoice.Issuer
 }
 
 func Load() *Config {
@@ -139,6 +147,18 @@ func Load() *Config {
 		ResendFromEmail: getString("RESEND_FROM_EMAIL", "statements@bogie.in"),
 
 		TrackerPanelURL: getString("TRACKER_PANEL_URL", "https://bogie-tracker.bogie.in"),
+
+		InvoiceIssuer: bookinginvoice.Issuer{
+			LegalName:    getString("INVOICE_ISSUER_LEGAL_NAME", ""),
+			Address:      getString("INVOICE_ISSUER_ADDRESS", ""),
+			State:        getString("INVOICE_ISSUER_STATE", ""),
+			GSTIN:        getString("INVOICE_ISSUER_GSTIN", ""),
+			PAN:          getString("INVOICE_ISSUER_PAN", ""),
+			CIN:          getString("INVOICE_ISSUER_CIN", ""),
+			SACRide:      getString("INVOICE_SAC_RIDE", ""),
+			SACGoods:     getString("INVOICE_SAC_GOODS", ""),
+			SupportEmail: getString("INVOICE_SUPPORT_EMAIL", ""),
+		},
 	}
 
 	if cfg.SearchTimeoutSeconds <= 0 {

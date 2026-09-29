@@ -899,6 +899,13 @@ func WaiveAmbulanceFare(c *gin.Context) {
 		return
 	}
 
+	// KNOWN GAP (deferred — post-ride invoices, phase 2 / credit notes):
+	// waiving a COMPLETED booking zeroes final_fare, but an invoice_number
+	// already issued at completion (assignBookingInvoiceNumber) is NOT
+	// invalidated or reissued, and its trip_fare/discount_amount columns
+	// still describe the original charge. Until a credit-note flow exists,
+	// that invoice no longer matches the booking's fare. This is currently
+	// the only path that changes fare after completion.
 	agentEmail := c.GetString("user_email")
 	_, err = pool.Exec(ctx, `
 		UPDATE bookings

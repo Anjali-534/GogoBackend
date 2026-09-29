@@ -539,6 +539,12 @@ func createBookingCore(c *gin.Context, ctx context.Context, pool *pgxpool.Pool, 
 			serverFare += truckAddonPrice
 		}
 	}
+	// Pre-discount fare, persisted as bookings.trip_fare so an invoice can
+	// show Trip Fare / Discount / carried fee lines that add up to the
+	// charged amount (see migration 063). Captured only — pricing below is
+	// unchanged.
+	tripFare := serverFare
+
 	// Promo code is validated and priced entirely server-side — the
 	// client's discount_amount is never trusted, only promo_code (if any)
 	// is looked up against the promo_codes table.
@@ -639,6 +645,11 @@ func createBookingCore(c *gin.Context, ctx context.Context, pool *pgxpool.Pool, 
 		}
 	}
 
+	var promoCodeCol *string
+	if appliedPromoCode != "" {
+		promoCodeCol = &appliedPromoCode
+	}
+
 	bookingID := uuid.New()
 	n, _ := rand.Int(rand.Reader, big.NewInt(10000))
 	otp := fmt.Sprintf("%04d", n.Int64())
@@ -646,12 +657,14 @@ func createBookingCore(c *gin.Context, ctx context.Context, pool *pgxpool.Pool, 
         INSERT INTO bookings
             (id,rider_id,service_type_id,status,pickup_lat,pickup_lng,pickup_address,
              drop_lat,drop_lng,drop_address,estimated_fare,distance_km,ride_otp,source,
-             is_scheduled,scheduled_at,receiver_name,receiver_phone,payment_method)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+             is_scheduled,scheduled_at,receiver_name,receiver_phone,payment_method,
+             trip_fare,discount_amount,promo_code,carried_cancellation_fee)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
     `,
 		bookingID, riderID, req.ServiceTypeID, status, req.PickupLat, req.PickupLng, req.PickupAddress,
 		req.DropLat, req.DropLng, req.DropAddress, finalFareEstimate, serverDistanceKm, otp, req.Source,
-		req.IsScheduled && svcCategory != "ambulance", scheduledAt, req.ReceiverName, req.ReceiverPhone, paymentMethod)
+		req.IsScheduled && svcCategory != "ambulance", scheduledAt, req.ReceiverName, req.ReceiverPhone, paymentMethod,
+		tripFare, discount, promoCodeCol, outstandingFee)
 	if err != nil {
 		log.Printf("CreateBooking insert error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create booking: " + err.Error()})
@@ -1670,6 +1683,14 @@ func UpdateBookingStatus(c *gin.Context) {
 		// outstanding cancellation fee the rider owes, since it was already
 		// folded into THIS booking's fare at creation (see CreateBooking).
 		pool.Exec(ctx, `UPDATE riders SET outstanding_cancellation_fee=0 WHERE id=$1 AND outstanding_cancellation_fee > 0`, completedRiderID)
+
+		// Invoice number — only the request that won the completion guard
+		// above reaches here, and assignBookingInvoiceNumber never overwrites
+		// an existing number. A failure is logged, not surfaced: the ride is
+		// already completed and settled regardless.
+		if _, err := assignBookingInvoiceNumber(ctx, pool, bookingID); err != nil {
+			log.Printf("UpdateBookingStatus: invoice number assignment failed booking=%s: %v", bookingID, err)
+		}
 
 		c.JSON(http.StatusOK, gin.H{
 			"status":                  "completed",

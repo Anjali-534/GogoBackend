@@ -24,24 +24,14 @@ import (
 )
 
 // nextTrackerInvoiceNumber allocates the next sequential invoice number for
-// the given year, formatted INV-<year>-00001. Must run inside tx — the
-// advisory lock is held for the transaction's lifetime, serializing
-// concurrent mark-paid calls so two staff clicking at once (or a retry race)
-// can't land on the same number.
+// the given year, formatted INV-<year>-00001. Must run inside tx — see
+// nextSerialNumber, which serializes concurrent mark-paid calls so two staff
+// clicking at once (or a retry race) can't land on the same number.
 func nextTrackerInvoiceNumber(ctx context.Context, tx pgx.Tx, year int) (string, error) {
-	lockKey := fmt.Sprintf("tracker_invoice_number_%d", year)
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, lockKey); err != nil {
-		return "", err
-	}
-
-	prefix := fmt.Sprintf("INV-%d-", year)
-	var count int
-	if err := tx.QueryRow(ctx, `
-		SELECT COUNT(*) FROM tracker_plan_orders WHERE invoice_number LIKE $1
-	`, prefix+"%").Scan(&count); err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%s%05d", prefix, count+1), nil
+	return nextSerialNumber(ctx, tx,
+		fmt.Sprintf("tracker_invoice_number_%d", year),
+		`SELECT COUNT(*) FROM tracker_plan_orders WHERE invoice_number LIKE $1`,
+		fmt.Sprintf("INV-%d-", year))
 }
 
 // POST /gogoo/dashboard/tracker/plan-orders/:id/mark-paid
