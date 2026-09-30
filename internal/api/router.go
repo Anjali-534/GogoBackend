@@ -187,6 +187,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		gogoo.POST("/bookings/:id/verify-otp", handlers.VerifyRideOTP)
 		gogoo.PATCH("/bookings/:id/status", handlers.UpdateBookingStatus)
 		gogoo.POST("/bookings/:id/waive-ambulance-fare", middleware.RequirePanel("ambulance", "support"), handlers.WaiveAmbulanceFare)
+		// Post-ride invoice, rider only (owner check in the handlers).
+		gogoo.GET("/bookings/:id/invoice", handlers.GetBookingInvoice)
+		gogoo.POST("/bookings/:id/invoice/resend", handlers.ResendBookingInvoice)
 
 		// Drivers
 		gogoo.GET("/drivers", middleware.RequirePanel("cab", "truck", "ambulance", "support"), handlers.ListDrivers)

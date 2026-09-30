@@ -842,7 +842,7 @@ func ListRiderBookings(c *gin.Context) {
 // which resolves riderID via the company's synthetic_rider_id instead of a
 // rider JWT's user_id.
 func listBookingsForRider(ctx context.Context, pool *pgxpool.Pool, riderID string) ([]map[string]interface{}, error) {
-	rows, err := pool.Query(ctx, `SELECT b.id, b.status, b.pickup_address, b.drop_address, COALESCE(b.estimated_fare,0), COALESCE(b.final_fare,0), COALESCE(b.distance_km,0), b.created_at, COALESCE(u_d.name,'') as driver_name, st.name as service_name, b.source, COALESCE(b.cancellation_fee,0), COALESCE(b.is_scheduled,false), b.scheduled_at FROM bookings b LEFT JOIN drivers d ON d.id = b.driver_id LEFT JOIN users u_d ON u_d.id = d.user_id JOIN service_types st ON st.id = b.service_type_id WHERE b.rider_id = $1 ORDER BY b.created_at DESC LIMIT 100`, riderID)
+	rows, err := pool.Query(ctx, `SELECT b.id, b.status, b.pickup_address, b.drop_address, COALESCE(b.estimated_fare,0), COALESCE(b.final_fare,0), COALESCE(b.distance_km,0), b.created_at, COALESCE(u_d.name,'') as driver_name, st.name as service_name, b.source, COALESCE(b.cancellation_fee,0), COALESCE(b.is_scheduled,false), b.scheduled_at, b.invoice_number FROM bookings b LEFT JOIN drivers d ON d.id = b.driver_id LEFT JOIN users u_d ON u_d.id = d.user_id JOIN service_types st ON st.id = b.service_type_id WHERE b.rider_id = $1 ORDER BY b.created_at DESC LIMIT 100`, riderID)
 	if err != nil {
 		return nil, err
 	}
@@ -854,12 +854,14 @@ func listBookingsForRider(ctx context.Context, pool *pgxpool.Pool, riderID strin
 		var createdAt time.Time
 		var isScheduled bool
 		var scheduledAt *time.Time
-		rows.Scan(&id, &status, &pickup, &drop, &estimatedFare, &finalFare, &distanceKm, &createdAt, &driverName, &serviceName, &source, &cancellationFee, &isScheduled, &scheduledAt)
+		var invoiceNumber *string
+		rows.Scan(&id, &status, &pickup, &drop, &estimatedFare, &finalFare, &distanceKm, &createdAt, &driverName, &serviceName, &source, &cancellationFee, &isScheduled, &scheduledAt, &invoiceNumber)
 		bookings = append(bookings, map[string]interface{}{
 			"id": id, "status": status, "pickup_address": pickup, "drop_address": drop,
 			"estimated_fare": estimatedFare, "final_fare": finalFare, "distance_km": distanceKm,
 			"created_at": createdAt, "driver_name": driverName, "service_name": serviceName, "source": source,
 			"cancellation_fee": cancellationFee, "is_scheduled": isScheduled, "scheduled_at": scheduledAt,
+			"invoice_number": invoiceNumber,
 		})
 	}
 	if bookings == nil {

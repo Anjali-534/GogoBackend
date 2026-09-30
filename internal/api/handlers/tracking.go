@@ -197,6 +197,7 @@ func writeBookingDetail(c *gin.Context, ctx context.Context, pool *pgxpool.Pool,
 		scheduledAt               *time.Time
 		// Receiver details (truck/parcel deliveries)
 		receiverName, receiverPhone *string
+		invoiceNumber               *string
 	)
 
 	err := pool.QueryRow(ctx, `
@@ -228,7 +229,8 @@ func writeBookingDetail(c *gin.Context, ctx context.Context, pool *pgxpool.Pool,
 		       COALESCE(b.is_scheduled,false),
 		       b.scheduled_at,
 		       b.receiver_name,
-		       b.receiver_phone
+		       b.receiver_phone,
+		       b.invoice_number
 		FROM bookings b
 		LEFT JOIN drivers      d   ON d.id    = b.driver_id
 		LEFT JOIN users        du  ON du.id   = d.user_id
@@ -251,6 +253,7 @@ func writeBookingDetail(c *gin.Context, ctx context.Context, pool *pgxpool.Pool,
 		&vehicleCategory, &cancellationFee, &cancelledBy, &cancelReason, &cancelledAt,
 		&isScheduled, &scheduledAt,
 		&receiverName, &receiverPhone,
+		&invoiceNumber,
 	)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "booking not found"})
@@ -288,6 +291,7 @@ func writeBookingDetail(c *gin.Context, ctx context.Context, pool *pgxpool.Pool,
 		"scheduled_at":       scheduledAt,
 		"receiver_name":      receiverName,
 		"receiver_phone":     receiverPhone,
+		"invoice_number":     invoiceNumber,
 	}
 	// Expose OTP once driver has arrived so the rider can read it aloud.
 	if status == "arriving" && rideOTP != nil {
