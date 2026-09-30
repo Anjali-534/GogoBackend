@@ -26,6 +26,19 @@ func StartBookingExpirySweeper(cfg *config.Config) {
 	}
 }
 
+// expireSearchingBookingsSQL is the sweeper's guarded UPDATE; $1 is the
+// search timeout in seconds (a Go int). make_interval(secs => $1::int) —
+// not ($1 || ' seconds')::interval, which makes Postgres type $1 as text,
+// a type pgx v5 refuses to encode a Go int into, so every tick failed
+// before reaching the database. Covered by TestSearchWindowQueries.
+const expireSearchingBookingsSQL = `
+        UPDATE bookings
+        SET status='cancelled', cancelled_at=NOW(), cancelled_by='system', cancel_reason='no_driver_found'
+        WHERE status='searching'
+          AND updated_at <= NOW() - make_interval(secs => $1::int)
+        RETURNING id, rider_id
+    `
+
 func sweepExpiredBookings(timeoutSeconds int) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -45,13 +58,7 @@ func sweepExpiredBookings(timeoutSeconds int) {
 	// auto-blocks the driver on repeated cancels — none of which apply to
 	// a system-timed-out search (nobody was ever charged; no driver ever
 	// accepted, so there is no driver to charge against a cancel-count).
-	rows, err := pool.Query(ctx, `
-        UPDATE bookings
-        SET status='cancelled', cancelled_at=NOW(), cancelled_by='system', cancel_reason='no_driver_found'
-        WHERE status='searching'
-          AND updated_at <= NOW() - ($1 || ' seconds')::interval
-        RETURNING id, rider_id
-    `, timeoutSeconds)
+	rows, err := pool.Query(ctx, expireSearchingBookingsSQL, timeoutSeconds)
 	if err != nil {
 		log.Printf("booking expiry sweeper: query error: %v", err)
 		return

@@ -25,15 +25,16 @@ import (
 // scheduled dispatcher explicitly bumps updated_at at dispatch time,
 // in scheduler.go) — requested_at is NOT used here because it stays at
 // the scheduled ride's original creation time.
-func ListPendingBookings(c *gin.Context) {
-	ctx := context.Background()
-	pool := db.GetDB().GetPool()
-	cfg := c.MustGet("config").(*config.Config)
-
-	// rider_phone is deliberately NOT in this feed: it goes to every driver
-	// for every un-accepted booking. Drivers get the phone from GetBooking
-	// after accepting, which is the only point they need it.
-	rows, err := pool.Query(ctx, `
+// pendingBookingsSQL is the driver feed; $1 is the search timeout in
+// seconds (a Go int). See expireSearchingBookingsSQL for why the window is
+// make_interval(secs => $1::int) — the previous ($1 || ' seconds')::interval
+// made every call fail with a pgx encode error. Covered by
+// TestSearchWindowQueries.
+//
+// rider_phone is deliberately NOT in this feed: it goes to every driver
+// for every un-accepted booking. Drivers get the phone from GetBooking
+// after accepting, which is the only point they need it.
+const pendingBookingsSQL = `
     SELECT b.id, b.rider_id, b.service_type_id, b.status,
            b.pickup_lat, b.pickup_lng, b.pickup_address,
            b.drop_lat, b.drop_lng, b.drop_address,
@@ -45,10 +46,17 @@ func ListPendingBookings(c *gin.Context) {
     JOIN users u  ON u.id = r.user_id
     LEFT JOIN service_types st ON st.id = b.service_type_id
     WHERE b.status = 'searching'
-      AND b.updated_at > NOW() - ($1 || ' seconds')::interval
+      AND b.updated_at > NOW() - make_interval(secs => $1::int)
     ORDER BY b.requested_at DESC
     LIMIT 50
-`, cfg.SearchTimeoutSeconds)
+`
+
+func ListPendingBookings(c *gin.Context) {
+	ctx := context.Background()
+	pool := db.GetDB().GetPool()
+	cfg := c.MustGet("config").(*config.Config)
+
+	rows, err := pool.Query(ctx, pendingBookingsSQL, cfg.SearchTimeoutSeconds)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
