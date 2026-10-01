@@ -53,27 +53,62 @@ type rideMessage struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
-// bookingCallerRole verifies the caller (from JWT user_id) is either the
-// rider or the driver on this specific booking — never trust booking_id
-// alone, since it's a client-supplied path param. Returns "rider"/"driver"
-// and true if the caller belongs to the booking, along with the booking's
-// current status.
+// bookingPartiesSQL reports, separately, whether the caller ($2, JWT
+// user_id) is this booking's rider and whether they are its assigned
+// driver. Both can be true: Google sign-in links accounts by email, so one
+// person signed into both apps is a single users row with both a riders and
+// a drivers row. Covered by TestRideOwnershipQueries.
+const bookingPartiesSQL = `
+	SELECT COALESCE(r.user_id = $2::uuid, FALSE),
+	       COALESCE(d.user_id = $2::uuid, FALSE),
+	       b.status
+	FROM bookings b
+	LEFT JOIN riders  r ON r.id = b.rider_id
+	LEFT JOIN drivers d ON d.id = b.driver_id
+	WHERE b.id = $1
+`
+
+type bookingParty struct {
+	IsRider, IsDriver bool
+	Status            string
+}
+
+// bookingParties verifies the caller (from JWT user_id) is the rider and/or
+// the driver on this specific booking — never trust booking_id alone, since
+// it's a client-supplied path param. ok is false if the caller is neither.
+func bookingParties(ctx context.Context, pool *pgxpool.Pool, bookingID, userID string) (p bookingParty, ok bool) {
+	err := pool.QueryRow(ctx, bookingPartiesSQL, bookingID, userID).Scan(&p.IsRider, &p.IsDriver, &p.Status)
+	if err != nil || (!p.IsRider && !p.IsDriver) {
+		return bookingParty{}, false
+	}
+	return p, true
+}
+
+// actingRole is the side a party acts as on ride actions (status changes,
+// OTP, chat): the assigned driver wins. Resolving rider-first made a caller
+// who is both sides unable to drive their own ride — every arriving /
+// in_progress / completed came back 403.
+func (p bookingParty) actingRole() string {
+	if p.IsDriver {
+		return "driver"
+	}
+	if p.IsRider {
+		return "rider"
+	}
+	return ""
+}
+
+// bookingCallerRole is the rider-first view of bookingParties, kept for
+// GetBooking (which only needs ok) and RateBooking.
 func bookingCallerRole(ctx context.Context, pool *pgxpool.Pool, bookingID, userID string) (role string, status string, ok bool) {
-	err := pool.QueryRow(ctx, `
-		SELECT
-			CASE WHEN r.user_id = $2::uuid THEN 'rider'
-			     WHEN d.user_id = $2::uuid THEN 'driver'
-			     ELSE '' END,
-			b.status
-		FROM bookings b
-		LEFT JOIN riders  r ON r.id = b.rider_id
-		LEFT JOIN drivers d ON d.id = b.driver_id
-		WHERE b.id = $1
-	`, bookingID, userID).Scan(&role, &status)
-	if err != nil || role == "" {
+	p, ok := bookingParties(ctx, pool, bookingID, userID)
+	if !ok {
 		return "", "", false
 	}
-	return role, status, true
+	if p.IsRider {
+		return "rider", p.Status, true
+	}
+	return "driver", p.Status, true
 }
 
 func fetchRideMessages(ctx context.Context, bookingID string) []rideMessage {
@@ -108,11 +143,12 @@ func GetRideMessages(c *gin.Context) {
 	bookingID := c.Param("id")
 	userID := c.GetString("user_id")
 
-	role, _, ok := bookingCallerRole(ctx, pool, bookingID, userID)
+	party, ok := bookingParties(ctx, pool, bookingID, userID)
 	if !ok {
 		c.JSON(http.StatusForbidden, gin.H{"error": "not your booking"})
 		return
 	}
+	role := party.actingRole()
 
 	msgs := fetchRideMessages(ctx, bookingID)
 
@@ -144,12 +180,13 @@ func SendRideMessage(c *gin.Context) {
 		return
 	}
 
-	role, status, ok := bookingCallerRole(ctx, pool, bookingID, userID)
+	party, ok := bookingParties(ctx, pool, bookingID, userID)
 	if !ok {
 		c.JSON(http.StatusForbidden, gin.H{"error": "not your booking"})
 		return
 	}
-	if !rideChatActiveStatuses[status] {
+	role := party.actingRole()
+	if !rideChatActiveStatuses[party.Status] {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "chat is only available during an active ride"})
 		return
 	}

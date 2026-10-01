@@ -1440,6 +1440,14 @@ func GetDriverActiveBooking(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"driver_id": driverID, "booking_id": bookingID})
 }
 
+// selfRideSQL is true when the booking's rider is the caller ($2, JWT
+// user_id) themself. Covered by TestRideOwnershipQueries.
+const selfRideSQL = `
+	SELECT EXISTS(
+		SELECT 1 FROM bookings b JOIN riders r ON r.id = b.rider_id
+		WHERE b.id = $1 AND r.user_id = $2::uuid)
+`
+
 func AcceptBooking(c *gin.Context) {
 	bookingID := c.Param("id")
 	userID := c.GetString("user_id") // from JWT — never trust client-sent ID
@@ -1456,6 +1464,20 @@ func AcceptBooking(c *gin.Context) {
 	).Scan(&driverID, &isBlocked, &blockedUntil, &isVerified)
 	if err != nil || driverID == "" {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Driver profile not found"})
+		return
+	}
+
+	// A driver can never take their own ride request (one Google account
+	// signed into both apps is one users row with both a riders and a
+	// drivers row). Besides making the ride undrivable, a self-ride would
+	// pay out trip earnings and referral rewards to the same person.
+	var isSelfRide bool
+	pool.QueryRow(ctx, selfRideSQL, bookingID, userID).Scan(&isSelfRide)
+	if isSelfRide {
+		c.JSON(http.StatusConflict, gin.H{
+			"error":   "self_ride",
+			"message": "You can't accept your own ride request",
+		})
 		return
 	}
 
@@ -1530,7 +1552,8 @@ func UpdateBookingStatus(c *gin.Context) {
 	// drive its state machine (plus panel/master oversight). Without this,
 	// any authenticated account could complete, cancel, or fast-forward
 	// someone else's ride.
-	callerRole, _, isParty := bookingCallerRole(ctx, pool, bookingID, c.GetString("user_id"))
+	party, isParty := bookingParties(ctx, pool, bookingID, c.GetString("user_id"))
+	callerRole := party.actingRole()
 	isPanel := c.GetString("role") == "master_admin"
 	switch c.GetString("panel") {
 	case "support", "cab", "truck", "ambulance":
@@ -1924,7 +1947,7 @@ func VerifyRideOTP(c *gin.Context) {
 	// booking. The OTP is a 4-digit code with no attempt limiting, so
 	// leaving this open to any authenticated account would let it be
 	// brute-forced to hijack ride starts.
-	if callerRole, _, isParty := bookingCallerRole(ctx, pool, bookingID, c.GetString("user_id")); !isParty || callerRole != "driver" {
+	if party, isParty := bookingParties(ctx, pool, bookingID, c.GetString("user_id")); !isParty || !party.IsDriver {
 		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
 		return
 	}

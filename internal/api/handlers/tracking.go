@@ -34,6 +34,10 @@ import (
 // rider_phone is deliberately NOT in this feed: it goes to every driver
 // for every un-accepted booking. Drivers get the phone from GetBooking
 // after accepting, which is the only point they need it.
+//
+// $2 is the calling driver's JWT user_id: their own ride requests (same
+// person signed into both apps) are left out, since AcceptBooking refuses
+// self-rides anyway. Covered by TestRideOwnershipQueries.
 const pendingBookingsSQL = `
     SELECT b.id, b.rider_id, b.service_type_id, b.status,
            b.pickup_lat, b.pickup_lng, b.pickup_address,
@@ -47,6 +51,7 @@ const pendingBookingsSQL = `
     LEFT JOIN service_types st ON st.id = b.service_type_id
     WHERE b.status = 'searching'
       AND b.updated_at > NOW() - make_interval(secs => $1::int)
+      AND r.user_id <> $2::uuid
     ORDER BY b.requested_at DESC
     LIMIT 50
 `
@@ -56,7 +61,7 @@ func ListPendingBookings(c *gin.Context) {
 	pool := db.GetDB().GetPool()
 	cfg := c.MustGet("config").(*config.Config)
 
-	rows, err := pool.Query(ctx, pendingBookingsSQL, cfg.SearchTimeoutSeconds)
+	rows, err := pool.Query(ctx, pendingBookingsSQL, cfg.SearchTimeoutSeconds, c.GetString("user_id"))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return

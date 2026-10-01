@@ -76,8 +76,11 @@ func TestSearchWindowQueries(t *testing.T) {
 
 	timeoutSeconds := 180 // a Go int, exactly like cfg.SearchTimeoutSeconds
 
-	// Driver feed: only the booking still inside its window.
-	feed := queryIDs(t, conn, pendingBookingsSQL, timeoutSeconds)
+	// Driver feed: only the booking still inside its window. The calling
+	// driver is someone other than the rider (self-exclusion is covered by
+	// TestRideOwnershipQueries).
+	const driverUserID = "00000000-0000-4000-8000-000000000009"
+	feed := queryIDs(t, conn, pendingBookingsSQL, timeoutSeconds, driverUserID)
 	if len(feed) != 1 || feed[0] != fresh {
 		t.Fatalf("pendingBookingsSQL returned %v, want only %s", feed, fresh)
 	}
