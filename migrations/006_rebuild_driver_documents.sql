@@ -6,13 +6,24 @@
 -- Migration 004's CREATE TABLE IF NOT EXISTS skipped because the old
 -- table already existed, so we drop and recreate here.
 --
--- SAFE: document upload has never worked, so this table holds no real
--- data. CASCADE clears the stale constraints too.
+-- RunFileMigrations re-runs every numbered file on every boot, so this
+-- file must be idempotent. It used to DROP unconditionally, which wiped
+-- every uploaded document row on each deploy. It now drops only the
+-- original 002-era table (identified by its `type` column, with no
+-- `doc_type`), and otherwise just creates the table if it's missing.
 -- ============================================================
 
-DROP TABLE IF EXISTS driver_documents CASCADE;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+             WHERE table_schema = current_schema() AND table_name = 'driver_documents' AND column_name = 'type')
+     AND NOT EXISTS (SELECT 1 FROM information_schema.columns
+             WHERE table_schema = current_schema() AND table_name = 'driver_documents' AND column_name = 'doc_type') THEN
+    DROP TABLE driver_documents CASCADE;
+  END IF;
+END $$;
 
-CREATE TABLE driver_documents (
+CREATE TABLE IF NOT EXISTS driver_documents (
   id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   driver_id     UUID NOT NULL REFERENCES drivers(id) ON DELETE CASCADE,
   doc_type      TEXT NOT NULL CHECK (doc_type IN (
@@ -47,8 +58,8 @@ CREATE TABLE driver_documents (
   UNIQUE(driver_id, doc_type)
 );
 
-CREATE INDEX idx_driver_documents_driver_id ON driver_documents(driver_id);
-CREATE INDEX idx_driver_documents_status ON driver_documents(status);
+CREATE INDEX IF NOT EXISTS idx_driver_documents_driver_id ON driver_documents(driver_id);
+CREATE INDEX IF NOT EXISTS idx_driver_documents_status ON driver_documents(status);
 
 -- Verification-tracking columns on drivers (idempotent).
 ALTER TABLE drivers
