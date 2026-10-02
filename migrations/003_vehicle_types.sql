@@ -1,10 +1,13 @@
 -- ============================================================
 -- GOGOO Migration 003 — Logistics vehicle types & driver fields
 -- Run after 002_gogoo.sql
+--
+-- RunFileMigrations used to re-run every file on every boot, so the
+-- constraint rewrite and the DELETE/INSERT of service_types below are
+-- guarded: they only run on a database that hasn't reached migration 008's
+-- taxonomy yet (008 adds service_types.category). On any later schema they
+-- would replace the live catalogue and constraint with this obsolete one.
 -- ============================================================
-
--- Drop old vehicle_type constraint
-ALTER TABLE drivers DROP CONSTRAINT IF EXISTS drivers_vehicle_type_check;
 
 -- Add new columns to drivers table
 ALTER TABLE drivers
@@ -41,48 +44,57 @@ ALTER TABLE drivers
   ADD COLUMN IF NOT EXISTS fuel_type           TEXT DEFAULT 'Petrol',
   ADD COLUMN IF NOT EXISTS services_offered    TEXT[];
 
--- Add new vehicle_type constraint
-ALTER TABLE drivers ADD CONSTRAINT drivers_vehicle_type_check
-  CHECK (vehicle_type IN (
-    'bike_delivery', 'scooter_delivery',
-    'tata_ace', 'bolero_pickup', 'truck_14ft', 'truck_17ft', 'truck_20ft',
-    'truck_14ft_os', 'truck_20ft_os', 'truck_32ft_os', 'truck_40ft_os',
-    'packers_1bhk', 'packers_2bhk', 'packers_3bhk', 'packers_office', 'packers_single',
-    'ambulance_bls', 'ambulance_als', 'ambulance_transport', 'ambulance_dbv'
-  ));
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+             WHERE table_schema = current_schema() AND table_name = 'service_types' AND column_name = 'category') THEN
+    -- Drop old vehicle_type constraint
+    ALTER TABLE drivers DROP CONSTRAINT IF EXISTS drivers_vehicle_type_check;
 
--- Clear old service types
-DELETE FROM service_types;
+    -- Add new vehicle_type constraint
+    ALTER TABLE drivers ADD CONSTRAINT drivers_vehicle_type_check
+      CHECK (vehicle_type IN (
+        'bike_delivery', 'scooter_delivery',
+        'tata_ace', 'bolero_pickup', 'truck_14ft', 'truck_17ft', 'truck_20ft',
+        'truck_14ft_os', 'truck_20ft_os', 'truck_32ft_os', 'truck_40ft_os',
+        'packers_1bhk', 'packers_2bhk', 'packers_3bhk', 'packers_office', 'packers_single',
+        'ambulance_bls', 'ambulance_als', 'ambulance_transport', 'ambulance_dbv'
+      ));
 
--- Insert new service types
-INSERT INTO service_types (name, slug, vehicle_type, base_fare, per_km_rate, per_min_rate, surge_multiplier, capacity, is_active) VALUES
+    -- Clear old service types
+    DELETE FROM service_types;
 
--- 2 Wheelers
-('Bike Delivery',    'bike_delivery',    'bike_delivery',    30.00,  5.00,  0.50, 1.0, 1, true),
-('Scooter Delivery', 'scooter_delivery', 'scooter_delivery', 35.00,  6.00,  0.60, 1.0, 1, true),
+    -- Insert new service types
+    INSERT INTO service_types (name, slug, vehicle_type, base_fare, per_km_rate, per_min_rate, surge_multiplier, capacity, is_active) VALUES
 
--- Trucks Within City
-('Tata Ace / Mini Truck', 'tata_ace',     'tata_ace',     200.00, 15.00, 2.00, 1.0, 1, true),
-('Bolero Pickup',         'bolero_pickup','bolero_pickup', 300.00, 18.00, 2.50, 1.0, 1, true),
-('14ft Truck',            'truck_14ft',   'truck_14ft',   500.00, 22.00, 3.00, 1.0, 1, true),
-('17ft Truck',            'truck_17ft',   'truck_17ft',   700.00, 25.00, 3.50, 1.0, 1, true),
-('20ft Truck',            'truck_20ft',   'truck_20ft',   900.00, 28.00, 4.00, 1.0, 1, true),
+    -- 2 Wheelers
+    ('Bike Delivery',    'bike_delivery',    'bike_delivery',    30.00,  5.00,  0.50, 1.0, 1, true),
+    ('Scooter Delivery', 'scooter_delivery', 'scooter_delivery', 35.00,  6.00,  0.60, 1.0, 1, true),
 
--- Trucks Outstation
-('14ft Truck (Outstation)', 'truck_14ft_os', 'truck_14ft_os', 2500.00, 20.00, 0.00, 1.0, 1, true),
-('20ft Truck (Outstation)', 'truck_20ft_os', 'truck_20ft_os', 4000.00, 22.00, 0.00, 1.0, 1, true),
-('32ft Trailer',            'truck_32ft_os', 'truck_32ft_os', 7000.00, 25.00, 0.00, 1.0, 1, true),
-('40ft Container',          'truck_40ft_os', 'truck_40ft_os', 9000.00, 28.00, 0.00, 1.0, 1, true),
+    -- Trucks Within City
+    ('Tata Ace / Mini Truck', 'tata_ace',     'tata_ace',     200.00, 15.00, 2.00, 1.0, 1, true),
+    ('Bolero Pickup',         'bolero_pickup','bolero_pickup', 300.00, 18.00, 2.50, 1.0, 1, true),
+    ('14ft Truck',            'truck_14ft',   'truck_14ft',   500.00, 22.00, 3.00, 1.0, 1, true),
+    ('17ft Truck',            'truck_17ft',   'truck_17ft',   700.00, 25.00, 3.50, 1.0, 1, true),
+    ('20ft Truck',            'truck_20ft',   'truck_20ft',   900.00, 28.00, 4.00, 1.0, 1, true),
 
--- Packers & Movers
-('1 BHK Move',    'packers_1bhk',    'packers_1bhk',    2500.00, 0.00, 0.00, 1.0, 1, true),
-('2 BHK Move',    'packers_2bhk',    'packers_2bhk',    4500.00, 0.00, 0.00, 1.0, 1, true),
-('3 BHK Move',    'packers_3bhk',    'packers_3bhk',    7000.00, 0.00, 0.00, 1.0, 1, true),
-('Office Shift',  'packers_office',  'packers_office',  9000.00, 0.00, 0.00, 1.0, 1, true),
-('Single Item',   'packers_single',  'packers_single',   800.00, 10.00, 0.00, 1.0, 1, true),
+    -- Trucks Outstation
+    ('14ft Truck (Outstation)', 'truck_14ft_os', 'truck_14ft_os', 2500.00, 20.00, 0.00, 1.0, 1, true),
+    ('20ft Truck (Outstation)', 'truck_20ft_os', 'truck_20ft_os', 4000.00, 22.00, 0.00, 1.0, 1, true),
+    ('32ft Trailer',            'truck_32ft_os', 'truck_32ft_os', 7000.00, 25.00, 0.00, 1.0, 1, true),
+    ('40ft Container',          'truck_40ft_os', 'truck_40ft_os', 9000.00, 28.00, 0.00, 1.0, 1, true),
 
--- Ambulance
-('Basic Life Support (BLS)',  'ambulance_bls',       'ambulance_bls',       500.00, 20.00, 5.00, 1.0, 2, true),
-('Advanced Life Support (ALS)','ambulance_als',      'ambulance_als',      1000.00, 25.00, 8.00, 1.0, 2, true),
-('Patient Transport',          'ambulance_transport','ambulance_transport',  400.00, 18.00, 3.00, 1.0, 2, true),
-('Dead Body Van',              'ambulance_dbv',      'ambulance_dbv',        600.00, 20.00, 0.00, 1.0, 1, true);
+    -- Packers & Movers
+    ('1 BHK Move',    'packers_1bhk',    'packers_1bhk',    2500.00, 0.00, 0.00, 1.0, 1, true),
+    ('2 BHK Move',    'packers_2bhk',    'packers_2bhk',    4500.00, 0.00, 0.00, 1.0, 1, true),
+    ('3 BHK Move',    'packers_3bhk',    'packers_3bhk',    7000.00, 0.00, 0.00, 1.0, 1, true),
+    ('Office Shift',  'packers_office',  'packers_office',  9000.00, 0.00, 0.00, 1.0, 1, true),
+    ('Single Item',   'packers_single',  'packers_single',   800.00, 10.00, 0.00, 1.0, 1, true),
+
+    -- Ambulance
+    ('Basic Life Support (BLS)',  'ambulance_bls',       'ambulance_bls',       500.00, 20.00, 5.00, 1.0, 2, true),
+    ('Advanced Life Support (ALS)','ambulance_als',      'ambulance_als',      1000.00, 25.00, 8.00, 1.0, 2, true),
+    ('Patient Transport',          'ambulance_transport','ambulance_transport',  400.00, 18.00, 3.00, 1.0, 2, true),
+    ('Dead Body Van',              'ambulance_dbv',      'ambulance_dbv',        600.00, 20.00, 0.00, 1.0, 1, true);
+  END IF;
+END $$;
