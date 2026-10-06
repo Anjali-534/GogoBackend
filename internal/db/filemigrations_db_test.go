@@ -425,3 +425,41 @@ func TestBaselineSecondBoot(t *testing.T) {
 		t.Fatalf("second boot: %d already applied, want all %d", rep.AlreadyApplied, numbered)
 	}
 }
+
+// TestBaselineBroadcastNotificationsTable: production's notifications is the
+// broadcast table (title/body/target_* columns, no user_id), not 001's
+// per-user one, so 001's idx_notifications_user_id can't exist there. 001
+// must still be baselined rather than retried and failing on every boot.
+func TestBaselineBroadcastNotificationsTable(t *testing.T) {
+	pool, fsys := preLedgerDatabase(t)
+	ctx := context.Background()
+	// Production's exact column set.
+	for _, sql := range []string{
+		`DROP TABLE notifications CASCADE`,
+		`CREATE TABLE notifications (
+			id UUID PRIMARY KEY, title TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '',
+			type TEXT NOT NULL DEFAULT 'general', target_audience TEXT NOT NULL DEFAULT 'all',
+			coupon_code TEXT, link_url TEXT, is_active BOOLEAN NOT NULL DEFAULT true,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), target_user_id UUID, target_type TEXT,
+			target_id UUID, target_category TEXT, target_user_ids UUID[], target_hospital_id UUID,
+			target_hospital_ids UUID[])`,
+	} {
+		if _, err := pool.Exec(ctx, sql); err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+	}
+	if n := count(t, pool, `SELECT count(*) FROM pg_class WHERE relname = 'idx_notifications_user_id'`); n != 0 {
+		t.Fatalf("precondition: idx_notifications_user_id still exists")
+	}
+
+	rep := mustRun(t, pool, fsys)
+	if !reflect.DeepEqual(rep.Baselined, baselineFiles) || len(rep.Failed) != 0 {
+		t.Fatalf("baselined %v failed %v, want all three baselined and none failed", rep.Baselined, rep.Failed)
+	}
+	if n := count(t, pool, `SELECT count(*) FROM information_schema.columns WHERE table_name = 'notifications' AND column_name = 'user_id'`); n != 0 {
+		t.Fatalf("001 ran: notifications gained user_id")
+	}
+	if rep = mustRun(t, pool, fsys); len(rep.Applied)+len(rep.Baselined)+len(rep.Failed) != 0 {
+		t.Fatalf("second boot: %+v, want nothing", rep)
+	}
+}

@@ -65,8 +65,16 @@ var baselineMigrations = map[string]baselineSpec{
 			"builds", "deployments", "deployment_events", "preview_environments", "managed_databases",
 			"billing_usage", "notifications", "webhooks",
 			"idx_apps_cluster_id", "idx_apps_project_id", "idx_builds_app_id", "idx_deployments_app_id",
-			"idx_deployment_events_app_id", "idx_clusters_project_id", "idx_notifications_user_id",
+			"idx_deployment_events_app_id", "idx_clusters_project_id",
 			"idx_billing_usage_project_id", "idx_project_members_user_id",
+			// idx_notifications_user_id (001's index on notifications.user_id)
+			// is deliberately not checked. Production's notifications is not
+			// 001's per-user table but the broadcast table MigrateNotifications
+			// creates (title/body/target_* columns, no user_id), so the index
+			// can't exist there and checking it would block the baseline
+			// forever. Nothing reads notifications.user_id or relies on the
+			// index — per-user read state lives in notification_reads — so the
+			// table's existence is the only check that matters.
 		},
 		extensions: []string{"uuid-ossp", "pgcrypto"},
 	},
