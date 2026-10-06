@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -21,6 +22,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -40,7 +42,10 @@ func RiderSignup(c *gin.Context) {
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 	var count int
-	pool.QueryRow(ctx, "SELECT COUNT(*) FROM users WHERE email=$1", req.Email).Scan(&count)
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM users WHERE email=$1", req.Email).Scan(&count); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
 	if count > 0 {
 		c.JSON(http.StatusConflict, gin.H{"error": "email already registered"})
 		return
@@ -48,12 +53,43 @@ func RiderSignup(c *gin.Context) {
 	userID := uuid.New()
 	riderID := uuid.New()
 	referralCode := generateReferralCode(ctx, "riders", "GU")
-	tx, _ := pool.Begin(ctx)
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to hash password"})
+		return
+	}
+	// Every step is checked: this used to ignore all four errors, so a failed
+	// insert rolled the transaction back yet still answered 201 with a
+	// rider_id for an account that didn't exist — the app's follow-up
+	// /auth/login then failed with "invalid credentials".
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
 	defer tx.Rollback(ctx)
-	hashedPassword, _ := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-	tx.Exec(ctx, "INSERT INTO users (id,email,name,password_hash,is_verified) VALUES ($1,$2,$3,$4,true)", userID, req.Email, req.Name, string(hashedPassword))
-	tx.Exec(ctx, "INSERT INTO riders (id,user_id,phone,referral_code) VALUES ($1,$2,$3,$4)", riderID, userID, req.Phone, referralCode)
-	tx.Commit(ctx)
+	if _, err := tx.Exec(ctx, "INSERT INTO users (id,email,name,password_hash,is_verified) VALUES ($1,$2,$3,$4,true)", userID, req.Email, req.Name, string(hashedPassword)); err != nil {
+		// A concurrent signup for the same email can pass the COUNT check
+		// above and lose here on users.email's UNIQUE constraint.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			c.JSON(http.StatusConflict, gin.H{"error": "email already registered"})
+			return
+		}
+		log.Printf("RiderSignup: create user failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create user"})
+		return
+	}
+	if _, err := tx.Exec(ctx, "INSERT INTO riders (id,user_id,phone,referral_code) VALUES ($1,$2,$3,$4)", riderID, userID, req.Phone, referralCode); err != nil {
+		log.Printf("RiderSignup: create rider failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create rider profile"})
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		log.Printf("RiderSignup: commit failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
 	applyReferral("rider", riderID, req.ReferredByCode)
 	c.JSON(http.StatusCreated, gin.H{"user_id": userID, "rider_id": riderID, "message": "Rider account created"})
 }
@@ -438,10 +474,17 @@ func CreateBooking(c *gin.Context) {
 	// rider_id is derived from the caller's JWT, never taken from the
 	// request body — a client can only ever book on behalf of itself.
 	userID := c.GetString("user_id")
-	var riderID string
-	if err := pool.QueryRow(ctx, `SELECT id FROM riders WHERE user_id=$1`, userID).Scan(&riderID); err != nil {
-		log.Printf("CreateBooking: no rider profile for user_id=%s (err=%v)", userID, err)
+	// A rider token with no riders row yet (e.g. a driver-app account
+	// booking from user-app) gets one created here — see ensureRiderProfile.
+	riderID, err := resolveBookingRider(ctx, pool, userID, c.GetString("panel"))
+	if errors.Is(err, errNoRiderProfile) {
+		log.Printf("CreateBooking: no rider profile for panel user_id=%s", userID)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "rider profile not found"})
+		return
+	}
+	if err != nil {
+		log.Printf("CreateBooking: rider profile lookup failed for user_id=%s: %v", userID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
 	}
 
@@ -2065,17 +2108,22 @@ func GetRiderProfile(c *gin.Context) {
 	userID := c.GetString("user_id")
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
-	var riderID, phone string
-	var rating, walletBalance, outstandingCancellationFee float64
-	var totalRides int
-	err := pool.QueryRow(ctx, `SELECT r.id, COALESCE(r.phone,''), COALESCE(r.rating,0), COALESCE(r.total_rides,0), COALESCE(r.wallet_balance,0), COALESCE(r.outstanding_cancellation_fee,0) FROM riders r WHERE r.user_id=$1`, userID).Scan(&riderID, &phone, &rating, &totalRides, &walletBalance, &outstandingCancellationFee)
-	if err != nil {
+	// Creates the riders row for a rider token that has none yet — see
+	// ensureRiderProfile. 404 only for a panel token with no row; a real
+	// DB failure is a 500, never a misleading "not found".
+	p, err := loadRiderProfile(ctx, pool, userID, c.GetString("panel"))
+	if errors.Is(err, errNoRiderProfile) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "rider profile not found"})
 		return
 	}
+	if err != nil {
+		log.Printf("GetRiderProfile: lookup failed for user_id=%s: %v", userID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
-		"rider_id": riderID, "phone": phone, "rating": rating, "total_rides": totalRides, "wallet_balance": walletBalance,
-		"outstanding_cancellation_fee": outstandingCancellationFee,
+		"rider_id": p.RiderID, "phone": p.Phone, "rating": p.Rating, "total_rides": p.TotalRides, "wallet_balance": p.WalletBalance,
+		"outstanding_cancellation_fee": p.OutstandingCancellationFee,
 	})
 }
 

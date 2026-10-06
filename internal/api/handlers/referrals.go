@@ -100,11 +100,16 @@ func randomCodeSuffix(n int) string {
 // generateReferralCode returns a unique PREFIX+6char code, retrying on
 // collision (astronomically unlikely at this scale, but cheap to guard).
 func generateReferralCode(ctx context.Context, table, prefix string) string {
-    pool := db.GetDB().GetPool()
+    return generateReferralCodeWith(ctx, db.GetDB().GetPool(), table, prefix)
+}
+
+// generateReferralCodeWith is generateReferralCode against an explicit
+// querier instead of the global pool (see ensureRiderProfile).
+func generateReferralCodeWith(ctx context.Context, q querier, table, prefix string) string {
     for i := 0; i < 10; i++ {
         code := prefix + randomCodeSuffix(6)
         var exists bool
-        pool.QueryRow(ctx, fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM %s WHERE referral_code=$1)`, table), code).Scan(&exists)
+        q.QueryRow(ctx, fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM %s WHERE referral_code=$1)`, table), code).Scan(&exists)
         if !exists {
             return code
         }

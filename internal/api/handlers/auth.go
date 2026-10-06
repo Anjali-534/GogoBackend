@@ -419,14 +419,24 @@ func GoogleLogin(c *gin.Context) {
 	} else if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
-	} else if existingGoogleID == nil {
-		// Existing password-account signing in with Google for the first
-		// time — link, don't duplicate.
-		if _, err := pool.Exec(ctx,
-			"UPDATE users SET google_id = $2, updated_at = NOW() WHERE id = $1",
-			userID, googleID,
-		); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to link google account"})
+	} else {
+		if existingGoogleID == nil {
+			// Existing password-account signing in with Google for the first
+			// time — link, don't duplicate.
+			if _, err := pool.Exec(ctx,
+				"UPDATE users SET google_id = $2, updated_at = NOW() WHERE id = $1",
+				userID, googleID,
+			); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to link google account"})
+				return
+			}
+		}
+
+		// A users row can exist without a riders row — e.g. this email
+		// signed up in driver-app first. Create it now, as DriverGoogleLogin
+		// does for the drivers row, so the rider can book straight away.
+		if _, err := ensureRiderProfile(ctx, pool, userID.String()); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create rider profile"})
 			return
 		}
 	}
