@@ -159,6 +159,14 @@ func getVehicleCategory(vehicleType string) string {
 	return "two_wheeler"
 }
 
+// cloudinaryHTTPClient is used for every Cloudinary API call (upload and
+// delete) instead of http.DefaultClient, which has no timeout — a stalled
+// upstream request would otherwise hold the handler open indefinitely.
+// 45s covers a 10MB file from Railway to Cloudinary with plenty of margin,
+// and stays under the driver app's 90s per-upload limit, which also has to
+// cover the phone-to-Railway leg.
+var cloudinaryHTTPClient = &http.Client{Timeout: 45 * time.Second}
+
 // uploadToCloudinary uploads a file to Cloudinary using only stdlib HTTP,
 // under Cloudinary's "auto" resource type (images render/transform
 // normally; this is wrong for PDFs — see uploadToCloudinaryRaw). Returns
@@ -231,7 +239,7 @@ func uploadToCloudinaryWithResourceType(ctx context.Context, reader io.Reader, o
 	}
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := cloudinaryHTTPClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -303,7 +311,7 @@ func deleteFromCloudinary(fileURL string) {
 		return
 	}
 	req.Header.Set("Content-Type", mw.FormDataContentType())
-	http.DefaultClient.Do(req) //nolint:errcheck — best-effort
+	cloudinaryHTTPClient.Do(req) //nolint:errcheck — best-effort
 }
 
 // GET /gogoo/driver/profile
