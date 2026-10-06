@@ -30,6 +30,33 @@ func MigrateNotifications() error {
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 
+	if err := migrateNotifications(ctx, pool); err != nil {
+		return err
+	}
+
+	// Log actual columns so we can verify the schema
+	rows, err := pool.Query(ctx, `
+		SELECT column_name, data_type, is_nullable
+		FROM information_schema.columns
+		WHERE table_name = 'notifications'
+		ORDER BY ordinal_position
+	`)
+	if err == nil {
+		defer rows.Close()
+		log.Println("notifications table columns:")
+		for rows.Next() {
+			var col, dtype, nullable string
+			rows.Scan(&col, &dtype, &nullable)
+			log.Printf("  %-20s %s (nullable: %s)", col, dtype, nullable)
+		}
+	}
+	return nil
+}
+
+// migrateNotifications is MigrateNotifications' DDL against an explicit
+// querier, so it can be exercised against a test database. Every step is
+// idempotent: it runs on every boot, after the file migrations.
+func migrateNotifications(ctx context.Context, q querier) error {
 	steps := []string{
 		`CREATE TABLE IF NOT EXISTS notifications (
 			id               UUID        PRIMARY KEY,
@@ -61,6 +88,15 @@ func MigrateNotifications() error {
 		`ALTER TABLE notifications ADD COLUMN IF NOT EXISTS target_user_ids UUID[]`,
 		`ALTER TABLE notifications ADD COLUMN IF NOT EXISTS target_hospital_id UUID`,
 		`ALTER TABLE notifications ADD COLUMN IF NOT EXISTS target_hospital_ids UUID[]`,
+		// target_type/target_id were added to production by hand and exist in
+		// no repo; recorded here so fresh databases match prod (a no-op
+		// there). They live here rather than in a numbered file because
+		// file migrations run before this function: on a fresh database the
+		// only notifications table at that point is 001's unrelated per-user
+		// one, and a guarded file that found no table would be recorded as
+		// applied and never add the columns.
+		`ALTER TABLE notifications ADD COLUMN IF NOT EXISTS target_type TEXT`,
+		`ALTER TABLE notifications ADD COLUMN IF NOT EXISTS target_id UUID`,
 		`DO $$ BEGIN ALTER TABLE notifications ALTER COLUMN user_id DROP NOT NULL; EXCEPTION WHEN undefined_column THEN NULL; END $$`,
 		`CREATE TABLE IF NOT EXISTS push_tokens (
 			user_id    UUID PRIMARY KEY,
@@ -70,26 +106,9 @@ func MigrateNotifications() error {
 	}
 
 	for _, sql := range steps {
-		if _, err := pool.Exec(ctx, sql); err != nil {
+		if _, err := q.Exec(ctx, sql); err != nil {
 			log.Printf("MigrateNotifications step failed: %v\nSQL: %s", err, sql)
 			return err
-		}
-	}
-
-	// Log actual columns so we can verify the schema
-	rows, err := pool.Query(ctx, `
-		SELECT column_name, data_type, is_nullable
-		FROM information_schema.columns
-		WHERE table_name = 'notifications'
-		ORDER BY ordinal_position
-	`)
-	if err == nil {
-		defer rows.Close()
-		log.Println("notifications table columns:")
-		for rows.Next() {
-			var col, dtype, nullable string
-			rows.Scan(&col, &dtype, &nullable)
-			log.Printf("  %-20s %s (nullable: %s)", col, dtype, nullable)
 		}
 	}
 	return nil
