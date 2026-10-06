@@ -2,6 +2,8 @@ package db
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/url"
 	"os"
@@ -166,18 +168,7 @@ func snapshot(t *testing.T, pool *pgxpool.Pool) ([]driverRow, []serviceTypeRow, 
 func TestEmbeddedMigrationsRebootSafe(t *testing.T) {
 	pool := newTestDatabase(t)
 	ctx := context.Background()
-	fsys := fstest.MapFS{}
-	entries, err := migrations.FS.ReadDir(".")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, e := range entries {
-		b, err := migrations.FS.ReadFile(e.Name())
-		if err != nil {
-			t.Fatal(err)
-		}
-		fsys[e.Name()] = &fstest.MapFile{Data: b}
-	}
+	fsys := embeddedFS(t)
 
 	// Boot 1 on an empty database: the guarded 003/008 blocks must take
 	// their old-schema path, and the end state is the current catalogue.
@@ -226,19 +217,20 @@ func TestEmbeddedMigrationsRebootSafe(t *testing.T) {
 	// schema_migrations yet, so every file runs again once.
 	exec(`DROP TABLE schema_migrations`)
 	rep = mustRun(t, pool, fsys)
-	t.Logf("boot 2 (ledger bootstrap over existing data): %d applied, failed: %v", len(rep.Applied), rep.Failed)
-	bootstrapFailed := rep.Failed
-	// Not idempotent, but they fail on their first conflicting statement and
-	// roll back whole, so they stay unrecorded rather than being marked
-	// applied. Any other failure here is new.
-	if want := []string{"001_init.sql", "002_gogoo.sql", "004_driver_documents.sql"}; !reflect.DeepEqual(bootstrapFailed, want) {
-		t.Fatalf("bootstrap failures %v, want exactly %v", bootstrapFailed, want)
+	t.Logf("boot 2 (ledger bootstrap over existing data): %d applied, baselined %v, failed: %v", len(rep.Applied), rep.Baselined, rep.Failed)
+	// 001/002/004 aren't idempotent; they are baselined (recorded without
+	// running) because their objects all exist. Any failure here is new.
+	if len(rep.Failed) != 0 {
+		t.Fatalf("bootstrap failures %v, want none", rep.Failed)
+	}
+	if !reflect.DeepEqual(rep.Baselined, baselineFiles) {
+		t.Fatalf("bootstrap baselined %v, want %v", rep.Baselined, baselineFiles)
 	}
 
 	for boot := 3; boot <= 5; boot++ {
 		rep = mustRun(t, pool, fsys)
-		if len(rep.Applied) != 0 || !reflect.DeepEqual(rep.Failed, bootstrapFailed) {
-			t.Fatalf("boot %d: applied %v, failed %v — want nothing new, same failures as bootstrap %v", boot, rep.Applied, rep.Failed, bootstrapFailed)
+		if len(rep.Applied) != 0 || len(rep.Baselined) != 0 || len(rep.Failed) != 0 {
+			t.Fatalf("boot %d: applied %v, baselined %v, failed %v — want nothing", boot, rep.Applied, rep.Baselined, rep.Failed)
 		}
 	}
 
@@ -269,5 +261,167 @@ func TestEmbeddedMigrationsRebootSafe(t *testing.T) {
 	}
 	if gotDrivers, _, _ := snapshot(t, pool); !reflect.DeepEqual(gotDrivers, wantDrivers) {
 		t.Fatalf("drivers changed:\n got  %+v\n want %+v", gotDrivers, wantDrivers)
+	}
+}
+
+// baselineFiles are baselineMigrations' keys in run order.
+var baselineFiles = []string{"001_init.sql", "002_gogoo.sql", "004_driver_documents.sql"}
+
+// embeddedFS copies the real embedded migrations into a MapFS.
+func embeddedFS(t *testing.T) fstest.MapFS {
+	t.Helper()
+	fsys := fstest.MapFS{}
+	entries, err := migrations.FS.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		b, err := migrations.FS.ReadFile(e.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		fsys[e.Name()] = &fstest.MapFile{Data: b}
+	}
+	return fsys
+}
+
+// preLedgerDatabase fully migrates a fresh database, then drops the ledger:
+// the state production was in when the ledger first shipped — every object
+// present, nothing recorded.
+func preLedgerDatabase(t *testing.T) (*pgxpool.Pool, fstest.MapFS) {
+	t.Helper()
+	pool := newTestDatabase(t)
+	fsys := embeddedFS(t)
+	if rep := mustRun(t, pool, fsys); len(rep.Failed) != 0 {
+		t.Fatalf("migrations failed on an empty database: %v", rep.Failed)
+	}
+	if _, err := pool.Exec(context.Background(), `DROP TABLE schema_migrations`); err != nil {
+		t.Fatalf("drop schema_migrations: %v", err)
+	}
+	return pool, fsys
+}
+
+// TestBaselinePreLedgerDatabase: with every object present, 001/002/004 are
+// recorded with their real checksums without running — so 002's legacy
+// service_types seed never reaches the catalogue and existing rows are
+// untouched.
+func TestBaselinePreLedgerDatabase(t *testing.T) {
+	pool, fsys := preLedgerDatabase(t)
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `INSERT INTO service_types (name, slug, vehicle_type, base_fare, per_km_rate, per_min_rate)
+		VALUES ('Sentinel', 'baseline_sentinel', 'cab', 1, 1, 1)`); err != nil {
+		t.Fatalf("insert sentinel: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE service_types SET base_fare = 777 WHERE slug = 'cab_4w'`); err != nil {
+		t.Fatalf("edit fare: %v", err)
+	}
+	wantDrivers, wantSTs, wantDocs := snapshot(t, pool)
+
+	rep := mustRun(t, pool, fsys)
+	if !reflect.DeepEqual(rep.Baselined, baselineFiles) {
+		t.Fatalf("baselined %v, want %v", rep.Baselined, baselineFiles)
+	}
+	if len(rep.Failed) != 0 {
+		t.Fatalf("failed %v, want none", rep.Failed)
+	}
+	for _, name := range baselineFiles {
+		for _, applied := range rep.Applied {
+			if applied == name {
+				t.Fatalf("%s was run, want it only recorded", name)
+			}
+		}
+	}
+
+	if n := count(t, pool, `SELECT count(*) FROM service_types WHERE slug IN ('bike','auto','mini','sedan','suv','xl')`); n != 0 {
+		t.Fatalf("002's legacy seed ran: %d legacy service_types rows", n)
+	}
+	gotDrivers, gotSTs, gotDocs := snapshot(t, pool)
+	if !reflect.DeepEqual(gotSTs, wantSTs) {
+		t.Fatalf("service_types changed:\n got  %+v\n want %+v", gotSTs, wantSTs)
+	}
+	if !reflect.DeepEqual(gotDrivers, wantDrivers) || gotDocs != wantDocs {
+		t.Fatalf("drivers/driver_documents changed")
+	}
+
+	for _, name := range baselineFiles {
+		sum := sha256.Sum256(fsys[name].Data)
+		if n := count(t, pool, `SELECT count(*) FROM schema_migrations WHERE filename = $1 AND checksum = $2`,
+			name, hex.EncodeToString(sum[:])); n != 1 {
+			t.Fatalf("%s not recorded with its checksum", name)
+		}
+	}
+}
+
+// TestBaselineFreshDatabase: on an empty database nothing exists yet, so
+// 001/002/004 are run and recorded normally, never baselined.
+func TestBaselineFreshDatabase(t *testing.T) {
+	pool := newTestDatabase(t)
+	rep := mustRun(t, pool, embeddedFS(t))
+	if len(rep.Baselined) != 0 {
+		t.Fatalf("baselined %v on an empty database, want none", rep.Baselined)
+	}
+	if len(rep.Failed) != 0 {
+		t.Fatalf("failed %v, want none", rep.Failed)
+	}
+	applied := map[string]bool{}
+	for _, name := range rep.Applied {
+		applied[name] = true
+	}
+	for _, name := range baselineFiles {
+		if !applied[name] {
+			t.Fatalf("%s not applied on an empty database (applied: %v)", name, rep.Applied)
+		}
+	}
+	if n := count(t, pool, `SELECT count(*) FROM schema_migrations WHERE filename = ANY($1)`, baselineFiles); n != 3 {
+		t.Fatalf("%d of the baseline files recorded, want 3", n)
+	}
+}
+
+// TestBaselineSkippedWhenObjectMissing: one missing object means no baseline
+// record; the file runs, fails and stays unrecorded (retried next boot),
+// while the files whose objects are complete are still baselined.
+func TestBaselineSkippedWhenObjectMissing(t *testing.T) {
+	pool, fsys := preLedgerDatabase(t)
+	if _, err := pool.Exec(context.Background(), `DROP INDEX idx_project_members_user_id`); err != nil {
+		t.Fatalf("drop index: %v", err)
+	}
+
+	for boot := 1; boot <= 2; boot++ {
+		rep := mustRun(t, pool, fsys)
+		if !reflect.DeepEqual(rep.Failed, []string{"001_init.sql"}) {
+			t.Fatalf("boot %d failed %v, want only 001_init.sql", boot, rep.Failed)
+		}
+		if n := count(t, pool, `SELECT count(*) FROM schema_migrations WHERE filename = '001_init.sql'`); n != 0 {
+			t.Fatalf("boot %d: 001_init.sql recorded despite a missing object", boot)
+		}
+		if boot == 1 && !reflect.DeepEqual(rep.Baselined, []string{"002_gogoo.sql", "004_driver_documents.sql"}) {
+			t.Fatalf("boot 1 baselined %v, want 002 and 004", rep.Baselined)
+		}
+	}
+	if n := count(t, pool, `SELECT count(*) FROM pg_class WHERE relname = 'idx_project_members_user_id'`); n != 0 {
+		t.Fatalf("001 partially applied: the dropped index came back despite the failure")
+	}
+}
+
+// TestBaselineSecondBoot: once baselined, the next boot finds every file
+// already applied and does nothing.
+func TestBaselineSecondBoot(t *testing.T) {
+	pool, fsys := preLedgerDatabase(t)
+	if rep := mustRun(t, pool, fsys); !reflect.DeepEqual(rep.Baselined, baselineFiles) || len(rep.Failed) != 0 {
+		t.Fatalf("first boot: baselined %v failed %v", rep.Baselined, rep.Failed)
+	}
+
+	numbered := 0
+	for name := range fsys {
+		if numberedMigrationRe.MatchString(name) {
+			numbered++
+		}
+	}
+	rep := mustRun(t, pool, fsys)
+	if len(rep.Applied) != 0 || len(rep.Baselined) != 0 || len(rep.Failed) != 0 || len(rep.Changed) != 0 {
+		t.Fatalf("second boot: %+v, want nothing applied, baselined, failed or changed", rep)
+	}
+	if rep.AlreadyApplied != numbered {
+		t.Fatalf("second boot: %d already applied, want all %d", rep.AlreadyApplied, numbered)
 	}
 }
