@@ -262,16 +262,63 @@ type trackerStopProgress struct {
 	// the page must still offer Delivered so the driver can sign again
 	// (the repeated claim is then a no-op, see recordTrackerDriverEvent).
 	DeliveryClaimed bool
+	// SignaturePending: the order is already delivered (typically the
+	// consignee confirmed receipt first) but the driver's signature isn't
+	// on file yet — the page shows the signature step for it even though
+	// the order is terminal (checkTrackerDriverAction still accepts it).
+	SignaturePending bool
 }
 
 func loadTrackerStopProgress(ctx context.Context, q querier, orderID string) (trackerStopProgress, error) {
 	var p trackerStopProgress
 	err := q.QueryRow(ctx, `
 		SELECT reached_at IS NOT NULL,
-		       delivery_claimed_at IS NOT NULL AND signature_url IS NOT NULL
+		       delivery_claimed_at IS NOT NULL AND signature_url IS NOT NULL,
+		       status = 'delivered' AND signature_url IS NULL
 		FROM tracker_orders WHERE id = $1
-	`, orderID).Scan(&p.Reached, &p.DeliveryClaimed)
+	`, orderID).Scan(&p.Reached, &p.DeliveryClaimed, &p.SignaturePending)
 	return p, err
+}
+
+// resolveTrackerTripPageStop picks the stop a trip's drive page shows.
+// The most recently delivered stop wins while it still has no signature,
+// so a driver whose stop the consignee confirmed first can still sign for
+// it after a reload; once it is signed (or if it was), the page moves on
+// to the active stop (lowest stop_sequence not delivered/cancelled). Only
+// the most recent delivered stop is considered — older unsigned ones never
+// hold the page back. "" means nothing is left to show. A cancelled trip
+// offers no signature step.
+func resolveTrackerTripPageStop(ctx context.Context, q querier, tripID, tripStatus string) (string, error) {
+	if tripStatus != "cancelled" {
+		var lastID string
+		var unsigned bool
+		err := q.QueryRow(ctx, `
+			SELECT o.id::text, o.signature_url IS NULL
+			FROM tracker_orders o
+			WHERE o.trip_id = $1 AND o.status = 'delivered'
+			ORDER BY (SELECT MAX(e.created_at) FROM tracker_order_events e
+			          WHERE e.order_id = o.id AND e.status = 'delivered') DESC NULLS LAST,
+			         o.stop_sequence DESC
+			LIMIT 1
+		`, tripID).Scan(&lastID, &unsigned)
+		switch {
+		case err == nil && unsigned:
+			return lastID, nil
+		case err != nil && !errors.Is(err, pgx.ErrNoRows):
+			return "", err
+		}
+	}
+	var activeID string
+	err := q.QueryRow(ctx, `
+		SELECT id::text FROM tracker_orders
+		WHERE trip_id = $1 AND status NOT IN ('delivered','cancelled')
+		ORDER BY stop_sequence ASC
+		LIMIT 1
+	`, tripID).Scan(&activeID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	return activeID, err
 }
 
 // ─── Event assessment + recording ──────────────────────────────────────────

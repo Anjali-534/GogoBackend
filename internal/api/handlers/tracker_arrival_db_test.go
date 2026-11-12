@@ -438,3 +438,135 @@ func TestTrackerDriverNamedStop(t *testing.T) {
 		t.Fatalf("consignee-delivered single order after signing: %+v", r)
 	}
 }
+
+// TestTrackerDriverPageStop covers which stop the drive page shows and its
+// signature_pending flag: a single order delivered by consignee receipt
+// before the driver signed shows the signature step until signed; on a
+// trip the most recently delivered stop wins over advancing while it is
+// unsigned, then the page moves on, and older unsigned stops never hold
+// it back.
+//
+// Needs TEST_DATABASE_URL, same as TestTrackerDriverStopFlow.
+func TestTrackerDriverPageStop(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set — run against a scratch Postgres to exercise the drive page stop selection")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+	schema := fmt.Sprintf("tracker_page_stop_test_%d", time.Now().UnixNano())
+	mustExec(t, conn, `CREATE SCHEMA `+schema)
+	defer conn.Exec(ctx, `DROP SCHEMA `+schema+` CASCADE`)
+	mustExec(t, conn, `SET search_path TO `+schema)
+	mustExec(t, conn, `CREATE TABLE tracker_trips (
+		id UUID PRIMARY KEY, overall_status TEXT NOT NULL, driver_tracking_token TEXT UNIQUE)`)
+	mustExec(t, conn, `CREATE TABLE tracker_orders (
+		id UUID PRIMARY KEY, company_id UUID NOT NULL, status TEXT NOT NULL,
+		dispatch_to_lat DOUBLE PRECISION, dispatch_to_lng DOUBLE PRECISION,
+		trip_id UUID REFERENCES tracker_trips(id), stop_sequence INT DEFAULT 1,
+		driver_tracking_token TEXT UNIQUE, signature_url TEXT, updated_at TIMESTAMPTZ DEFAULT NOW())`)
+	mustExec(t, conn, `CREATE TABLE tracker_order_events (
+		id UUID PRIMARY KEY, order_id UUID NOT NULL REFERENCES tracker_orders(id) ON DELETE CASCADE,
+		status TEXT NOT NULL, note TEXT, location TEXT, reported_by TEXT NOT NULL DEFAULT 'company',
+		event_kind TEXT, created_at TIMESTAMPTZ DEFAULT NOW())`)
+	sql069, err := migrations.FS.ReadFile("069_tracker_arrival_audit.sql")
+	if err != nil {
+		t.Fatalf("read migration 069: %v", err)
+	}
+	mustExec(t, conn, string(sql069))
+
+	const (
+		companyID = "00000000-0000-4000-8000-00000000c001"
+		trip      = "00000000-0000-4000-8000-00000000a001"
+		stop1     = "00000000-0000-4000-8000-00000000b001"
+		stop2     = "00000000-0000-4000-8000-00000000b002"
+		stop3     = "00000000-0000-4000-8000-00000000b003"
+		single    = "00000000-0000-4000-8000-00000000b004"
+	)
+	mustExec(t, conn, `INSERT INTO tracker_trips VALUES ($1,'in_transit','trip-token')`, trip)
+	mustExec(t, conn, `INSERT INTO tracker_orders (id, company_id, status, trip_id, stop_sequence) VALUES
+		($1,$4,'in_transit',$5,1), ($2,$4,'in_transit',$5,2), ($3,$4,'in_transit',$5,3)`, stop1, stop2, stop3, companyID, trip)
+	mustExec(t, conn, `INSERT INTO tracker_orders (id, company_id, status, driver_tracking_token) VALUES ($1,$2,'in_transit','order-token')`, single, companyID)
+
+	// deliver marks a stop delivered the way tryAutoCompleteDelivery does
+	// (status + a 'delivered' event), at a given minute so "most recent"
+	// is deterministic.
+	base := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
+	deliver := func(id string, minute int) {
+		t.Helper()
+		mustExec(t, conn, `UPDATE tracker_orders SET status='delivered' WHERE id=$1`, id)
+		mustExec(t, conn, `INSERT INTO tracker_order_events (id, order_id, status, reported_by, created_at)
+			VALUES (gen_random_uuid(), $1, 'delivered', 'consignee', $2)`, id, base.Add(time.Duration(minute)*time.Minute))
+	}
+	sign := func(id string) {
+		t.Helper()
+		if ok, err := saveTrackerDriverSignature(ctx, conn, id, "https://example.com/"+id+".png"); err != nil || !ok {
+			t.Fatalf("sign %s: ok=%v err=%v", id, ok, err)
+		}
+	}
+	pending := func(id string) bool {
+		t.Helper()
+		p, err := loadTrackerStopProgress(ctx, conn, id)
+		if err != nil {
+			t.Fatalf("progress %s: %v", id, err)
+		}
+		return p.SignaturePending
+	}
+	page := func(tripStatus, want string, wantPending bool) {
+		t.Helper()
+		got, err := resolveTrackerTripPageStop(ctx, conn, trip, tripStatus)
+		if err != nil {
+			t.Fatalf("page stop: %v", err)
+		}
+		if got != want {
+			t.Fatalf("page stop = %q, want %q", got, want)
+		}
+		if want != "" && pending(got) != wantPending {
+			t.Fatalf("page stop %s signature_pending = %v, want %v", got, !wantPending, wantPending)
+		}
+	}
+
+	// Single order.
+	if pending(single) {
+		t.Fatal("in-transit single order should not be signature_pending")
+	}
+	deliver(single, 0)
+	if !pending(single) {
+		t.Fatal("consignee-delivered unsigned single order should be signature_pending")
+	}
+	sign(single)
+	if pending(single) {
+		t.Fatal("single order still signature_pending after signing")
+	}
+	mustExec(t, conn, `UPDATE tracker_orders SET status='cancelled', signature_url=NULL WHERE id=$1`, single)
+	if pending(single) {
+		t.Fatal("cancelled order must not be signature_pending")
+	}
+
+	// Trip: starts on the active stop.
+	page("in_transit", stop1, false)
+	// Consignee confirms stop 1 before the driver signs: stop 1 stays.
+	deliver(stop1, 1)
+	page("in_transit", stop1, true)
+	// Signed: moves on to stop 2.
+	sign(stop1)
+	page("in_transit", stop2, false)
+	// Stop 2 delivered and signed; stop 1 somehow loses its signature —
+	// an older unsigned stop doesn't pull the page back.
+	deliver(stop2, 2)
+	sign(stop2)
+	mustExec(t, conn, `UPDATE tracker_orders SET signature_url=NULL WHERE id=$1`, stop1)
+	page("in_transit", stop3, false)
+	// Last stop delivered unsigned completes the trip; it still shows.
+	deliver(stop3, 3)
+	page("completed", stop3, true)
+	sign(stop3)
+	page("completed", "", false)
+	// A cancelled trip offers no signature step.
+	mustExec(t, conn, `UPDATE tracker_orders SET signature_url=NULL WHERE id=$1`, stop3)
+	page("cancelled", "", false)
+}

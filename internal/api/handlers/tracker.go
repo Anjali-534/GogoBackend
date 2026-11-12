@@ -2942,31 +2942,36 @@ func GetTrackerDriverOrder(c *gin.Context) {
 	// without re-posting (see loadTrackerStopProgress); arrival_radius_m /
 	// arrival_accuracy_cap_m are the server's arrival rule (tracker_arrival.go).
 	arrival := trackerArrivalConfigFrom(c.MustGet("config").(*config.Config))
-	var tripID string
-	tripErr := pool.QueryRow(ctx, `SELECT id::text FROM tracker_trips WHERE driver_tracking_token = $1`, driverToken).Scan(&tripID)
+	//
+	// signature_pending: the stop shown is already delivered but unsigned
+	// (consignee confirmed first) — the page shows the signature step for it.
+	// On a trip that stop takes priority over the next one until signed
+	// (resolveTrackerTripPageStop).
+	var tripID, tripOverallStatus string
+	tripErr := pool.QueryRow(ctx, `SELECT id::text, overall_status FROM tracker_trips WHERE driver_tracking_token = $1`, driverToken).Scan(&tripID, &tripOverallStatus)
 	if tripErr == nil {
+		pageStopID, err := resolveTrackerTripPageStop(ctx, pool, tripID, tripOverallStatus)
+		if err != nil {
+			log.Printf("GetTrackerDriverOrder: page stop lookup failed for trip=%s: %v", tripID, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+			return
+		}
 		var tripStatus, tripDispatchFrom, tripVehicleNumber, companyName string
 		var companyLogoURL *string
 		var activeDispatchTo, activeBookedFor *string
 		var activeDispatchToLat, activeDispatchToLng *float64
 		var activeOrderID *string
 		var currentStopSequence, totalStops int
-		err := pool.QueryRow(ctx, `
+		err = pool.QueryRow(ctx, `
 			SELECT t.overall_status, t.dispatch_from, t.vehicle_number, c.company_name, c.logo_url,
 			       active.dispatch_to, active.booked_for_company_name, COALESCE(active.stop_sequence, 0),
 			       active.dispatch_to_lat, active.dispatch_to_lng, active.id::text,
 			       (SELECT COUNT(*) FROM tracker_orders WHERE trip_id = t.id)
 			FROM tracker_trips t
 			JOIN tracker_companies c ON c.id = t.company_id
-			LEFT JOIN LATERAL (
-				SELECT id, dispatch_to, booked_for_company_name, stop_sequence, dispatch_to_lat, dispatch_to_lng
-				FROM tracker_orders
-				WHERE trip_id = t.id AND status NOT IN ('delivered','cancelled')
-				ORDER BY stop_sequence ASC
-				LIMIT 1
-			) active ON true
+			LEFT JOIN tracker_orders active ON active.trip_id = t.id AND active.id::text = $2
 			WHERE t.id = $1
-		`, tripID).Scan(
+		`, tripID, pageStopID).Scan(
 			&tripStatus, &tripDispatchFrom, &tripVehicleNumber, &companyName, &companyLogoURL,
 			&activeDispatchTo, &activeBookedFor, &currentStopSequence,
 			&activeDispatchToLat, &activeDispatchToLng, &activeOrderID, &totalStops,
@@ -3010,6 +3015,7 @@ func GetTrackerDriverOrder(c *gin.Context) {
 			"order_id":                  activeOrderID,
 			"reached_recorded":          progress.Reached,
 			"delivery_claimed_recorded": progress.DeliveryClaimed,
+			"signature_pending":         progress.SignaturePending,
 			"arrival_radius_m":          arrival.RadiusM,
 			"arrival_accuracy_cap_m":    arrival.AccuracyCapM,
 		})
@@ -3070,6 +3076,7 @@ func GetTrackerDriverOrder(c *gin.Context) {
 		"order_id":                  orderID,
 		"reached_recorded":          progress.Reached,
 		"delivery_claimed_recorded": progress.DeliveryClaimed,
+		"signature_pending":         progress.SignaturePending,
 		"arrival_radius_m":          arrival.RadiusM,
 		"arrival_accuracy_cap_m":    arrival.AccuracyCapM,
 	})
