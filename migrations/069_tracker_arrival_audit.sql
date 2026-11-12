@@ -8,10 +8,11 @@
 -- coordinates at all (older open pages, GPS off).
 --
 -- tracker_orders gets the per-stop summary the company panel badges on:
--- reached_at (also lets the drive page skip a duplicate 'reached' after a
--- reload), the two flags, the distance of the first outside-radius event
--- and the driver's reason. Trip stops are tracker_orders rows, so this is
--- per stop, not per trip.
+-- reached_at / delivery_claimed_at (also make a repeated 'reached' or
+-- 'delivery_claimed' a no-op and let a reloaded drive page resume where it
+-- was), the two flags, the distance of the first outside-radius event and
+-- the driver's reason. Trip stops are tracker_orders rows, so this is per
+-- stop, not per trip.
 
 ALTER TABLE tracker_order_events
     ADD COLUMN IF NOT EXISTS lat            DOUBLE PRECISION,
@@ -23,6 +24,7 @@ ALTER TABLE tracker_order_events
 
 ALTER TABLE tracker_orders
     ADD COLUMN IF NOT EXISTS reached_at              TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS delivery_claimed_at     TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS arrived_outside_radius  BOOLEAN NOT NULL DEFAULT false,
     ADD COLUMN IF NOT EXISTS arrival_no_location     BOOLEAN NOT NULL DEFAULT false,
     ADD COLUMN IF NOT EXISTS arrival_distance_m      DOUBLE PRECISION,
@@ -40,3 +42,14 @@ FROM (
     GROUP BY order_id
 ) e
 WHERE o.id = e.order_id AND o.reached_at IS NULL;
+
+-- Same backfill for 'delivery_claimed'.
+UPDATE tracker_orders o
+SET delivery_claimed_at = e.first_claimed
+FROM (
+    SELECT order_id, MIN(created_at) AS first_claimed
+    FROM tracker_order_events
+    WHERE event_kind = 'delivery_claimed'
+    GROUP BY order_id
+) e
+WHERE o.id = e.order_id AND o.delivery_claimed_at IS NULL;

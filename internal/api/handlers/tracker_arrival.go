@@ -141,12 +141,28 @@ func respondTrackerDriverStopError(c *gin.Context, terminalMsg string, err error
 	return true
 }
 
-// trackerStopReached reports whether 'reached' is already recorded for
-// this stop (reached_at, backfilled from older events by migration 069).
-func trackerStopReached(ctx context.Context, q querier, orderID string) (bool, error) {
-	var reached bool
-	err := q.QueryRow(ctx, `SELECT reached_at IS NOT NULL FROM tracker_orders WHERE id = $1`, orderID).Scan(&reached)
-	return reached, err
+// trackerStopProgress is how far the driver has got on one stop, returned
+// to the drive page as reached_recorded / delivery_claimed_recorded so a
+// reloaded page resumes where it was instead of re-posting.
+type trackerStopProgress struct {
+	// Reached: 'reached' is on file (reached_at; backfilled from older
+	// events by migration 069).
+	Reached bool
+	// DeliveryClaimed: the 'delivery_claimed' event AND the signature are
+	// both on file. A claim whose signature upload failed doesn't count —
+	// the page must still offer Delivered so the driver can sign again
+	// (the repeated claim is then a no-op, see recordTrackerDriverEvent).
+	DeliveryClaimed bool
+}
+
+func loadTrackerStopProgress(ctx context.Context, q querier, orderID string) (trackerStopProgress, error) {
+	var p trackerStopProgress
+	err := q.QueryRow(ctx, `
+		SELECT reached_at IS NOT NULL,
+		       delivery_claimed_at IS NOT NULL AND signature_url IS NOT NULL
+		FROM tracker_orders WHERE id = $1
+	`, orderID).Scan(&p.Reached, &p.DeliveryClaimed)
+	return p, err
 }
 
 // ─── Event assessment + recording ──────────────────────────────────────────
@@ -251,15 +267,18 @@ func assessTrackerDriverArrival(req trackerDriverEventRequest, stop trackerDrive
 }
 
 // recordTrackerDriverEvent writes the event with its audit columns and
-// rolls the flags up onto the stop's order row. A second 'reached' for a
-// stop that already has one is a no-op (already=true): the row lock makes
-// that hold even for two concurrent posts. Run it inside a transaction.
+// rolls the flags up onto the stop's order row. A second 'reached' or a
+// second 'delivery_claimed' for the same stop is a no-op (already=true):
+// no event row, no flag changes. The row lock makes that hold even for two
+// concurrent posts. Run it inside a transaction.
 func recordTrackerDriverEvent(ctx context.Context, tx querier, stop trackerDriverStop, req trackerDriverEventRequest, a trackerArrivalAssessment) (already bool, err error) {
-	var reachedAt *time.Time
-	if err := tx.QueryRow(ctx, `SELECT reached_at FROM tracker_orders WHERE id = $1 FOR UPDATE`, stop.OrderID).Scan(&reachedAt); err != nil {
+	var reachedAt, claimedAt *time.Time
+	if err := tx.QueryRow(ctx, `
+		SELECT reached_at, delivery_claimed_at FROM tracker_orders WHERE id = $1 FOR UPDATE
+	`, stop.OrderID).Scan(&reachedAt, &claimedAt); err != nil {
 		return false, err
 	}
-	if req.Kind == "reached" && reachedAt != nil {
+	if (req.Kind == "reached" && reachedAt != nil) || (req.Kind == "delivery_claimed" && claimedAt != nil) {
 		return true, nil
 	}
 
@@ -279,6 +298,7 @@ func recordTrackerDriverEvent(ctx context.Context, tx querier, stop trackerDrive
 	if _, err := tx.Exec(ctx, `
 		UPDATE tracker_orders SET
 			reached_at = CASE WHEN $2::text = 'reached' THEN COALESCE(reached_at, NOW()) ELSE reached_at END,
+			delivery_claimed_at = CASE WHEN $2::text = 'delivery_claimed' THEN COALESCE(delivery_claimed_at, NOW()) ELSE delivery_claimed_at END,
 			arrived_outside_radius = arrived_outside_radius OR $3::boolean,
 			arrival_no_location = arrival_no_location OR $4::boolean,
 			arrival_distance_m = CASE WHEN $3::boolean THEN COALESCE(arrival_distance_m, $5::double precision) ELSE arrival_distance_m END,

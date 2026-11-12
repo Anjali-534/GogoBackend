@@ -2934,8 +2934,9 @@ func GetTrackerDriverOrder(c *gin.Context) {
 	// without a destination, the driver page can't fetch/render route
 	// options at all for a trip-based link).
 	//
-	// reached_recorded tells the page 'reached' is already on file for the
-	// current stop (survives a reload, no duplicate post); arrival_radius_m /
+	// reached_recorded / delivery_claimed_recorded tell the page how far the
+	// driver already got on the current stop, so a reload resumes there
+	// without re-posting (see loadTrackerStopProgress); arrival_radius_m /
 	// arrival_accuracy_cap_m are the server's arrival rule (tracker_arrival.go).
 	arrival := trackerArrivalConfigFrom(c.MustGet("config").(*config.Config))
 	var tripID string
@@ -2945,17 +2946,17 @@ func GetTrackerDriverOrder(c *gin.Context) {
 		var companyLogoURL *string
 		var activeDispatchTo, activeBookedFor *string
 		var activeDispatchToLat, activeDispatchToLng *float64
-		var activeReached *bool
+		var activeOrderID *string
 		var currentStopSequence, totalStops int
 		err := pool.QueryRow(ctx, `
 			SELECT t.overall_status, t.dispatch_from, t.vehicle_number, c.company_name, c.logo_url,
 			       active.dispatch_to, active.booked_for_company_name, COALESCE(active.stop_sequence, 0),
-			       active.dispatch_to_lat, active.dispatch_to_lng, active.reached_at IS NOT NULL,
+			       active.dispatch_to_lat, active.dispatch_to_lng, active.id::text,
 			       (SELECT COUNT(*) FROM tracker_orders WHERE trip_id = t.id)
 			FROM tracker_trips t
 			JOIN tracker_companies c ON c.id = t.company_id
 			LEFT JOIN LATERAL (
-				SELECT dispatch_to, booked_for_company_name, stop_sequence, dispatch_to_lat, dispatch_to_lng, reached_at
+				SELECT id, dispatch_to, booked_for_company_name, stop_sequence, dispatch_to_lat, dispatch_to_lng
 				FROM tracker_orders
 				WHERE trip_id = t.id AND status NOT IN ('delivered','cancelled')
 				ORDER BY stop_sequence ASC
@@ -2965,11 +2966,17 @@ func GetTrackerDriverOrder(c *gin.Context) {
 		`, tripID).Scan(
 			&tripStatus, &tripDispatchFrom, &tripVehicleNumber, &companyName, &companyLogoURL,
 			&activeDispatchTo, &activeBookedFor, &currentStopSequence,
-			&activeDispatchToLat, &activeDispatchToLng, &activeReached, &totalStops,
+			&activeDispatchToLat, &activeDispatchToLng, &activeOrderID, &totalStops,
 		)
 		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "tracking link not found"})
 			return
+		}
+		var progress trackerStopProgress
+		if activeOrderID != nil {
+			if progress, err = loadTrackerStopProgress(ctx, pool, *activeOrderID); err != nil {
+				log.Printf("GetTrackerDriverOrder: stop progress lookup failed for order=%s: %v", *activeOrderID, err)
+			}
 		}
 		dispatchTo, bookedFor := "", ""
 		if activeDispatchTo != nil {
@@ -2979,27 +2986,28 @@ func GetTrackerDriverOrder(c *gin.Context) {
 			bookedFor = *activeBookedFor
 		}
 		c.JSON(http.StatusOK, gin.H{
-			"status":                  tripStatus,
-			"dispatch_from":           tripDispatchFrom,
-			"dispatch_to":             dispatchTo,
-			"vehicle_number":          tripVehicleNumber,
-			"company_name":            companyName,
-			"company_logo_url":        companyLogoURL,
-			"booked_for_company_name": bookedFor,
-			"is_terminal":             tripStatus == "completed" || tripStatus == "cancelled",
-			"dispatch_from_lat":       nil,
-			"dispatch_from_lng":       nil,
-			"dispatch_to_lat":         activeDispatchToLat,
-			"dispatch_to_lng":         activeDispatchToLng,
-			"route_polyline":          nil,
-			"route_distance_km":       nil,
-			"route_duration_mins":     nil,
-			"is_trip":                 true,
-			"current_stop_sequence":   currentStopSequence,
-			"total_stops":             totalStops,
-			"reached_recorded":        activeReached != nil && *activeReached,
-			"arrival_radius_m":        arrival.RadiusM,
-			"arrival_accuracy_cap_m":  arrival.AccuracyCapM,
+			"status":                    tripStatus,
+			"dispatch_from":             tripDispatchFrom,
+			"dispatch_to":               dispatchTo,
+			"vehicle_number":            tripVehicleNumber,
+			"company_name":              companyName,
+			"company_logo_url":          companyLogoURL,
+			"booked_for_company_name":   bookedFor,
+			"is_terminal":               tripStatus == "completed" || tripStatus == "cancelled",
+			"dispatch_from_lat":         nil,
+			"dispatch_from_lng":         nil,
+			"dispatch_to_lat":           activeDispatchToLat,
+			"dispatch_to_lng":           activeDispatchToLng,
+			"route_polyline":            nil,
+			"route_distance_km":         nil,
+			"route_duration_mins":       nil,
+			"is_trip":                   true,
+			"current_stop_sequence":     currentStopSequence,
+			"total_stops":               totalStops,
+			"reached_recorded":          progress.Reached,
+			"delivery_claimed_recorded": progress.DeliveryClaimed,
+			"arrival_radius_m":          arrival.RadiusM,
+			"arrival_accuracy_cap_m":    arrival.AccuracyCapM,
 		})
 		return
 	}
@@ -3010,22 +3018,26 @@ func GetTrackerDriverOrder(c *gin.Context) {
 	var routeDistanceKm *float64
 	var routeDurationMins *int
 	var companyLogoURL *string
-	var reachedRecorded bool
 	err := pool.QueryRow(ctx, `
 		SELECT o.id::text, o.status, o.dispatch_from, o.dispatch_to, o.vehicle_number,
 		       o.dispatch_from_lat, o.dispatch_from_lng, o.dispatch_to_lat, o.dispatch_to_lng,
 		       o.route_polyline, o.route_distance_km, o.route_duration_mins,
-		       c.company_name, o.booked_for_company_name, c.logo_url, o.reached_at IS NOT NULL
+		       c.company_name, o.booked_for_company_name, c.logo_url
 		FROM tracker_orders o
 		JOIN tracker_companies c ON c.id = o.company_id
 		WHERE o.driver_tracking_token = $1
 	`, driverToken).Scan(&orderID, &status, &dispatchFrom, &dispatchTo, &vehicleNumber,
 		&fromLat, &fromLng, &toLat, &toLng,
 		&routePolyline, &routeDistanceKm, &routeDurationMins,
-		&companyName, &bookedForCompanyName, &companyLogoURL, &reachedRecorded)
+		&companyName, &bookedForCompanyName, &companyLogoURL)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "tracking link not found"})
 		return
+	}
+
+	progress, err := loadTrackerStopProgress(ctx, pool, orderID)
+	if err != nil {
+		log.Printf("GetTrackerDriverOrder: stop progress lookup failed for order=%s: %v", orderID, err)
 	}
 
 	// Same self-heal as GetTrackerCompanyOwnOrder: retry a failed create-time
@@ -3036,24 +3048,25 @@ func GetTrackerDriverOrder(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"status":                  status,
-		"dispatch_from":           dispatchFrom,
-		"dispatch_to":             dispatchTo,
-		"vehicle_number":          vehicleNumber,
-		"company_name":            companyName,
-		"company_logo_url":        companyLogoURL,
-		"booked_for_company_name": bookedForCompanyName,
-		"is_terminal":             terminalOrderStatuses[status],
-		"dispatch_from_lat":       fromLat,
-		"dispatch_from_lng":       fromLng,
-		"dispatch_to_lat":         toLat,
-		"dispatch_to_lng":         toLng,
-		"route_polyline":          routePolyline,
-		"route_distance_km":       routeDistanceKm,
-		"route_duration_mins":     routeDurationMins,
-		"reached_recorded":        reachedRecorded,
-		"arrival_radius_m":        arrival.RadiusM,
-		"arrival_accuracy_cap_m":  arrival.AccuracyCapM,
+		"status":                    status,
+		"dispatch_from":             dispatchFrom,
+		"dispatch_to":               dispatchTo,
+		"vehicle_number":            vehicleNumber,
+		"company_name":              companyName,
+		"company_logo_url":          companyLogoURL,
+		"booked_for_company_name":   bookedForCompanyName,
+		"is_terminal":               terminalOrderStatuses[status],
+		"dispatch_from_lat":         fromLat,
+		"dispatch_from_lng":         fromLng,
+		"dispatch_to_lat":           toLat,
+		"dispatch_to_lng":           toLng,
+		"route_polyline":            routePolyline,
+		"route_distance_km":         routeDistanceKm,
+		"route_duration_mins":       routeDurationMins,
+		"reached_recorded":          progress.Reached,
+		"delivery_claimed_recorded": progress.DeliveryClaimed,
+		"arrival_radius_m":          arrival.RadiusM,
+		"arrival_accuracy_cap_m":    arrival.AccuracyCapM,
 	})
 }
 
@@ -3519,7 +3532,7 @@ func PostTrackerDriverEvent(c *gin.Context) {
 		return
 	}
 	if already {
-		c.JSON(http.StatusOK, gin.H{"message": "already reached", "already_reached": true})
+		c.JSON(http.StatusOK, gin.H{"message": req.Kind + " already recorded for this stop", "already_recorded": true})
 		return
 	}
 

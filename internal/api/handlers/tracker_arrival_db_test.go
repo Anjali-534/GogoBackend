@@ -16,9 +16,11 @@ import (
 // TestTrackerDriverStopFlow covers the drive page's reached / delivered
 // path against a real Postgres: a multi-stop trip token resolving to its
 // current active stop (previously the event and signature endpoints only
-// looked in tracker_orders and 404'd for trip links), 'reached' being
-// recorded once per stop, the audit columns and order-level flags from
-// migration 069, and that migration's reached_at backfill.
+// looked in tracker_orders and 404'd for trip links), 'reached' and
+// 'delivery_claimed' each being recorded once per stop, the
+// reached / delivery-claimed progress a reloaded drive page resumes from,
+// the audit columns and order-level flags from migration 069, and that
+// migration's reached_at / delivery_claimed_at backfill.
 //
 // Needs TEST_DATABASE_URL, same as TestEnsureRiderProfile. Runs inside a
 // throwaway schema that is dropped afterwards.
@@ -46,7 +48,7 @@ func TestTrackerDriverStopFlow(t *testing.T) {
 		id UUID PRIMARY KEY, company_id UUID NOT NULL, status TEXT NOT NULL,
 		dispatch_to_lat DOUBLE PRECISION, dispatch_to_lng DOUBLE PRECISION,
 		trip_id UUID REFERENCES tracker_trips(id), stop_sequence INT DEFAULT 1,
-		driver_tracking_token TEXT UNIQUE, updated_at TIMESTAMPTZ DEFAULT NOW())`)
+		driver_tracking_token TEXT UNIQUE, signature_url TEXT, updated_at TIMESTAMPTZ DEFAULT NOW())`)
 	mustExec(t, conn, `CREATE TABLE tracker_order_events (
 		id UUID PRIMARY KEY, order_id UUID NOT NULL REFERENCES tracker_orders(id) ON DELETE CASCADE,
 		status TEXT NOT NULL, note TEXT, location TEXT, reported_by TEXT NOT NULL DEFAULT 'company',
@@ -70,10 +72,12 @@ func TestTrackerDriverStopFlow(t *testing.T) {
 		VALUES ($1,$2,'in_transit',28.6315,77.2167,$3,1)`, stop1, companyID, tripID)
 	mustExec(t, conn, `INSERT INTO tracker_orders (id, company_id, status, dispatch_to_lat, dispatch_to_lng, driver_tracking_token)
 		VALUES ($1,$2,'in_transit',28.5,77.3,$3)`, single, companyID, orderTok)
-	// An order that already had a 'reached' event before migration 069.
-	mustExec(t, conn, `INSERT INTO tracker_orders (id, company_id, status) VALUES ($1,$2,'in_transit')`, legacy, companyID)
+	// An order that already had 'reached' + 'delivery_claimed' events and a
+	// signature before migration 069.
+	mustExec(t, conn, `INSERT INTO tracker_orders (id, company_id, status, signature_url) VALUES ($1,$2,'in_transit','https://example.com/sig.png')`, legacy, companyID)
 	mustExec(t, conn, `INSERT INTO tracker_order_events (id, order_id, status, reported_by, event_kind)
-		VALUES (gen_random_uuid(), $1, 'in_transit', 'driver', 'reached')`, legacy)
+		VALUES (gen_random_uuid(), $1, 'in_transit', 'driver', 'reached'),
+		       (gen_random_uuid(), $1, 'in_transit', 'driver', 'delivery_claimed')`, legacy)
 
 	sql069, err := migrations.FS.ReadFile("069_tracker_arrival_audit.sql")
 	if err != nil {
@@ -82,8 +86,8 @@ func TestTrackerDriverStopFlow(t *testing.T) {
 	mustExec(t, conn, string(sql069))
 	mustExec(t, conn, string(sql069)) // must be re-runnable
 
-	if r, err := trackerStopReached(ctx, conn, legacy); err != nil || !r {
-		t.Fatalf("legacy order reached_at not backfilled: reached=%v err=%v", r, err)
+	if p, err := loadTrackerStopProgress(ctx, conn, legacy); err != nil || !p.Reached || !p.DeliveryClaimed {
+		t.Fatalf("legacy order not backfilled: progress=%+v err=%v", p, err)
 	}
 
 	resolve := func(token string) (trackerDriverStop, string) {
@@ -114,14 +118,15 @@ func TestTrackerDriverStopFlow(t *testing.T) {
 		}
 		return already
 	}
-	reached := func(orderID string) bool {
+	progress := func(orderID string) trackerStopProgress {
 		t.Helper()
-		r, err := trackerStopReached(ctx, conn, orderID)
+		p, err := loadTrackerStopProgress(ctx, conn, orderID)
 		if err != nil {
-			t.Fatalf("reached(%s): %v", orderID, err)
+			t.Fatalf("progress(%s): %v", orderID, err)
 		}
-		return r
+		return p
 	}
+	reached := func(orderID string) bool { t.Helper(); return progress(orderID).Reached }
 	countEvents := func(orderID, kind string) int {
 		t.Helper()
 		var n int
@@ -161,8 +166,32 @@ func TestTrackerDriverStopFlow(t *testing.T) {
 		t.Fatalf("reached event audit wrong: lat=%v acc=%v dist=%v outside=%v noLoc=%v", lat, acc, dist, outside, noLoc)
 	}
 
-	// 3. delivery_claimed with no coordinates: accepted, order flagged no_location.
-	record(s, trackerDriverEventRequest{Kind: "delivery_claimed"})
+	// 3. delivery_claimed with no coordinates: accepted, order flagged
+	// no_location. Without a signature yet it doesn't count as claimed for
+	// the drive page (the driver still has to sign).
+	if record(s, trackerDriverEventRequest{Kind: "delivery_claimed"}) {
+		t.Fatal("first delivery_claimed reported already=true")
+	}
+	if p := progress(stop1); !p.Reached || p.DeliveryClaimed {
+		t.Fatalf("after claim without signature: %+v, want reached only", p)
+	}
+
+	// 3b. A second delivery_claimed for the same stop does nothing — no
+	// event row, and its (far, outside-radius) position doesn't touch the
+	// order's flags.
+	if !record(s, trackerDriverEventRequest{Kind: "delivery_claimed", Lat: f64(28.6315 + 2000/111195.0), Lng: f64(77.2167)}) {
+		t.Fatal("second delivery_claimed should report already=true")
+	}
+	if n := countEvents(stop1, "delivery_claimed"); n != 1 {
+		t.Fatalf("stop1 has %d delivery_claimed events, want 1", n)
+	}
+
+	// 3c. Signature on file → the drive page resumes in "Delivery claimed".
+	mustExec(t, conn, `UPDATE tracker_orders SET signature_url='https://example.com/s1.png' WHERE id=$1`, stop1)
+	if p := progress(stop1); !p.Reached || !p.DeliveryClaimed {
+		t.Fatalf("after claim + signature: %+v, want both", p)
+	}
+
 	var orderOutside, orderNoLoc bool
 	if err := conn.QueryRow(ctx, `SELECT arrived_outside_radius, arrival_no_location FROM tracker_orders WHERE id=$1`, stop1).Scan(&orderOutside, &orderNoLoc); err != nil {
 		t.Fatalf("read stop1 flags: %v", err)
@@ -178,8 +207,8 @@ func TestTrackerDriverStopFlow(t *testing.T) {
 	if msg != "" || s.OrderID != stop2 {
 		t.Fatalf("after stop1 delivered, trip token resolved to %+v msg=%q, want stop2", s, msg)
 	}
-	if reached(stop2) {
-		t.Fatal("stop2 should not be reached yet")
+	if p := progress(stop2); p.Reached || p.DeliveryClaimed {
+		t.Fatalf("stop2 progress = %+v, want nothing yet", p)
 	}
 
 	// 5. Stop 2 via the outside-radius override: 700 m out, flagged.
