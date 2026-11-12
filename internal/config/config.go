@@ -88,6 +88,15 @@ type Config struct {
 	// TRACKER_PANEL_URL once it is.
 	TrackerPanelURL string
 
+	// TrackerArrivalRadiusM is how close (meters) a tracker driver must be to
+	// the drop point for 'reached' to count as on-site. The drive page reads
+	// it (and TrackerArrivalAccuracyCapM) from GET /public/tracker/driver/:token
+	// so client and server can't drift apart — see tracker_arrival.go.
+	// TrackerArrivalAccuracyCapM caps how much reported GPS uncertainty
+	// (coords.accuracy) is credited: arrived = distance - min(accuracy, cap) <= radius.
+	TrackerArrivalRadiusM      int
+	TrackerArrivalAccuracyCapM int
+
 	// InvoiceIssuer is the business named on post-ride invoices. No
 	// defaults: if any mandatory field (legal name, address, state, GSTIN)
 	// is unset, bookings get a plain "Receipt" instead of an invoice / bill
@@ -148,6 +157,9 @@ func Load() *Config {
 
 		TrackerPanelURL: getString("TRACKER_PANEL_URL", "https://bogie-tracker.bogie.in"),
 
+		TrackerArrivalRadiusM:      getInt("TRACKER_ARRIVAL_RADIUS_M", 500),
+		TrackerArrivalAccuracyCapM: getInt("TRACKER_ARRIVAL_ACCURACY_CAP_M", 200),
+
 		InvoiceIssuer: bookinginvoice.Issuer{
 			LegalName:    getString("INVOICE_ISSUER_LEGAL_NAME", ""),
 			Address:      getString("INVOICE_ISSUER_ADDRESS", ""),
@@ -167,6 +179,15 @@ func Load() *Config {
 	} else if cfg.SearchTimeoutSeconds < 15 {
 		log.Printf("config: SEARCH_TIMEOUT_SECONDS=%d too low, using 15", cfg.SearchTimeoutSeconds)
 		cfg.SearchTimeoutSeconds = 15
+	}
+
+	if cfg.TrackerArrivalRadiusM <= 0 {
+		log.Printf("config: TRACKER_ARRIVAL_RADIUS_M=%d invalid, using 500", cfg.TrackerArrivalRadiusM)
+		cfg.TrackerArrivalRadiusM = 500
+	}
+	if cfg.TrackerArrivalAccuracyCapM < 0 {
+		log.Printf("config: TRACKER_ARRIVAL_ACCURACY_CAP_M=%d invalid, using 200", cfg.TrackerArrivalAccuracyCapM)
+		cfg.TrackerArrivalAccuracyCapM = 200
 	}
 
 	return cfg

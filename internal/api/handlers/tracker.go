@@ -1677,7 +1677,24 @@ func GetTrackerCompanyOwnOrder(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"order": o, "events": events, "location_pings": pings, "company_logo_url": companyLogoURL})
+	// Arrival audit summary (migration 069) for the order-detail badge —
+	// kept out of TrackerOrder so the many other queries that scan into it
+	// stay untouched.
+	var arrival struct {
+		ReachedAt            *time.Time `json:"reached_at"`
+		ArrivedOutsideRadius bool       `json:"arrived_outside_radius"`
+		NoLocation           bool       `json:"no_location"`
+		DistanceM            *float64   `json:"distance_m"`
+		OverrideReason       *string    `json:"override_reason"`
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT reached_at, arrived_outside_radius, arrival_no_location, arrival_distance_m, arrival_override_reason
+		FROM tracker_orders WHERE id = $1
+	`, orderID).Scan(&arrival.ReachedAt, &arrival.ArrivedOutsideRadius, &arrival.NoLocation, &arrival.DistanceM, &arrival.OverrideReason); err != nil {
+		log.Printf("GetTrackerCompanyOwnOrder: arrival audit lookup failed for order=%s: %v", orderID, err)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"order": o, "events": events, "location_pings": pings, "company_logo_url": companyLogoURL, "arrival_audit": arrival})
 }
 
 // outstationRouteKmThreshold is the route_distance_km (or straight-line
@@ -2916,6 +2933,11 @@ func GetTrackerDriverOrder(c *gin.Context) {
 	// DO come from the active stop below (needed for the live-route feature:
 	// without a destination, the driver page can't fetch/render route
 	// options at all for a trip-based link).
+	//
+	// reached_recorded tells the page 'reached' is already on file for the
+	// current stop (survives a reload, no duplicate post); arrival_radius_m /
+	// arrival_accuracy_cap_m are the server's arrival rule (tracker_arrival.go).
+	arrival := trackerArrivalConfigFrom(c.MustGet("config").(*config.Config))
 	var tripID string
 	tripErr := pool.QueryRow(ctx, `SELECT id::text FROM tracker_trips WHERE driver_tracking_token = $1`, driverToken).Scan(&tripID)
 	if tripErr == nil {
@@ -2923,16 +2945,17 @@ func GetTrackerDriverOrder(c *gin.Context) {
 		var companyLogoURL *string
 		var activeDispatchTo, activeBookedFor *string
 		var activeDispatchToLat, activeDispatchToLng *float64
+		var activeReached *bool
 		var currentStopSequence, totalStops int
 		err := pool.QueryRow(ctx, `
 			SELECT t.overall_status, t.dispatch_from, t.vehicle_number, c.company_name, c.logo_url,
 			       active.dispatch_to, active.booked_for_company_name, COALESCE(active.stop_sequence, 0),
-			       active.dispatch_to_lat, active.dispatch_to_lng,
+			       active.dispatch_to_lat, active.dispatch_to_lng, active.reached_at IS NOT NULL,
 			       (SELECT COUNT(*) FROM tracker_orders WHERE trip_id = t.id)
 			FROM tracker_trips t
 			JOIN tracker_companies c ON c.id = t.company_id
 			LEFT JOIN LATERAL (
-				SELECT dispatch_to, booked_for_company_name, stop_sequence, dispatch_to_lat, dispatch_to_lng
+				SELECT dispatch_to, booked_for_company_name, stop_sequence, dispatch_to_lat, dispatch_to_lng, reached_at
 				FROM tracker_orders
 				WHERE trip_id = t.id AND status NOT IN ('delivered','cancelled')
 				ORDER BY stop_sequence ASC
@@ -2942,7 +2965,7 @@ func GetTrackerDriverOrder(c *gin.Context) {
 		`, tripID).Scan(
 			&tripStatus, &tripDispatchFrom, &tripVehicleNumber, &companyName, &companyLogoURL,
 			&activeDispatchTo, &activeBookedFor, &currentStopSequence,
-			&activeDispatchToLat, &activeDispatchToLng, &totalStops,
+			&activeDispatchToLat, &activeDispatchToLng, &activeReached, &totalStops,
 		)
 		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "tracking link not found"})
@@ -2974,6 +2997,9 @@ func GetTrackerDriverOrder(c *gin.Context) {
 			"is_trip":                 true,
 			"current_stop_sequence":   currentStopSequence,
 			"total_stops":             totalStops,
+			"reached_recorded":        activeReached != nil && *activeReached,
+			"arrival_radius_m":        arrival.RadiusM,
+			"arrival_accuracy_cap_m":  arrival.AccuracyCapM,
 		})
 		return
 	}
@@ -2984,18 +3010,19 @@ func GetTrackerDriverOrder(c *gin.Context) {
 	var routeDistanceKm *float64
 	var routeDurationMins *int
 	var companyLogoURL *string
+	var reachedRecorded bool
 	err := pool.QueryRow(ctx, `
 		SELECT o.id::text, o.status, o.dispatch_from, o.dispatch_to, o.vehicle_number,
 		       o.dispatch_from_lat, o.dispatch_from_lng, o.dispatch_to_lat, o.dispatch_to_lng,
 		       o.route_polyline, o.route_distance_km, o.route_duration_mins,
-		       c.company_name, o.booked_for_company_name, c.logo_url
+		       c.company_name, o.booked_for_company_name, c.logo_url, o.reached_at IS NOT NULL
 		FROM tracker_orders o
 		JOIN tracker_companies c ON c.id = o.company_id
 		WHERE o.driver_tracking_token = $1
 	`, driverToken).Scan(&orderID, &status, &dispatchFrom, &dispatchTo, &vehicleNumber,
 		&fromLat, &fromLng, &toLat, &toLng,
 		&routePolyline, &routeDistanceKm, &routeDurationMins,
-		&companyName, &bookedForCompanyName, &companyLogoURL)
+		&companyName, &bookedForCompanyName, &companyLogoURL, &reachedRecorded)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "tracking link not found"})
 		return
@@ -3024,6 +3051,9 @@ func GetTrackerDriverOrder(c *gin.Context) {
 		"route_polyline":          routePolyline,
 		"route_distance_km":       routeDistanceKm,
 		"route_duration_mins":     routeDurationMins,
+		"reached_recorded":        reachedRecorded,
+		"arrival_radius_m":        arrival.RadiusM,
+		"arrival_accuracy_cap_m":  arrival.AccuracyCapM,
 	})
 }
 
@@ -3436,12 +3466,15 @@ func advanceTrackerTripAfterDelivery(ctx context.Context, tripID string) {
 // rare race where the consignee's receipt response lands first and this
 // event arrives after; the company can also set 'delivered' directly at
 // any time via UpdateTrackerCompanyOrderStatus.
+//
+// The token may be a single order's or a multi-stop trip's (migration 055);
+// a trip token records against its current active stop. 'reached' and
+// 'delivery_claimed' carry the driver's lat/lng/accuracy_m, checked against
+// the arrival radius and stored for audit (see tracker_arrival.go). A
+// duplicate 'reached' for a stop returns 200 with already_reached=true.
 func PostTrackerDriverEvent(c *gin.Context) {
 	driverToken := c.Param("driver_token")
-	var req struct {
-		Kind string `json:"kind" binding:"required"`
-		Note string `json:"note"`
-	}
+	var req trackerDriverEventRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -3453,34 +3486,53 @@ func PostTrackerDriverEvent(c *gin.Context) {
 
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
+	cfg := c.MustGet("config").(*config.Config)
 
-	var orderID, status string
-	if err := pool.QueryRow(ctx, `
-		SELECT id, status FROM tracker_orders WHERE driver_tracking_token = $1
-	`, driverToken).Scan(&orderID, &status); err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "tracking link not found"})
-		return
+	stop, terminalMsg, err := resolveTrackerDriverStop(ctx, pool, driverToken)
+	if err != nil && !errors.Is(err, errTrackerLinkNotFound) {
+		log.Printf("PostTrackerDriverEvent: resolve token failed: %v", err)
 	}
-	if terminalOrderStatuses[status] {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "order is in a terminal state (" + status + ") and is no longer tracked"})
+	if respondTrackerDriverStopError(c, terminalMsg, err) {
 		return
 	}
 
-	_, err := pool.Exec(ctx, `
-		INSERT INTO tracker_order_events (id, order_id, status, note, reported_by, event_kind)
-		VALUES ($1,$2,$3,$4,'driver',$5)
-	`, uuid.New(), orderID, status, nullIfEmpty(req.Note), req.Kind)
+	assessment, rejection := assessTrackerDriverArrival(req, stop, trackerArrivalConfigFrom(cfg))
+	if rejection != nil {
+		c.JSON(rejection.Status, rejection.Body)
+		return
+	}
+
+	tx, err := pool.Begin(ctx)
 	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	defer tx.Rollback(ctx)
+	already, err := recordTrackerDriverEvent(ctx, tx, stop, req, assessment)
+	if err != nil {
+		log.Printf("PostTrackerDriverEvent: record failed for order=%s kind=%s: %v", stop.OrderID, req.Kind, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to add event"})
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to add event"})
+		return
+	}
+	if already {
+		c.JSON(http.StatusOK, gin.H{"message": "already reached", "already_reached": true})
 		return
 	}
 
 	if req.Kind == "delivery_claimed" {
-		cfg := c.MustGet("config").(*config.Config)
-		tryAutoCompleteDelivery(ctx, cfg, orderID, "driver")
+		tryAutoCompleteDelivery(ctx, cfg, stop.OrderID, "driver")
 	}
 
-	c.JSON(http.StatusCreated, gin.H{"message": "event recorded"})
+	c.JSON(http.StatusCreated, gin.H{
+		"message":        "event recorded",
+		"distance_m":     assessment.DistanceM,
+		"outside_radius": assessment.OutsideRadius,
+		"no_location":    assessment.NoLocation,
+	})
 }
 
 // POST /gogoo/public/tracker/driver/:driver_token/signature
@@ -3491,22 +3543,21 @@ func PostTrackerDriverEvent(c *gin.Context) {
 // status directly — hands off to tryAutoCompleteDelivery, which only
 // transitions once a 'delivery_claimed' event, this signature, AND the
 // consignee's receipt response all exist on the order.
+//
+// A trip token (migration 055) uploads to its current active stop's order.
 func UploadTrackerDriverSignature(c *gin.Context) {
 	driverToken := c.Param("driver_token")
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 
-	var orderID, companyID, status string
-	if err := pool.QueryRow(ctx, `
-		SELECT id, company_id, status FROM tracker_orders WHERE driver_tracking_token = $1
-	`, driverToken).Scan(&orderID, &companyID, &status); err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "tracking link not found"})
+	stop, terminalMsg, err := resolveTrackerDriverStop(ctx, pool, driverToken)
+	if err != nil && !errors.Is(err, errTrackerLinkNotFound) {
+		log.Printf("UploadTrackerDriverSignature: resolve token failed: %v", err)
+	}
+	if respondTrackerDriverStopError(c, terminalMsg, err) {
 		return
 	}
-	if terminalOrderStatuses[status] {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "order is in a terminal state (" + status + ") and is no longer tracked"})
-		return
-	}
+	orderID, companyID := stop.OrderID, stop.CompanyID
 
 	if err := c.Request.ParseMultipartForm(maxFileSize); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "file too large — max 10MB allowed"})
