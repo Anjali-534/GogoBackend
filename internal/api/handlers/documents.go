@@ -245,19 +245,39 @@ func uploadToCloudinaryWithResourceType(ctx context.Context, reader io.Reader, o
 	}
 	defer resp.Body.Close()
 
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		return "", fmt.Errorf("cloudinary: HTTP %d, reading response: %w", resp.StatusCode, err)
+	}
 	var result struct {
 		SecureURL string `json:"secure_url"`
 		Error     struct {
 			Message string `json:"message"`
 		} `json:"error"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", err
-	}
-	if result.Error.Message != "" {
-		return "", fmt.Errorf("cloudinary: %s", result.Error.Message)
+	jsonErr := json.Unmarshal(raw, &result)
+	if jsonErr != nil || result.Error.Message != "" || resp.StatusCode/100 != 2 || result.SecureURL == "" {
+		return "", cloudinaryResponseError(resp.StatusCode, result.Error.Message, raw)
 	}
 	return result.SecureURL, nil
+}
+
+// cloudinaryResponseError carries Cloudinary's HTTP status and its error
+// message (or, for a non-JSON/unexpected body such as an HTML 502, the
+// start of the body) so callers' logs show the real cause — e.g. a 401
+// "Invalid Signature" is credentials, not code.
+func cloudinaryResponseError(status int, message string, body []byte) error {
+	if message != "" {
+		return fmt.Errorf("cloudinary: HTTP %d: %s", status, message)
+	}
+	snippet := strings.TrimSpace(string(body))
+	if len(snippet) > 300 {
+		snippet = snippet[:300] + "…"
+	}
+	if snippet == "" {
+		snippet = "(empty response)"
+	}
+	return fmt.Errorf("cloudinary: HTTP %d: unexpected response: %s", status, snippet)
 }
 
 // deleteFromCloudinary does a best-effort delete of a Cloudinary file.

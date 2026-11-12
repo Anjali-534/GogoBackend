@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -90,13 +89,15 @@ func TestTrackerDriverStopFlow(t *testing.T) {
 		t.Fatalf("legacy order not backfilled: progress=%+v err=%v", p, err)
 	}
 
-	resolve := func(token string) (trackerDriverStop, string) {
+	// 'reached' with no order_id: the active-stop resolution, which the
+	// claim/signature path no longer uses (see TestTrackerDriverNamedStop).
+	resolve := func(token string) (trackerDriverStop, *trackerDriverError) {
 		t.Helper()
-		stop, msg, err := resolveTrackerDriverStop(ctx, conn, token)
-		if err != nil {
-			t.Fatalf("resolve %q: %v", token, err)
+		stop, e := resolveTrackerDriverTarget(ctx, conn, token, "", trackerActionReached)
+		if e != nil && e.Status >= 500 {
+			t.Fatalf("resolve %q: %v", token, e)
 		}
-		return stop, msg
+		return stop, e
 	}
 	record := func(stop trackerDriverStop, req trackerDriverEventRequest) bool {
 		t.Helper()
@@ -137,9 +138,9 @@ func TestTrackerDriverStopFlow(t *testing.T) {
 	}
 
 	// 1. Trip token resolves to stop 1 (lowest stop_sequence).
-	s, msg := resolve(tripTok)
-	if msg != "" || s.OrderID != stop1 || s.TripID != tripID || s.CompanyID != companyID {
-		t.Fatalf("trip token resolved to %+v msg=%q, want stop1", s, msg)
+	s, e := resolve(tripTok)
+	if e != nil || s.OrderID != stop1 || s.TripID != tripID || s.CompanyID != companyID {
+		t.Fatalf("trip token resolved to %+v err=%v, want stop1", s, e)
 	}
 
 	// 2. 'reached' inside the radius is recorded once; a repeat is a no-op.
@@ -203,9 +204,9 @@ func TestTrackerDriverStopFlow(t *testing.T) {
 	// 4. Stop 1 delivered → the same trip token now resolves to stop 2,
 	// which has not been reached yet.
 	mustExec(t, conn, `UPDATE tracker_orders SET status='delivered' WHERE id=$1`, stop1)
-	s, msg = resolve(tripTok)
-	if msg != "" || s.OrderID != stop2 {
-		t.Fatalf("after stop1 delivered, trip token resolved to %+v msg=%q, want stop2", s, msg)
+	s, e = resolve(tripTok)
+	if e != nil || s.OrderID != stop2 {
+		t.Fatalf("after stop1 delivered, trip token resolved to %+v err=%v, want stop2", s, e)
 	}
 	if p := progress(stop2); p.Reached || p.DeliveryClaimed {
 		t.Fatalf("stop2 progress = %+v, want nothing yet", p)
@@ -233,22 +234,207 @@ func TestTrackerDriverStopFlow(t *testing.T) {
 
 	// 6. All stops delivered → trip token has nothing left to deliver.
 	mustExec(t, conn, `UPDATE tracker_orders SET status='delivered' WHERE id=$1`, stop2)
-	if _, msg = resolve(tripTok); msg == "" {
+	if _, e = resolve(tripTok); e == nil {
 		t.Fatal("trip with no remaining stops should return a terminal message")
 	}
 	mustExec(t, conn, `UPDATE tracker_trips SET overall_status='completed' WHERE id=$1`, tripID)
-	if _, msg = resolve(tripTok); msg == "" {
+	if _, e = resolve(tripTok); e == nil {
 		t.Fatal("completed trip should return a terminal message")
 	}
 
 	// 7. Single-order token still resolves the old way.
-	s, msg = resolve(orderTok)
-	if msg != "" || s.OrderID != single || s.TripID != "" {
-		t.Fatalf("order token resolved to %+v msg=%q", s, msg)
+	s, e = resolve(orderTok)
+	if e != nil || s.OrderID != single || s.TripID != "" {
+		t.Fatalf("order token resolved to %+v err=%v", s, e)
 	}
 
 	// 8. Unknown token.
-	if _, _, err := resolveTrackerDriverStop(ctx, conn, "nope"); !errors.Is(err, errTrackerLinkNotFound) {
-		t.Fatalf("unknown token err = %v, want errTrackerLinkNotFound", err)
+	if _, e := resolve("nope"); e == nil || e.Status != 404 {
+		t.Fatalf("unknown token err = %v, want 404", e)
+	}
+}
+
+// TestTrackerDriverNamedStop covers the claim/signature path naming its
+// stop (order_id) instead of re-resolving to the trip's current active
+// stop: a consignee confirming receipt marks stop 1 delivered and advances
+// the trip, and the driver's claim + signature, sent afterwards, must
+// still land on stop 1, not stop 2. Also: delivered-but-unsigned orders
+// still take a claim + signature, cancelled ones never do.
+//
+// Needs TEST_DATABASE_URL, same as TestTrackerDriverStopFlow.
+func TestTrackerDriverNamedStop(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set — run against a scratch Postgres to exercise the tracker signature path")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close(ctx)
+	schema := fmt.Sprintf("tracker_named_stop_test_%d", time.Now().UnixNano())
+	mustExec(t, conn, `CREATE SCHEMA `+schema)
+	defer conn.Exec(ctx, `DROP SCHEMA `+schema+` CASCADE`)
+	mustExec(t, conn, `SET search_path TO `+schema)
+	mustExec(t, conn, `CREATE TABLE tracker_trips (
+		id UUID PRIMARY KEY, overall_status TEXT NOT NULL, driver_tracking_token TEXT UNIQUE)`)
+	mustExec(t, conn, `CREATE TABLE tracker_orders (
+		id UUID PRIMARY KEY, company_id UUID NOT NULL, status TEXT NOT NULL,
+		dispatch_to_lat DOUBLE PRECISION, dispatch_to_lng DOUBLE PRECISION,
+		trip_id UUID REFERENCES tracker_trips(id), stop_sequence INT DEFAULT 1,
+		driver_tracking_token TEXT UNIQUE, signature_url TEXT, received_confirmed_at TIMESTAMPTZ,
+		updated_at TIMESTAMPTZ DEFAULT NOW())`)
+	mustExec(t, conn, `CREATE TABLE tracker_order_events (
+		id UUID PRIMARY KEY, order_id UUID NOT NULL REFERENCES tracker_orders(id) ON DELETE CASCADE,
+		status TEXT NOT NULL, note TEXT, location TEXT, reported_by TEXT NOT NULL DEFAULT 'company',
+		event_kind TEXT, created_at TIMESTAMPTZ DEFAULT NOW())`)
+	sql069, err := migrations.FS.ReadFile("069_tracker_arrival_audit.sql")
+	if err != nil {
+		t.Fatalf("read migration 069: %v", err)
+	}
+	mustExec(t, conn, string(sql069))
+
+	const (
+		companyID = "00000000-0000-4000-8000-00000000c001"
+		trip      = "00000000-0000-4000-8000-00000000a001"
+		otherTrip = "00000000-0000-4000-8000-00000000a002"
+		stop1     = "00000000-0000-4000-8000-00000000b001"
+		stop2     = "00000000-0000-4000-8000-00000000b002"
+		otherStop = "00000000-0000-4000-8000-00000000b003"
+		single    = "00000000-0000-4000-8000-00000000b004"
+		tripTok   = "trip-token"
+		otherTok  = "other-trip-token"
+		orderTok  = "order-token"
+	)
+	mustExec(t, conn, `INSERT INTO tracker_trips VALUES ($1,'in_transit',$2), ($3,'in_transit',$4)`, trip, tripTok, otherTrip, otherTok)
+	mustExec(t, conn, `INSERT INTO tracker_orders (id, company_id, status, dispatch_to_lat, dispatch_to_lng, trip_id, stop_sequence) VALUES
+		($1,$4,'in_transit',28.6315,77.2167,$5,1),
+		($2,$4,'in_transit',28.7000,77.1000,$5,2),
+		($3,$4,'in_transit',28.5000,77.3000,$6,1)`, stop1, stop2, otherStop, companyID, trip, otherTrip)
+	mustExec(t, conn, `INSERT INTO tracker_orders (id, company_id, status, dispatch_to_lat, dispatch_to_lng, driver_tracking_token)
+		VALUES ($1,$2,'in_transit',28.6,77.2,$3)`, single, companyID, orderTok)
+
+	target := func(token, orderID string, action trackerDriverAction) (trackerDriverStop, *trackerDriverError) {
+		t.Helper()
+		s, e := resolveTrackerDriverTarget(ctx, conn, token, orderID, action)
+		if e != nil && e.Status >= 500 {
+			t.Fatalf("resolve(%s, %s): %v", token, orderID, e)
+		}
+		return s, e
+	}
+	wantErr := func(label string, e *trackerDriverError, status int, code string) {
+		t.Helper()
+		if e == nil || e.Status != status || (code != "" && e.Code != code) {
+			t.Fatalf("%s: err = %+v, want %d %s", label, e, status, code)
+		}
+	}
+	// What the drive page does on Delivered: claim, then upload, both
+	// naming the stop it is showing.
+	claimAndSign := func(token, orderID, url string) trackerDriverStop {
+		t.Helper()
+		s, e := target(token, orderID, trackerActionDeliver)
+		if e != nil {
+			t.Fatalf("claim target(%s, %s): %v", token, orderID, e)
+		}
+		req := trackerDriverEventRequest{Kind: "delivery_claimed", OrderID: orderID, Lat: s.ToLat, Lng: s.ToLng}
+		a, rej := assessTrackerDriverArrival(req, s, testArrivalCfg)
+		if rej != nil {
+			t.Fatalf("claim assess: %+v", rej)
+		}
+		if _, err := recordTrackerDriverEvent(ctx, conn, s, req, a); err != nil {
+			t.Fatalf("claim record: %v", err)
+		}
+		s2, e := target(token, orderID, trackerActionDeliver)
+		if e != nil {
+			t.Fatalf("signature target(%s, %s): %v", token, orderID, e)
+		}
+		if ok, err := saveTrackerDriverSignature(ctx, conn, s2.OrderID, url); err != nil || !ok {
+			t.Fatalf("save signature on %s: ok=%v err=%v", s2.OrderID, ok, err)
+		}
+		return s2
+	}
+	type row struct {
+		status    string
+		signature *string
+		claimed   bool
+	}
+	read := func(id string) row {
+		t.Helper()
+		var r row
+		if err := conn.QueryRow(ctx, `SELECT status, signature_url, delivery_claimed_at IS NOT NULL FROM tracker_orders WHERE id=$1`, id).
+			Scan(&r.status, &r.signature, &r.claimed); err != nil {
+			t.Fatalf("read %s: %v", id, err)
+		}
+		return r
+	}
+
+	// 1. The consignee confirms receipt on stop 1, which marks it delivered
+	// (what tryAutoCompleteDelivery does); the trip's active stop is now 2.
+	mustExec(t, conn, `UPDATE tracker_orders SET status='delivered', received_confirmed_at=NOW() WHERE id=$1`, stop1)
+	if s, e := target(tripTok, "", trackerActionReached); e != nil || s.OrderID != stop2 {
+		t.Fatalf("precondition: active stop = %+v err=%v, want stop2", s, e)
+	}
+
+	// 2. The driver, still on stop 1's page, claims and signs: stop 1.
+	if s := claimAndSign(tripTok, stop1, "https://example.com/stop1.png"); s.OrderID != stop1 {
+		t.Fatalf("signature resolved to %s, want stop1", s.OrderID)
+	}
+	if r := read(stop1); r.signature == nil || *r.signature != "https://example.com/stop1.png" || !r.claimed {
+		t.Fatalf("stop1 after signing: %+v", r)
+	}
+	if r := read(stop2); r.signature != nil || r.claimed {
+		t.Fatalf("stop2 must be untouched: %+v", r)
+	}
+
+	// 3. Delivered + signed accepts nothing more.
+	_, e := target(tripTok, stop1, trackerActionDeliver)
+	wantErr("claim on signed delivered stop", e, 409, "already_signed")
+	if ok, _ := saveTrackerDriverSignature(ctx, conn, stop1, "https://example.com/again.png"); ok {
+		t.Fatal("second signature on a signed delivered order was saved")
+	}
+	_, e = target(tripTok, stop1, trackerActionReached)
+	wantErr("reached on delivered stop", e, 400, "already_delivered")
+
+	// 4. Trip token: claim/signature must name the stop, it must be this
+	// trip's, and garbage ids are just "not on this link".
+	_, e = target(tripTok, "", trackerActionDeliver)
+	wantErr("trip claim without order_id", e, 400, "stop_id_required")
+	_, e = target(tripTok, otherStop, trackerActionDeliver)
+	wantErr("other trip's stop", e, 404, "stop_not_on_link")
+	_, e = target(tripTok, "not-a-uuid", trackerActionDeliver)
+	wantErr("malformed order_id", e, 404, "stop_not_on_link")
+
+	// 5. Cancelled stop: rejected up front and in the UPDATE.
+	mustExec(t, conn, `UPDATE tracker_orders SET status='cancelled' WHERE id=$1`, stop2)
+	_, e = target(tripTok, stop2, trackerActionDeliver)
+	wantErr("cancelled stop", e, 400, "cancelled")
+	if ok, _ := saveTrackerDriverSignature(ctx, conn, stop2, "https://example.com/x.png"); ok {
+		t.Fatal("signature saved on a cancelled order")
+	}
+
+	// 6. The last stop delivered by the consignee completes the trip; the
+	// driver can still sign for it. A cancelled trip takes nothing.
+	mustExec(t, conn, `UPDATE tracker_orders SET status='delivered', received_confirmed_at=NOW() WHERE id=$1`, otherStop)
+	mustExec(t, conn, `UPDATE tracker_trips SET overall_status='completed' WHERE id=$1`, otherTrip)
+	claimAndSign(otherTok, otherStop, "https://example.com/last.png")
+	if r := read(otherStop); r.signature == nil {
+		t.Fatalf("last stop of a completed trip not signed: %+v", r)
+	}
+	mustExec(t, conn, `UPDATE tracker_trips SET overall_status='cancelled' WHERE id=$1`, otherTrip)
+	_, e = target(otherTok, otherStop, trackerActionDeliver)
+	wantErr("cancelled trip", e, 400, "")
+
+	// 7. Single-order token: order_id optional, must match if sent, and a
+	// consignee-delivered unsigned order still takes the claim + signature.
+	if _, e = target(orderTok, "", trackerActionDeliver); e != nil {
+		t.Fatalf("single order without order_id: %v", e)
+	}
+	_, e = target(orderTok, stop1, trackerActionDeliver)
+	wantErr("single token with another order's id", e, 404, "stop_not_on_link")
+	mustExec(t, conn, `UPDATE tracker_orders SET status='delivered', received_confirmed_at=NOW() WHERE id=$1`, single)
+	claimAndSign(orderTok, single, "https://example.com/single.png")
+	if r := read(single); r.signature == nil || !r.claimed {
+		t.Fatalf("consignee-delivered single order after signing: %+v", r)
 	}
 }

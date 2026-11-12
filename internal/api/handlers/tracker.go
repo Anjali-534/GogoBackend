@@ -2934,6 +2934,9 @@ func GetTrackerDriverOrder(c *gin.Context) {
 	// without a destination, the driver page can't fetch/render route
 	// options at all for a trip-based link).
 	//
+	// order_id is the stop this response describes; the page sends it back
+	// with reached / delivery_claimed / signature so they land on that stop
+	// even if the trip advances meanwhile (resolveTrackerDriverTarget).
 	// reached_recorded / delivery_claimed_recorded tell the page how far the
 	// driver already got on the current stop, so a reload resumes there
 	// without re-posting (see loadTrackerStopProgress); arrival_radius_m /
@@ -3004,6 +3007,7 @@ func GetTrackerDriverOrder(c *gin.Context) {
 			"is_trip":                   true,
 			"current_stop_sequence":     currentStopSequence,
 			"total_stops":               totalStops,
+			"order_id":                  activeOrderID,
 			"reached_recorded":          progress.Reached,
 			"delivery_claimed_recorded": progress.DeliveryClaimed,
 			"arrival_radius_m":          arrival.RadiusM,
@@ -3063,6 +3067,7 @@ func GetTrackerDriverOrder(c *gin.Context) {
 		"route_polyline":            routePolyline,
 		"route_distance_km":         routeDistanceKm,
 		"route_duration_mins":       routeDurationMins,
+		"order_id":                  orderID,
 		"reached_recorded":          progress.Reached,
 		"delivery_claimed_recorded": progress.DeliveryClaimed,
 		"arrival_radius_m":          arrival.RadiusM,
@@ -3469,9 +3474,8 @@ func advanceTrackerTripAfterDelivery(ctx context.Context, tripID string) {
 }
 
 // POST /gogoo/public/tracker/driver/:driver_token/event — unauthenticated,
-// token-gated. Records a driver-reported quick-status tap (On Break / About
-// to Reach / Reached / Unloading / Delivered) as an event at the order's
-// CURRENT status — this is never a status transition by itself.
+// token-gated. Records a driver-reported quick-status tap as an event at
+// the order's CURRENT status — this is never a status transition by itself.
 // 'delivery_claimed' is the special kind for the Delivered tap: it's purely
 // informational now (logged as an event, shown in the timeline/Proof of
 // Delivery card) — it is no longer load-bearing for any status transition.
@@ -3480,55 +3484,64 @@ func advanceTrackerTripAfterDelivery(ctx context.Context, tripID string) {
 // event arrives after; the company can also set 'delivered' directly at
 // any time via UpdateTrackerCompanyOrderStatus.
 //
-// The token may be a single order's or a multi-stop trip's (migration 055);
-// a trip token records against its current active stop. 'reached' and
-// 'delivery_claimed' carry the driver's lat/lng/accuracy_m, checked against
-// the arrival radius and stored for audit (see tracker_arrival.go). A
-// duplicate 'reached' for a stop returns 200 with already_reached=true.
+// The token may be a single order's or a multi-stop trip's (migration 055).
+// order_id names the stop the drive page is acting on; claim and signature
+// on a trip token require it and are never re-resolved to another stop
+// (see resolveTrackerDriverTarget). 'reached' and 'delivery_claimed' carry
+// the driver's lat/lng/accuracy_m, checked against the arrival radius and
+// stored for audit (see tracker_arrival.go). A repeat of either for the
+// same stop returns 200 with already_recorded=true. Every rejection is
+// logged with its cause (trackerDriverFail).
 func PostTrackerDriverEvent(c *gin.Context) {
+	const handler = "PostTrackerDriverEvent"
 	driverToken := c.Param("driver_token")
 	var req trackerDriverEventRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		trackerDriverFail(c, handler, "", &trackerDriverError{Status: http.StatusBadRequest, Msg: err.Error()}, nil)
 		return
 	}
 	if !validDriverEventKinds[req.Kind] {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid kind"})
+		trackerDriverFail(c, handler, req.OrderID, &trackerDriverError{Status: http.StatusBadRequest, Msg: "invalid kind " + strconv.Quote(req.Kind)}, nil)
 		return
+	}
+	label := handler + " kind=" + req.Kind
+	action := trackerActionReached
+	if req.Kind == "delivery_claimed" {
+		action = trackerActionDeliver
 	}
 
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 	cfg := c.MustGet("config").(*config.Config)
 
-	stop, terminalMsg, err := resolveTrackerDriverStop(ctx, pool, driverToken)
-	if err != nil && !errors.Is(err, errTrackerLinkNotFound) {
-		log.Printf("PostTrackerDriverEvent: resolve token failed: %v", err)
-	}
-	if respondTrackerDriverStopError(c, terminalMsg, err) {
+	stop, e := resolveTrackerDriverTarget(ctx, pool, driverToken, req.OrderID, action)
+	if e != nil {
+		trackerDriverFail(c, label, req.OrderID, e, nil)
 		return
 	}
 
 	assessment, rejection := assessTrackerDriverArrival(req, stop, trackerArrivalConfigFrom(cfg))
 	if rejection != nil {
-		c.JSON(rejection.Status, rejection.Body)
+		msg, _ := rejection.Body["error"].(string)
+		code, _ := rejection.Body["code"].(string)
+		trackerDriverFail(c, label, stop.OrderID, &trackerDriverError{Status: rejection.Status, Msg: msg, Code: code,
+			Err: fmt.Errorf("distance_m=%v radius_m=%v", rejection.Body["distance_m"], rejection.Body["radius_m"])}, rejection.Body)
 		return
 	}
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		trackerDriverFail(c, label, stop.OrderID, trackerDriverDBError(err), nil)
 		return
 	}
 	defer tx.Rollback(ctx)
 	already, err := recordTrackerDriverEvent(ctx, tx, stop, req, assessment)
-	if err != nil {
-		log.Printf("PostTrackerDriverEvent: record failed for order=%s kind=%s: %v", stop.OrderID, req.Kind, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to add event"})
-		return
+	if err == nil {
+		err = tx.Commit(ctx)
 	}
-	if err := tx.Commit(ctx); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to add event"})
+	if err != nil {
+		trackerDriverFail(c, label, stop.OrderID, &trackerDriverError{Status: http.StatusInternalServerError,
+			Msg: "failed to add event", Err: err}, nil)
 		return
 	}
 	if already {
@@ -3548,38 +3561,45 @@ func PostTrackerDriverEvent(c *gin.Context) {
 	})
 }
 
-// POST /gogoo/public/tracker/driver/:driver_token/signature
+// POST /gogoo/public/tracker/driver/:driver_token/signature?order_id=<stop>
 // (multipart/form-data, field "file") — unauthenticated, token-gated.
 // Uploads the builty signature captured on the drive page's canvas pad and
 // stores it as the order's proof-of-delivery image. Reuses the same
-// Cloudinary/local-disk pattern as UploadTrackerOrderEwayBill. Doesn't flip
-// status directly — hands off to tryAutoCompleteDelivery, which only
-// transitions once a 'delivery_claimed' event, this signature, AND the
-// consignee's receipt response all exist on the order.
+// Cloudinary/local-disk pattern as UploadTrackerOrderEwayBill, then hands
+// off to tryAutoCompleteDelivery.
 //
-// A trip token (migration 055) uploads to its current active stop's order.
+// order_id (query string, so the token/stop check runs before the body is
+// parsed) names the stop being signed for — required on a trip token and
+// never re-resolved to the trip's current active stop. Accepted on an order
+// the consignee already marked delivered as long as it has no signature
+// yet; rejected on cancelled orders (checkTrackerDriverAction). Every
+// rejection is logged with its cause, including Cloudinary's HTTP status
+// and response.
 func UploadTrackerDriverSignature(c *gin.Context) {
+	const handler = "UploadTrackerDriverSignature"
 	driverToken := c.Param("driver_token")
+	requestedOrderID := c.Query("order_id")
 	ctx := context.Background()
 	pool := db.GetDB().GetPool()
 
-	stop, terminalMsg, err := resolveTrackerDriverStop(ctx, pool, driverToken)
-	if err != nil && !errors.Is(err, errTrackerLinkNotFound) {
-		log.Printf("UploadTrackerDriverSignature: resolve token failed: %v", err)
-	}
-	if respondTrackerDriverStopError(c, terminalMsg, err) {
+	stop, e := resolveTrackerDriverTarget(ctx, pool, driverToken, requestedOrderID, trackerActionDeliver)
+	if e != nil {
+		trackerDriverFail(c, handler, requestedOrderID, e, nil)
 		return
 	}
 	orderID, companyID := stop.OrderID, stop.CompanyID
+	fail := func(status int, msg string, err error) {
+		trackerDriverFail(c, handler, orderID, &trackerDriverError{Status: status, Msg: msg, Err: err}, nil)
+	}
 
 	if err := c.Request.ParseMultipartForm(maxFileSize); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "file too large — max 10MB allowed"})
+		fail(http.StatusBadRequest, "file too large — max 10MB allowed", err)
 		return
 	}
 
 	file, header, err := c.Request.FormFile("file")
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "file is required"})
+		fail(http.StatusBadRequest, "file is required", err)
 		return
 	}
 	defer file.Close()
@@ -3590,11 +3610,11 @@ func UploadTrackerDriverSignature(c *gin.Context) {
 	}
 	ext, allowed := allowedMimeTypes[mimeType]
 	if !allowed {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "only JPG, PNG and PDF files allowed"})
+		fail(http.StatusBadRequest, "only JPG, PNG and PDF files allowed", fmt.Errorf("content-type %q", mimeType))
 		return
 	}
 	if header.Size > maxFileSize {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "file must be under 10MB"})
+		fail(http.StatusBadRequest, "file must be under 10MB", fmt.Errorf("size %d", header.Size))
 		return
 	}
 
@@ -3602,38 +3622,41 @@ func UploadTrackerDriverSignature(c *gin.Context) {
 	if os.Getenv("CLOUDINARY_CLOUD_NAME") != "" {
 		secureURL, err := uploadToCloudinary(ctx, file, header.Filename, "signature", orderID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "cloud storage error: " + err.Error()})
+			// err carries Cloudinary's HTTP status and reason (documents.go).
+			fail(http.StatusInternalServerError, "cloud storage error: "+err.Error(), nil)
 			return
 		}
 		fileURL = secureURL
 	} else {
 		uploadDir := filepath.Join("uploads", "tracker", companyID)
 		if err := os.MkdirAll(uploadDir, 0755); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "storage error"})
+			fail(http.StatusInternalServerError, "storage error", err)
 			return
 		}
 		localName := "signature_" + orderID + "_" + uuid.New().String()[:8] + ext
 		filePath := filepath.Join(uploadDir, localName)
 		dst, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save file"})
+			fail(http.StatusInternalServerError, "failed to save file", err)
 			return
 		}
 		_, err = dst.ReadFrom(file)
 		dst.Close()
 		if err != nil {
 			os.Remove(filePath)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to write file"})
+			fail(http.StatusInternalServerError, "failed to write file", err)
 			return
 		}
 		fileURL = "/uploads/tracker/" + companyID + "/" + localName
 	}
 
-	_, err = pool.Exec(ctx, `
-		UPDATE tracker_orders SET signature_url=$1, updated_at=NOW() WHERE id=$2
-	`, fileURL, orderID)
+	saved, err := saveTrackerDriverSignature(ctx, pool, orderID, fileURL)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		fail(http.StatusInternalServerError, "database error", err)
+		return
+	}
+	if !saved {
+		fail(http.StatusConflict, "this order no longer accepts a signature (cancelled, or already signed)", nil)
 		return
 	}
 

@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"errors"
+	"log"
 	"math"
 	"net/http"
 	"strings"
@@ -59,86 +60,194 @@ func trackerArrivalCheck(distanceM, accuracyM float64, cfg trackerArrivalConfig)
 	return distanceM-effectiveTrackerAccuracy(accuracyM, cfg.AccuracyCapM) <= cfg.RadiusM
 }
 
-// ─── Driver token → current stop ───────────────────────────────────────────
+// ─── Driver token → the stop a driver action applies to ────────────────────
 
-var errTrackerLinkNotFound = errors.New("tracking link not found")
-
-// trackerDriverStop is the tracker_orders row a driver token is currently
-// delivering. For a multi-stop trip token (migration 055) that's the
-// lowest stop_sequence not yet delivered/cancelled, the same "active stop"
-// GetTrackerDriverOrder shows the driver; for a single-order token it's
-// that order.
+// trackerDriverStop is the tracker_orders row a driver action applies to.
 type trackerDriverStop struct {
-	OrderID   string
-	CompanyID string
-	Status    string
-	ToLat     *float64
-	ToLng     *float64
-	TripID    string // "" for a single-order token
+	OrderID      string
+	CompanyID    string
+	Status       string
+	ToLat        *float64
+	ToLng        *float64
+	HasSignature bool
+	TripID       string // "" for a single-order token
 }
 
-// resolveTrackerDriverStop returns errTrackerLinkNotFound for an unknown
-// token, and a non-empty terminalMsg (with a nil error) when the token is
-// valid but there is nothing left to deliver.
-func resolveTrackerDriverStop(ctx context.Context, q querier, token string) (stop trackerDriverStop, terminalMsg string, err error) {
+// trackerDriverAction is what the driver is doing; the status rules differ.
+type trackerDriverAction int
+
+const (
+	// trackerActionReached: the 'reached' event.
+	trackerActionReached trackerDriverAction = iota
+	// trackerActionDeliver: 'delivery_claimed' and the signature upload.
+	trackerActionDeliver
+)
+
+// trackerDriverError is a failed driver request: Status/Msg/Code go to the
+// client, Err (if any) only to the log.
+type trackerDriverError struct {
+	Status int
+	Msg    string
+	Code   string
+	Err    error
+}
+
+func (e *trackerDriverError) Error() string {
+	if e.Err != nil {
+		return e.Msg + ": " + e.Err.Error()
+	}
+	return e.Msg
+}
+
+func trackerDriverDBError(err error) *trackerDriverError {
+	return &trackerDriverError{Status: http.StatusInternalServerError, Msg: "database error", Err: err}
+}
+
+var errTrackerStopNotOnLink = &trackerDriverError{Status: http.StatusNotFound, Code: "stop_not_on_link",
+	Msg: "this stop is not part of this tracking link"}
+
+const trackerStopColumns = `id::text, company_id::text, status, dispatch_to_lat, dispatch_to_lng, signature_url IS NOT NULL`
+
+func scanTrackerStop(row pgx.Row, stop *trackerDriverStop) error {
+	return row.Scan(&stop.OrderID, &stop.CompanyID, &stop.Status, &stop.ToLat, &stop.ToLng, &stop.HasSignature)
+}
+
+// resolveTrackerDriverTarget finds the order a driver action applies to.
+//
+// orderID is the stop the drive page was showing when the driver acted
+// (order_id from GetTrackerDriverOrder). It is never swapped for "the
+// current active stop": a trip advances as soon as a consignee confirms
+// receipt, and re-resolving then sent stop 1's claim + signature to stop 2.
+//
+//   - Trip token + orderID: the order must belong to that trip.
+//   - Trip token, no orderID: allowed only for 'reached' (uses the active
+//     stop, as before); claim/signature must name the stop.
+//   - Single-order token: orderID is optional, but must match if sent.
+//
+// Then the action's status rules apply (checkTrackerDriverAction).
+func resolveTrackerDriverTarget(ctx context.Context, q querier, token, orderID string, action trackerDriverAction) (trackerDriverStop, *trackerDriverError) {
+	var stop trackerDriverStop
+
 	var tripID, tripStatus string
-	err = q.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 		SELECT id::text, overall_status FROM tracker_trips WHERE driver_tracking_token = $1
 	`, token).Scan(&tripID, &tripStatus)
 	switch {
 	case err == nil:
-		if tripStatus == "completed" || tripStatus == "cancelled" {
-			return stop, "trip is in a terminal state (" + tripStatus + ") and is no longer tracked", nil
+		if tripStatus == "cancelled" {
+			return stop, &trackerDriverError{Status: http.StatusBadRequest, Msg: "this trip has been cancelled"}
 		}
-		err = q.QueryRow(ctx, `
-			SELECT id::text, company_id::text, status, dispatch_to_lat, dispatch_to_lng
-			FROM tracker_orders
-			WHERE trip_id = $1 AND status NOT IN ('delivered','cancelled')
-			ORDER BY stop_sequence ASC
-			LIMIT 1
-		`, tripID).Scan(&stop.OrderID, &stop.CompanyID, &stop.Status, &stop.ToLat, &stop.ToLng)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return stop, "trip has no remaining stops to deliver", nil
+		if orderID == "" {
+			if action == trackerActionDeliver {
+				return stop, &trackerDriverError{Status: http.StatusBadRequest, Code: "stop_id_required",
+					Msg: "this page is out of date — please reload it and try again"}
+			}
+			err = scanTrackerStop(q.QueryRow(ctx, `
+				SELECT `+trackerStopColumns+`
+				FROM tracker_orders
+				WHERE trip_id = $1 AND status NOT IN ('delivered','cancelled')
+				ORDER BY stop_sequence ASC
+				LIMIT 1
+			`, tripID), &stop)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return stop, &trackerDriverError{Status: http.StatusBadRequest, Msg: "trip has no remaining stops to deliver"}
+			}
+		} else {
+			if uuid.Validate(orderID) != nil {
+				return stop, errTrackerStopNotOnLink
+			}
+			err = scanTrackerStop(q.QueryRow(ctx, `
+				SELECT `+trackerStopColumns+` FROM tracker_orders WHERE id = $1 AND trip_id = $2
+			`, orderID, tripID), &stop)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return stop, errTrackerStopNotOnLink
+			}
 		}
 		if err != nil {
-			return stop, "", err
+			return stop, trackerDriverDBError(err)
 		}
 		stop.TripID = tripID
-		return stop, "", nil
-	case !errors.Is(err, pgx.ErrNoRows):
-		return stop, "", err
+	case errors.Is(err, pgx.ErrNoRows):
+		err = scanTrackerStop(q.QueryRow(ctx, `
+			SELECT `+trackerStopColumns+` FROM tracker_orders WHERE driver_tracking_token = $1
+		`, token), &stop)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return stop, &trackerDriverError{Status: http.StatusNotFound, Msg: "tracking link not found"}
+		}
+		if err != nil {
+			return stop, trackerDriverDBError(err)
+		}
+		if orderID != "" && orderID != stop.OrderID {
+			return stop, errTrackerStopNotOnLink
+		}
+	default:
+		return stop, trackerDriverDBError(err)
 	}
 
-	err = q.QueryRow(ctx, `
-		SELECT id::text, company_id::text, status, dispatch_to_lat, dispatch_to_lng
-		FROM tracker_orders WHERE driver_tracking_token = $1
-	`, token).Scan(&stop.OrderID, &stop.CompanyID, &stop.Status, &stop.ToLat, &stop.ToLng)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return stop, "", errTrackerLinkNotFound
+	if e := checkTrackerDriverAction(stop, action); e != nil {
+		return stop, e
 	}
-	if err != nil {
-		return stop, "", err
-	}
-	if terminalOrderStatuses[stop.Status] {
-		return stop, "order is in a terminal state (" + stop.Status + ") and is no longer tracked", nil
-	}
-	return stop, "", nil
+	return stop, nil
 }
 
-// respondTrackerDriverStopError writes the response for a failed
-// resolveTrackerDriverStop and reports whether it did.
-func respondTrackerDriverStopError(c *gin.Context, terminalMsg string, err error) bool {
+// checkTrackerDriverAction applies the status rules:
+//   - cancelled: nothing is accepted.
+//   - 'reached': not on a delivered order.
+//   - claim/signature: also accepted on a delivered order that has no
+//     signature yet. The consignee's receipt confirmation completes the
+//     delivery on its own (tracker_receipt.go), often before the driver
+//     signs, and the driver's proof of delivery must still be taken. Once
+//     the signature is on file a delivered order accepts nothing more.
+func checkTrackerDriverAction(stop trackerDriverStop, action trackerDriverAction) *trackerDriverError {
 	switch {
-	case errors.Is(err, errTrackerLinkNotFound):
-		c.JSON(http.StatusNotFound, gin.H{"error": "tracking link not found"})
-	case err != nil:
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-	case terminalMsg != "":
-		c.JSON(http.StatusBadRequest, gin.H{"error": terminalMsg})
-	default:
-		return false
+	case stop.Status == "cancelled":
+		return &trackerDriverError{Status: http.StatusBadRequest, Code: "cancelled", Msg: "this order has been cancelled"}
+	case stop.Status != "delivered":
+		return nil
+	case action == trackerActionReached:
+		return &trackerDriverError{Status: http.StatusBadRequest, Code: "already_delivered", Msg: "this order has already been delivered"}
+	case stop.HasSignature:
+		return &trackerDriverError{Status: http.StatusConflict, Code: "already_signed",
+			Msg: "delivery and signature are already recorded for this order"}
 	}
-	return true
+	return nil
+}
+
+// saveTrackerDriverSignature stores the signature URL, re-checking the
+// status rules in the UPDATE itself so a concurrent cancel or a second
+// signature on a delivered order can't slip in between check and write.
+// false means the row no longer accepts a signature.
+func saveTrackerDriverSignature(ctx context.Context, q querier, orderID, fileURL string) (bool, error) {
+	tag, err := q.Exec(ctx, `
+		UPDATE tracker_orders SET signature_url = $1, updated_at = NOW()
+		WHERE id = $2 AND status <> 'cancelled' AND NOT (status = 'delivered' AND signature_url IS NOT NULL)
+	`, fileURL, orderID)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// trackerDriverFail logs every rejected driver request with its cause, so
+// Railway shows why (the drive page only sees Msg), then responds. extra
+// adds fields to the JSON body (e.g. distance_m on a 422).
+func trackerDriverFail(c *gin.Context, handler, orderID string, e *trackerDriverError, extra gin.H) {
+	tok := c.Param("driver_token")
+	if len(tok) > 6 {
+		tok = tok[:6] + "…"
+	}
+	if orderID == "" {
+		orderID = "-"
+	}
+	log.Printf("%s: %d token=%s order=%s: %v", handler, e.Status, tok, orderID, e)
+	body := gin.H{"error": e.Msg}
+	if e.Code != "" {
+		body["code"] = e.Code
+	}
+	for k, v := range extra {
+		body[k] = v
+	}
+	c.JSON(e.Status, body)
 }
 
 // trackerStopProgress is how far the driver has got on one stop, returned
@@ -168,7 +277,10 @@ func loadTrackerStopProgress(ctx context.Context, q querier, orderID string) (tr
 // ─── Event assessment + recording ──────────────────────────────────────────
 
 type trackerDriverEventRequest struct {
-	Kind      string   `json:"kind" binding:"required"`
+	Kind string `json:"kind" binding:"required"`
+	// OrderID is the stop the drive page is acting on (order_id from
+	// GetTrackerDriverOrder); required for delivery_claimed on a trip token.
+	OrderID   string   `json:"order_id"`
 	Note      string   `json:"note"`
 	Lat       *float64 `json:"lat"`
 	Lng       *float64 `json:"lng"`
